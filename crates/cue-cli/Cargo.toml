@@ -17,11 +17,12 @@ cue-subtitles.workspace = true
 cue-llm.workspace = true
 cue-normalization.workspace = true
 cue-analysis.workspace = true
+indicatif = "0.17"
 serde.workspace = true
 serde_json.workspace = true
-usage.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+usage.workspace = true
 
 [dev-dependencies]

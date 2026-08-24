@@ -3,6 +3,7 @@
 
 mod cli;
 mod commands;
+mod events;
 mod logging;
 mod render;
 

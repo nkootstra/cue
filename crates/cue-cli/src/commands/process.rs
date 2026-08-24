@@ -40,22 +40,45 @@ async fn run_inner(cli: &Cue) -> Result<i32> {
     let config = resolve(&[&PartialConfig::default(), &user]);
     tracing::debug!(?config, "resolved configuration");
 
-    for file in &cli.files {
-        process_file(file, cli, &config).await?;
+    // Stage logic emits events; the renderer decides presentation. Core
+    // pipeline behavior never depends on terminal output.
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let renderer = tokio::spawn(crate::events::run_renderer(rx));
+
+    let result: Result<()> = async {
+        for file in &cli.files {
+            process_file(file, cli, &config, &tx).await?;
+        }
+        Ok(())
     }
-    Ok(0)
+    .await;
+
+    drop(tx); // close so the renderer can finish
+    if let Err(join_err) = renderer.await {
+        tracing::warn!(error = %join_err, "event renderer stopped early");
+    }
+
+    result.map(|_| 0)
 }
 
-async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Result<()> {
+async fn process_file(
+    file: &str,
+    cli: &Cue,
+    config: &cue_core::Config,
+    events: &tokio::sync::mpsc::UnboundedSender<cue_core::PipelineEvent>,
+) -> Result<()> {
+    use cue_core::{PipelineEvent, PipelineStage};
+
     let path = PathBuf::from(file);
 
     println_line(&format!("Processing {}...", path.display()));
 
     // ---- Inspect --------------------------------------------------------
     let ffprobe = require_tool("ffprobe", "inspect media files")?;
-    println_line("  [1/6] inspecting");
+    let _ = events.send(PipelineEvent::Started(PipelineStage::Inspect));
     let media = cue_media::probe::inspect(&ffprobe, &path).await?;
     print_media_summary(&media);
+    let _ = events.send(PipelineEvent::Completed(PipelineStage::Inspect));
 
     if !media.has_audio() {
         return Err(CueError::new(
@@ -80,9 +103,11 @@ async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Resul
 
     // ---- Extract --------------------------------------------------------
     let ffmpeg = require_tool("ffmpeg", "extract audio")?;
-    println_line("  [2/6] extracting audio");
     let wav_path = stage_dir.join("audio.wav");
-    if !wav_path.exists() {
+    if wav_path.exists() {
+        let _ = events.send(PipelineEvent::Cached(PipelineStage::Extract));
+    } else {
+        let _ = events.send(PipelineEvent::Started(PipelineStage::Extract));
         extract_audio(
             &ffmpeg,
             &path,
@@ -90,12 +115,10 @@ async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Resul
             &AudioExtractOptions::default(),
         )
         .await?;
-    } else {
-        println_line("         cached");
+        let _ = events.send(PipelineEvent::Completed(PipelineStage::Extract));
     }
 
     // ---- Transcribe -----------------------------------------------------
-    println_line("  [3/6] transcribing");
     let options = cue_transcription::TranscriptionOptions {
         model: config.transcription.model.clone(),
         language: cli.language.clone(),
@@ -117,20 +140,21 @@ async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Resul
 
     let transcript = match load_cached(&transcript_cache, &transcript_cache_key) {
         Some(cached) => {
-            println_line("         cached");
+            let _ = events.send(PipelineEvent::Cached(PipelineStage::Transcribe));
             cached
         }
         None => {
+            let _ = events.send(PipelineEvent::Started(PipelineStage::Transcribe));
             let transcriber =
                 cue_transcription::FasterWhisperTranscriber::resolve(None)?;
             let fresh = transcriber.transcribe(&wav_path, &options).await?;
             store_cached(&transcript_cache, &transcript_cache_key, &fresh);
+            let _ = events.send(PipelineEvent::Completed(PipelineStage::Transcribe));
             fresh
         }
     };
 
     // ---- Normalize (optional; stays local via Ollama) -------------------
-    println_line("  [4/6] normalizing");
     let transcript_hash = cue_cache::bytes_hash(
         serde_json::to_vec(&transcript)
             .map_err(|e| CueError::general("could not hash transcript").because(e.to_string()))?
@@ -143,14 +167,13 @@ async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Resul
         format!("s1|{}|semi-formal|prose|general", config.normalization.provider)
             .as_bytes(),
     );
-
     let normalized_cache = cue_cache::JsonCache::new(stage_dir.join("normalization"));
     let normalization_key =
         format!("{transcript_hash}-{normalization_settings_hash}");
 
     let normalized = match load_cached(&normalized_cache, &normalization_key) {
         Some(cached) => {
-            println_line("         cached");
+            let _ = events.send(PipelineEvent::Cached(PipelineStage::Normalize));
             Some(cached)
         }
         None => {
@@ -162,10 +185,12 @@ async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Resul
             {
                 cue_normalization::NormalizationOutcome::Done(clean) => {
                     store_cached(&normalized_cache, &normalization_key, &clean);
+                    let _ =
+                        events.send(PipelineEvent::Completed(PipelineStage::Normalize));
                     Some(clean)
                 }
                 cue_normalization::NormalizationOutcome::Skipped(reason) => {
-                    println_line(&format!("         skipped — {reason}"));
+                    tracing::info!(reason, "normalization skipped");
                     None
                 }
             }
@@ -175,8 +200,6 @@ async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Resul
     // ---- Analyze (optional; needs a gateway and cleaned text) -----------
     let analysis = match (&config.llm, &normalized) {
         (Some(llm), Some(clean)) => {
-            println_line("  [5/6] analyzing");
-
             let clean_hash = cue_cache::bytes_hash(
                 serde_json::to_vec(clean)
                     .map_err(|e| {
@@ -195,10 +218,11 @@ async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Resul
 
             match load_cached(&analysis_cache, &analysis_key) {
                 Some(cached) => {
-                    println_line("         cached");
+                    let _ = events.send(PipelineEvent::Cached(PipelineStage::Analyze));
                     Some(cached)
                 }
                 None => {
+                    let _ = events.send(PipelineEvent::Started(PipelineStage::Analyze));
                     let client = cue_llm::ChatClient::new(
                         llm.base_url.clone(),
                         llm.api_key(),
@@ -211,10 +235,15 @@ async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Resul
                     {
                         Ok(a) => {
                             store_cached(&analysis_cache, &analysis_key, &a);
+                            let _ =
+                                events.send(PipelineEvent::Completed(PipelineStage::Analyze));
                             Some(a)
                         }
                         Err(err) => {
-                            println_line("         skipped — analysis failed");
+                            let _ = events.send(PipelineEvent::Failed {
+                                stage: PipelineStage::Analyze,
+                                error: err.to_string(),
+                            });
                             tracing::warn!(error = %err, "analysis failed");
                             None
                         }
@@ -223,17 +252,17 @@ async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Resul
             }
         }
         (None, _) => {
-            println_line("         skipped — no LLM gateway configured (local outputs only)");
+            tracing::info!("analysis skipped: no LLM gateway configured");
             None
         }
         (Some(_), None) => {
-            println_line("         skipped — analysis needs cleaned text from S1");
+            tracing::info!("analysis skipped: no cleaned text (S1 unavailable)");
             None
         }
     };
 
     // ---- Render ---------------------------------------------------------
-    println_line("  [6/6] writing outputs");
+    let _ = events.send(PipelineEvent::Started(PipelineStage::Render));
     let out_dir = output_directory(&path, cli)?;
     std::fs::create_dir_all(&out_dir)
         .map_err(|e| CueError::general(format!("could not create output directory {}", out_dir.display())).because(e.to_string()))?;
@@ -280,6 +309,7 @@ async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Resul
         })?;
     }
 
+    let _ = events.send(PipelineEvent::Completed(PipelineStage::Render));
     println_line(&format!(
         "\nDone. Transcript and subtitles written to {}/",
         out_dir.display()
