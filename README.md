@@ -65,7 +65,11 @@ api_key_env = "CUE_LLM_API_KEY"             # key read from env, never stored
 ```bash
 cargo test          # unit + integration tests
 cargo run -- doctor # check the local environment
+scripts/verify.sh   # full gate: fmt, build, test, clippy + end-to-end battery
 ```
+
+`scripts/verify.sh` builds a speech fixture with macOS `say`, runs the whole
+pipeline against a local mock gateway, and asserts on every output artifact.
 
 Requirements: FFmpeg/FFprobe on PATH, Python 3.10+ for the transcription
 worker (auto-provisioned later by `cue doctor --fix`), optionally Ollama for
