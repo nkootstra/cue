@@ -13,15 +13,15 @@ use usage::{Args, Cli, Subcommands};
 #[usage(bin = "cue", version = "0.1.0", unknown_flags = "error")]
 pub struct Cue {
     /// Print diagnostic logging to stderr
-    #[usage(short = 'v', long)]
+    #[usage(short = 'v', long, global)]
     pub verbose: bool,
 
     /// Language of the media content (e.g. "en"); auto-detected when unset
-    #[usage(long)]
+    #[usage(long, global)]
     pub language: Option<String>,
 
     /// Directory for generated outputs
-    #[usage(long)]
+    #[usage(long, global)]
     pub output: Option<String>,
 
     /// Media files to process
@@ -36,12 +36,21 @@ pub struct Cue {
 pub enum Command {
     /// Check the local environment for required and optional tools
     Doctor(DoctorArgs),
+    /// Transcribe files to a canonical transcript without subtitles or AI
+    Transcribe(TranscribeArgs),
     /// Manage transcription and normalization models
     Models(ModelsArgs),
     /// Show resolved configuration and its sources
     Config(ConfigArgs),
     /// Manage the processing cache
     Cache(CacheArgs),
+}
+
+/// Transcribe files
+#[derive(Debug, Args)]
+pub struct TranscribeArgs {
+    /// Media files to transcribe
+    pub files: Vec<String>,
 }
 
 /// Check the local environment
@@ -127,6 +136,29 @@ mod tests {
         let cli = parse_args(&["cue", "doctor", "--fix"]);
         match cli.command.unwrap() {
             Command::Doctor(args) => assert!(args.fix),
+            other => panic!("wrong command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transcribe_takes_files() {
+        let cli = parse_args(&["cue", "transcribe", "a.mp4", "b.mp3"]);
+        match cli.command.unwrap() {
+            Command::Transcribe(args) => {
+                assert_eq!(args.files, vec!["a.mp4", "b.mp3"])
+            }
+            other => panic!("wrong command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn root_flags_apply_to_transcribe() {
+        // --language/--output are root flags; the subcommand only carries
+        // files, so global options stay on the root struct.
+        let cli = parse_args(&["cue", "--language", "de", "transcribe", "a.mp4"]);
+        assert_eq!(cli.language.as_deref(), Some("de"));
+        match cli.command.unwrap() {
+            Command::Transcribe(args) => assert_eq!(args.files, vec!["a.mp4"]),
             other => panic!("wrong command: {other:?}"),
         }
     }

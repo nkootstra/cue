@@ -21,7 +21,19 @@ use crate::cli::Cue;
 use crate::render::{human_duration, println_line};
 
 pub async fn run(cli: &Cue) -> i32 {
-    match run_inner(cli).await {
+    run_stopped(cli, &cli.files, None).await
+}
+
+/// Process files, optionally stopping after a given stage.
+///
+/// `cue transcribe` uses this to produce transcripts without subtitles,
+/// normalization, or analysis.
+pub async fn run_stopped(
+    cli: &Cue,
+    files: &[String],
+    stop_after: Option<cue_core::PipelineStage>,
+) -> i32 {
+    match run_inner(files, stop_after, cli).await {
         Ok(code) => code,
         Err(err) => {
             eprintln!("{err}");
@@ -30,8 +42,12 @@ pub async fn run(cli: &Cue) -> i32 {
     }
 }
 
-async fn run_inner(cli: &Cue) -> Result<i32> {
-    if cli.files.is_empty() {
+async fn run_inner(
+    files: &[String],
+    stop_after: Option<cue_core::PipelineStage>,
+    cli: &Cue,
+) -> Result<i32> {
+    if files.is_empty() {
         print_usage_hint();
         return Ok(0);
     }
@@ -46,8 +62,8 @@ async fn run_inner(cli: &Cue) -> Result<i32> {
     let renderer = tokio::spawn(crate::events::run_renderer(rx));
 
     let result: Result<()> = async {
-        for file in &cli.files {
-            process_file(file, cli, &config, &tx).await?;
+        for file in files {
+            process_file(file, cli, &config, &tx, stop_after).await?;
         }
         Ok(())
     }
@@ -66,6 +82,7 @@ async fn process_file(
     cli: &Cue,
     config: &cue_core::Config,
     events: &tokio::sync::mpsc::UnboundedSender<cue_core::PipelineEvent>,
+    stop_after: Option<cue_core::PipelineStage>,
 ) -> Result<()> {
     use cue_core::{PipelineEvent, PipelineStage};
 
@@ -131,7 +148,6 @@ async fn process_file(
         .as_bytes(),
     );
     let transcript_cache = cue_cache::JsonCache::new(stage_dir.join("transcription"));
-
     let transcript = match load_cached(&transcript_cache, &transcript_cache_key) {
         Some(cached) => {
             let _ = events.send(PipelineEvent::Cached(PipelineStage::Transcribe));
@@ -146,6 +162,29 @@ async fn process_file(
             fresh
         }
     };
+
+    // `cue transcribe` stops here: canonical transcript only.
+    if stop_after == Some(PipelineStage::Transcribe) {
+        let _ = events.send(PipelineEvent::Started(PipelineStage::Render));
+        let out_dir = output_directory(&path, cli)?;
+        std::fs::create_dir_all(&out_dir).map_err(|e| {
+            CueError::general(format!(
+                "could not create output directory {}",
+                out_dir.display()
+            ))
+            .because(e.to_string())
+        })?;
+        write_json(&out_dir.join("transcript.json"), &transcript)?;
+        std::fs::write(out_dir.join("transcript.txt"), transcript.plain_text()).map_err(|e| {
+            CueError::general("could not write transcript.txt").because(e.to_string())
+        })?;
+        let _ = events.send(PipelineEvent::Completed(PipelineStage::Render));
+        println_line(&format!(
+            "\nDone. Transcript written to {}/",
+            out_dir.display()
+        ));
+        return Ok(());
+    }
 
     // ---- Normalize (optional; stays local via Ollama) -------------------
     let transcript_hash = cue_cache::bytes_hash(
