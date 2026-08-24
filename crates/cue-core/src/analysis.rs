@@ -126,7 +126,8 @@ mod tests {
 
     #[test]
     fn chapters_are_sorted_and_skip_invalid_spans() {
-        let chapters = sample().chapters();
+        let sample = sample();
+        let chapters = sample.chapters();
         assert_eq!(chapters.len(), 2, "empty-span topic must be dropped");
         assert_eq!(chapters[0].0, "Introduction");
         assert_eq!(chapters[1].0, "Subtitles");
