@@ -58,6 +58,15 @@ pub struct NormalizationConfig {
     pub provider: String,
     #[serde(default = "default_ollama_url")]
     pub ollama_url: String,
+    /// S1 control-line styling; see the superwhisper/s1-mini model card.
+    #[serde(default = "default_s1_styling")]
+    pub styling: String,
+    /// S1 control-line structure.
+    #[serde(default = "default_s1_structure")]
+    pub structure: String,
+    /// S1 control-line context.
+    #[serde(default = "default_s1_context")]
+    pub context: String,
 }
 
 fn default_normalization_provider() -> String {
@@ -68,11 +77,26 @@ fn default_ollama_url() -> String {
     "http://localhost:11434".into()
 }
 
+fn default_s1_styling() -> String {
+    "semi-formal".into()
+}
+
+fn default_s1_structure() -> String {
+    "prose".into()
+}
+
+fn default_s1_context() -> String {
+    "general".into()
+}
+
 impl Default for NormalizationConfig {
     fn default() -> Self {
         Self {
             provider: default_normalization_provider(),
             ollama_url: default_ollama_url(),
+            styling: default_s1_styling(),
+            structure: default_s1_structure(),
+            context: default_s1_context(),
         }
     }
 }
@@ -247,6 +271,9 @@ partial_section!(
     NormalizationConfig,
     provider: String,
     ollama_url: String,
+    styling: String,
+    structure: String,
+    context: String,
 );
 
 partial_section!(
@@ -396,6 +423,9 @@ mod tests {
         assert_eq!(config.transcription.model, "large-v3-turbo");
         assert_eq!(config.normalization.provider, "s1");
         assert_eq!(config.normalization.ollama_url, "http://localhost:11434");
+        assert_eq!(config.normalization.styling, "semi-formal");
+        assert_eq!(config.normalization.structure, "prose");
+        assert_eq!(config.normalization.context, "general");
         assert_eq!(
             config.subtitles.formats,
             vec![SubtitleFormat::Srt, SubtitleFormat::Vtt]
@@ -458,6 +488,18 @@ mod tests {
         };
         let config = resolve(&[&no_llm, &with_llm]);
         assert_eq!(config.llm, None);
+    }
+
+    #[test]
+    fn parses_s1_control_line_knobs() {
+        let partial = parse_toml(
+            "[normalization]\nstyling = \"formal\"\nstructure = \"bullets\"\ncontext = \"technical\"\n",
+        )
+        .unwrap();
+        let config = resolve(&[&partial]);
+        assert_eq!(config.normalization.styling, "formal");
+        assert_eq!(config.normalization.structure, "bullets");
+        assert_eq!(config.normalization.context, "technical");
     }
 
     #[test]

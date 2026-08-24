@@ -154,12 +154,20 @@ async fn process_file(
             .as_slice(),
     );
 
-    // Effective S1 settings participate in the key; when styling/structure/
-    // context become configurable they must join this string.
+    // Effective S1 settings participate in the key: changing the control
+    // line re-normalizes.
+    let s1_settings = cue_normalization::S1Settings {
+        styling: config.normalization.styling.clone(),
+        structure: config.normalization.structure.clone(),
+        context: config.normalization.context.clone(),
+    };
     let normalization_settings_hash = cue_cache::bytes_hash(
         format!(
-            "s1|{}|semi-formal|prose|general",
-            config.normalization.provider
+            "s1|{}|{}|{}|{}",
+            config.normalization.provider,
+            s1_settings.styling,
+            s1_settings.structure,
+            s1_settings.context
         )
         .as_bytes(),
     );
@@ -174,6 +182,7 @@ async fn process_file(
         None => {
             match cue_normalization::normalize_if_ready(
                 &config.normalization.ollama_url,
+                s1_settings,
                 &transcript,
             )
             .await

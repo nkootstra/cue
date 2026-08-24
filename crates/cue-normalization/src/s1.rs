@@ -14,17 +14,17 @@ use crate::chunk::{TranscriptChunk, chunk_transcript};
 /// Styling knobs from S1's control line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct S1Settings {
-    pub styling: &'static str,
-    pub structure: &'static str,
-    pub context: &'static str,
+    pub styling: String,
+    pub structure: String,
+    pub context: String,
 }
 
 impl Default for S1Settings {
     fn default() -> Self {
         Self {
-            styling: "semi-formal",
-            structure: "prose",
-            context: "general",
+            styling: "semi-formal".into(),
+            structure: "prose".into(),
+            context: "general".into(),
         }
     }
 }

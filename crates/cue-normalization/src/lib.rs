@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use cue_core::{NormalizedTranscript, Result, Transcript};
 
 pub use chunk::{TranscriptChunk, chunk_transcript};
-pub use s1::S1Normalizer;
+pub use s1::{S1Normalizer, S1Settings};
 
 /// A provider that rewrites raw transcript text into clean prose.
 ///
@@ -62,7 +62,11 @@ pub enum NormalizationOutcome {
 }
 
 /// Normalize via S1 when available; produce a skip reason otherwise.
-pub async fn normalize_if_ready(ollama_url: &str, transcript: &Transcript) -> NormalizationOutcome {
+pub async fn normalize_if_ready(
+    ollama_url: &str,
+    settings: S1Settings,
+    transcript: &Transcript,
+) -> NormalizationOutcome {
     let admin = cue_llm::OllamaAdmin::new(ollama_url);
     if !s1_ready(&admin).await {
         return NormalizationOutcome::Skipped(format!(
@@ -70,7 +74,11 @@ pub async fn normalize_if_ready(ollama_url: &str, transcript: &Transcript) -> No
         ));
     }
 
-    match S1Normalizer::new(ollama_url).normalize(transcript).await {
+    match S1Normalizer::new(ollama_url)
+        .with_settings(settings)
+        .normalize(transcript)
+        .await
+    {
         Ok(clean) => NormalizationOutcome::Done(clean),
         Err(err) => NormalizationOutcome::Skipped(err.to_string()),
     }
