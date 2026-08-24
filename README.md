@@ -11,6 +11,35 @@ produces a `video.cue/` directory containing transcripts (`json`, `txt`,
 cleaned `txt`), subtitles (`srt`, `vtt`) and — when an LLM gateway is
 configured — summaries, descriptions, and chapters.
 
+## Installation
+
+**Homebrew** (macOS and Linux):
+
+```bash
+brew install nkootstra/tap/cue
+```
+
+**Install script** (macOS and Linux, no Rust required):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nkootstra/cue/main/install.sh | sh
+```
+
+Installs to `~/.local/bin` (override with `CUE_INSTALL_DIR`); pin a release
+with `--version vX.Y.Z`.
+
+**With Rust toolchain:**
+
+```bash
+cargo install --git https://github.com/nkootstra/cue cue
+```
+
+The binary is self-contained — the Python transcription worker and its
+pinned dependencies are embedded and provisioned on demand. Runtime
+requirements: FFmpeg on PATH (`brew install ffmpeg` / `apt install ffmpeg`);
+Ollama optional, for S1 transcript cleanup. After installing, run
+`cue doctor` to check your environment.
+
 ## Status
 
 Work in progress.
