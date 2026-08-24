@@ -1,7 +1,11 @@
 //! `cue doctor` — inspect the local environment, optionally fixing it.
+//!
+//! Required tools gate the exit code; optional integrations (Ollama, S1,
+//! an LLM gateway) are reported without failing local-only setups.
 
-use cue_media::ToolStatus;
-use cue_media::check_environment;
+use cue_core::config::{PartialConfig, load_user_config, resolve};
+use cue_llm::OllamaAdmin;
+use cue_media::{ToolReport, check_environment};
 
 use crate::cli::DoctorArgs;
 use crate::render::{println_line, tool_line};
@@ -11,8 +15,16 @@ pub async fn run(args: DoctorArgs) -> i32 {
     println_line("Checking local environment...\n");
     let env = check_environment().await;
 
+    println_line("Required:");
     for report in &env.reports {
         println_line(&tool_line(report));
+    }
+
+    println_line("\nOptional:");
+    let user = load_user_config().unwrap_or_default();
+    let config = resolve(&[&PartialConfig::default(), &user]);
+    for line in integration_lines(&config).await {
+        println_line(&line);
     }
 
     let fixed_ok = if args.fix {
@@ -32,10 +44,72 @@ pub async fn run(args: DoctorArgs) -> i32 {
             0
         }
         (_, _) => {
-            println_line("\nSome tools are missing. Install FFmpeg (and Python 3.10+) to");
-            println_line("process media files, or run `cue doctor --fix` to set up the");
-            println_line("Python transcription environment.");
+            println_line("\nSome required tools are missing. Install FFmpeg (and");
+            println_line("Python 3.10+), or run `cue doctor --fix` to set up the Python");
+            println_line("transcription environment.");
             1
+        }
+    }
+}
+
+/// Status lines for the optional integrations, in display order.
+pub async fn integration_lines(config: &cue_core::Config) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    // Ollama reachability and S1 presence share one probe.
+    let admin = OllamaAdmin::new(&config.normalization.ollama_url);
+    match admin.list_models().await {
+        Ok(_) => {
+            lines.push(format!(
+                "{:<10} ok       {}",
+                "Ollama", config.normalization.ollama_url
+            ));
+            lines.push(s1_line(
+                cue_normalization::s1_ready(&admin).await,
+                cue_normalization::S1_MODEL_NAME,
+            ));
+        }
+        Err(reason) => {
+            lines.push(format!(
+                "{:<10} missing  not reachable at {}",
+                "Ollama", config.normalization.ollama_url
+            ));
+            tracing::debug!(reason = %reason, "ollama probe failed");
+            lines.push(s1_line(false, cue_normalization::S1_MODEL_NAME));
+        }
+    }
+
+    lines.push(llm_line(config.llm.as_ref()));
+    lines
+}
+
+fn s1_line(installed: bool, model_name: &str) -> String {
+    if installed {
+        format!("{:<10} ok       {model_name} ready", "S1")
+    } else {
+        format!(
+            "{:<10} missing  run `cue models install s1` for cleaned transcripts",
+            "S1"
+        )
+    }
+}
+
+fn llm_line(llm: Option<&cue_core::config::LlmConfig>) -> String {
+    match llm {
+        None => format!(
+            "{:<10} off      no gateway configured; local outputs still work",
+            "LLM"
+        ),
+        Some(config) => {
+            let key_state = if config.api_key().is_some() {
+                "key set".to_string()
+            } else {
+                format!("env var {} is unset", config.api_key_env)
+            };
+            format!(
+                "{:<10} ok       {} ({}, {key_state})",
+                "LLM", config.base_url, config.model
+            )
         }
     }
 }
@@ -78,9 +152,46 @@ async fn try_fix(env: &cue_media::checks::Environment) -> bool {
 
 /// Prefer the checked system python for creating the venv.
 fn python_for_provisioning(env: &cue_media::checks::Environment) -> Option<std::path::PathBuf> {
-    let report = env.python()?;
+    let report: &ToolReport = env.python()?;
     match &report.status {
-        ToolStatus::Available { path, .. } => Some(std::path::PathBuf::from(path)),
+        cue_media::ToolStatus::Available { path, .. } => Some(std::path::PathBuf::from(path)),
         _ => cue_media::tools::find_on_path("python3"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn s1_line_distinguishes_installed_from_missing() {
+        let ok = s1_line(true, "cue-s1-mini");
+        assert!(ok.contains("ready"), "{ok}");
+
+        let missing = s1_line(false, "cue-s1-mini");
+        assert!(missing.contains("missing"), "{missing}");
+        assert!(missing.contains("models install"), "{missing}");
+    }
+
+    #[test]
+    fn llm_line_reports_off_when_unconfigured() {
+        let line = llm_line(None);
+        assert!(line.contains("off"), "{line}");
+        assert!(line.contains("local outputs still work"), "{line}");
+    }
+
+    #[test]
+    fn llm_line_reports_key_state() {
+        let configured = cue_core::config::LlmConfig {
+            base_url: "https://openrouter.ai/api/v1".into(),
+            model: "test-model".into(),
+            api_key_env: "CURE_DEFINITELY_UNSET_VAR_12345".into(),
+        };
+        let line = llm_line(Some(&configured));
+        assert!(line.contains("https://openrouter.ai/api/v1"), "{line}");
+        assert!(
+            line.contains("CURE_DEFINITELY_UNSET_VAR_12345 is unset"),
+            "{line}"
+        );
     }
 }
