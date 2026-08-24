@@ -1,0 +1,5 @@
+---
+source: crates/cue-subtitles/src/render.rs
+expression: vtt
+---
+"WEBVTT\n\n00:01.000 --> 00:03.500\nhello world.\n\n00:03.600 --> 01:05.250\nsecond line\ntext\n\n"

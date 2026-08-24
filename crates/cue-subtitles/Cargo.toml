@@ -6,3 +6,6 @@ license.workspace = true
 
 [dependencies]
 cue-core.workspace = true
+
+[dev-dependencies]
+insta = { version = "1", features = ["yaml"] }
