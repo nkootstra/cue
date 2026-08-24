@@ -1,0 +1,2 @@
+# Pinned so the auto-provisioned venv is reproducible.
+faster-whisper==1.2.1
