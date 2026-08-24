@@ -1,0 +1,12 @@
+/target
+Cargo.lock.orig
+*.swp
+.DS_Store
+
+# Python worker venvs created by `cue doctor --fix`
+.venv/
+__pycache__/
+*.pyc
+
+# Local scratch outputs
+*.cue/

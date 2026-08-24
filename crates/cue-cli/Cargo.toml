@@ -1,0 +1,19 @@
+[package]
+name = "cue-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "cue"
+path = "src/main.rs"
+
+[dependencies]
+cue-core.workspace = true
+cue-media.workspace = true
+usage.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]

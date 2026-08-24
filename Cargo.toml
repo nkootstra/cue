@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cue-cli",
+    "crates/cue-core",
+    "crates/cue-media",
+    "crates/cue-transcription",
+    "crates/cue-normalization",
+    "crates/cue-subtitles",
+    "crates/cue-analysis",
+    "crates/cue-cache",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/nielskootstra/cue"
+
+[workspace.dependencies]
+cue-core = { path = "crates/cue-core" }
+cue-media = { path = "crates/cue-media" }
+cue-cache = { path = "crates/cue-cache" }
+
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+tracing = "0.1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Pinned exactly: usage-rs is experimental and point releases may break.
+usage = { package = "usage-rs", version = "=6.3.0" }
+
+[profile.release]
+lto = true
+strip = true
