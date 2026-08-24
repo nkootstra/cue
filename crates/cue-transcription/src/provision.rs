@@ -156,7 +156,7 @@ mod tests {
     #[test]
     fn unprovisioned_venv_is_detected() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(!is_provisioned(&dir.path().to_path_buf()));
+        assert!(!is_provisioned(dir.path()));
     }
 
     #[test]
