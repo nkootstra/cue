@@ -1,17 +1,29 @@
 //! Subtitle generation from the canonical transcript.
 
+pub mod lines;
 pub mod render;
 pub mod segment;
 
+pub use lines::break_lines;
 pub use render::{render_srt, render_vtt};
 pub use segment::{segment, Cue, SubtitlePolicy};
+
+use cue_core::Transcript;
+
+/// Build finished subtitle cues: segment the transcript, then apply line
+/// breaking per the policy.
+pub fn build_cues(transcript: &Transcript, policy: &SubtitlePolicy) -> Vec<Cue> {
+    let mut cues = segment(transcript, policy);
+    for cue in &mut cues {
+        cue.text = break_lines(&cue.text, policy);
+    }
+    cues
+}
 
 #[cfg(test)]
 mod tests {
     use super::segment::{segment, Cue, SubtitlePolicy};
-    use cue_core::{Segment, Transcript, Word, TRANSCRIPT_SCHEMA_VERSION};
-
-    fn word(text: &str, start_ms: u64, end_ms: u64) -> Word {
+    use cue_core::{Segment, Transcript, Word, TRANSCRIPT_SCHEMA_VERSION};    fn word(text: &str, start_ms: u64, end_ms: u64) -> Word {
         Word {
             text: text.into(),
             start_ms,
@@ -196,6 +208,35 @@ mod tests {
         let cues: Vec<Cue> = segment(&t, &SubtitlePolicy::default());
         for cue in &cues {
             assert!(cue.start_ms <= cue.end_ms, "{cue:?}");
+        }
+    }
+
+    #[test]
+    fn build_cues_applies_line_breaking() {
+        use super::build_cues;
+
+        // A cue long enough to wrap at 20 chars per line.
+        let t = transcript(vec![
+            word("the", 0, 100),
+            word("quick", 110, 200),
+            word("brown", 210, 300),
+            word("fox", 310, 400),
+            word("jumps.", 410, 500),
+            word("more", 600, 700),
+            word("words", 710, 800),
+            word("here.", 810, 900),
+        ]);
+        let policy = SubtitlePolicy {
+            max_lines: 2,
+            max_chars_per_line: 20,
+            ..SubtitlePolicy::default()
+        };
+        let cues = build_cues(&t, &policy);
+        assert!(!cues.is_empty());
+        for cue in &cues {
+            for line in cue.text.lines() {
+                assert!(line.chars().count() <= 20, "{:?}", cue.text);
+            }
         }
     }
 }
