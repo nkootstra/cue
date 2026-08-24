@@ -110,6 +110,14 @@ check "doctor optional ok" bash -c "env CUE_CONFIG_DIR=$CFG_DIR $CUE doctor | gr
 check "models list"        bash -c "env CUE_CONFIG_DIR=$CFG_DIR $CUE models list | grep -q cue-s1-mini"
 check "models check ok"    bash -c "env CUE_CONFIG_DIR=$CFG_DIR $CUE models check"
 
+echo
+echo "== transcribe subcommand =="
+rm -rf /tmp/cue-verify-trans
+check "transcribe runs" env CUE_CONFIG_DIR=$CFG_DIR $CUE transcribe /tmp/cue-verify-speech.mp3 --output /tmp/cue-verify-trans
+check "transcript exists"     test -s /tmp/cue-verify-trans/transcript.txt
+check_fail "no subtitles"     test -s /tmp/cue-verify-trans/subtitles.srt
+check_fail "no analysis"      test -s /tmp/cue-verify-trans/analysis.json
+
 kill $GW 2>/dev/null || true
 
 echo
