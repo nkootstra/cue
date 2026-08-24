@@ -13,6 +13,7 @@ cue-core.workspace = true
 cue-media.workspace = true
 cue-cache.workspace = true
 cue-transcription.workspace = true
+cue-subtitles.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 usage.workspace = true

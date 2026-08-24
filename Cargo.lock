@@ -118,6 +118,7 @@ dependencies = [
  "cue-cache",
  "cue-core",
  "cue-media",
+ "cue-subtitles",
  "cue-transcription",
  "serde",
  "serde_json",

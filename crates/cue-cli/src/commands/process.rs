@@ -112,8 +112,32 @@ async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Resul
     std::fs::write(out_dir.join("transcript.txt"), transcript.plain_text())
         .map_err(|e| CueError::general("could not write transcript.txt").because(e.to_string()))?;
 
+    // Subtitles derive from the canonical transcript, never from cleaned
+    // text.
+    let policy = cue_subtitles::SubtitlePolicy {
+        max_lines: config.subtitles.max_lines,
+        max_chars_per_line: config.subtitles.max_chars_per_line,
+        max_duration_ms: config.subtitles.max_duration_ms,
+        max_chars_per_second: config.subtitles.max_chars_per_second,
+    };
+    let cues = cue_subtitles::build_cues(&transcript, &policy);
+    for format in &config.subtitles.formats {
+        let path = out_dir.join(format!("subtitles.{}", format.extension()));
+        let content = match format {
+            cue_core::config::SubtitleFormat::Srt => {
+                cue_subtitles::render_srt(&cues)
+            }
+            cue_core::config::SubtitleFormat::Vtt => {
+                cue_subtitles::render_vtt(&cues)
+            }
+        };
+        std::fs::write(&path, content).map_err(|e| {
+            CueError::general(format!("could not write {}", path.display())).because(e.to_string())
+        })?;
+    }
+
     println_line(&format!(
-        "\nDone. Transcript written to {}/",
+        "\nDone. Transcript and subtitles written to {}/",
         out_dir.display()
     ));
     Ok(())
