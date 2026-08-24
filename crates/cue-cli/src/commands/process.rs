@@ -101,7 +101,53 @@ async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Resul
         model: config.transcription.model.clone(),
         language: cli.language.clone(),
     };
-    let transcript = transcriber.transcribe(&wav_path, &options).await?;
+
+    // Cache key: provider + model + language over the extracted audio's
+    // bytes. Any change re-transcribes; reruns with the same settings don't.
+    let transcript_cache_key = cue_cache::bytes_hash(
+        format!(
+            "faster-whisper|{}|{}|{}",
+            options.model,
+            options.language.as_deref().unwrap_or("auto"),
+            cue_cache::file_hash(&wav_path)?
+        )
+        .as_bytes(),
+    );
+    let transcript_cache =
+        stage_dir.join("transcription").join(format!("{transcript_cache_key}.json"));
+
+    let transcript = if transcript_cache.exists() {
+        println_line("         cached");
+        match std::fs::read_to_string(&transcript_cache)
+            .map_err(|e| CueError::general("could not read cached transcript").because(e.to_string()))
+            .and_then(|text| {
+                serde_json::from_str::<cue_core::Transcript>(&text)
+                    .map_err(|e| {
+                        CueError::general("cached transcript is corrupt")
+                            .because(e.to_string())
+                            .remedy("delete the file or run `cue cache clear`")
+                    })
+            }) {
+            Ok(cached) => Some(cached),
+            Err(err) => {
+                tracing::warn!(error = %err, "ignoring bad cache entry");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let transcript = match transcript {
+        Some(t) => t,
+        None => {
+            let fresh = transcriber.transcribe(&wav_path, &options).await?;
+            std::fs::create_dir_all(transcript_cache.parent().unwrap())
+                .map_err(|e| CueError::general("could not create transcription cache dir").because(e.to_string()))?;
+            write_json(&transcript_cache, &fresh)?;
+            fresh
+        }
+    };
 
     // ---- Normalize (optional; stays local via Ollama) -------------------
     println_line("  [4/6] normalizing");
