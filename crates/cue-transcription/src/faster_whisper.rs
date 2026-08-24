@@ -37,7 +37,7 @@ impl FasterWhisperTranscriber {
     }
 
     fn failure(&self, stderr: &str) -> CueError {
-        let tail = stderr_tail(stderr);
+        let tail = crate::stderr_tail(stderr);
         CueError::new(
             PipelineStage::Transcribe,
             "the faster-whisper worker failed",
@@ -48,12 +48,6 @@ impl FasterWhisperTranscriber {
              working environment",
         )
     }
-}
-
-fn stderr_tail(stderr: &str) -> String {
-    let lines: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).collect();
-    let start = lines.len().saturating_sub(5);
-    lines[start..].join("\n")
 }
 
 #[async_trait]
@@ -98,7 +92,10 @@ impl Transcriber for FasterWhisperTranscriber {
                 PipelineStage::Transcribe,
                 "the faster-whisper worker produced unreadable output",
             )
-            .because(format!("{e}; stderr tail: {}", stderr_tail(&String::from_utf8_lossy(&output.stderr))))
+            .because(format!(
+                "{e}; stderr tail: {}",
+                crate::stderr_tail(&String::from_utf8_lossy(&output.stderr))
+            ))
         })?;
 
         Ok(parsed.into_transcript())
@@ -199,7 +196,7 @@ sys.exit(3)
 
     #[test]
     fn stderr_tail_keeps_last_lines_only() {
-        let tail = stderr_tail("line1\nline2\nline3\nline4\nline5\nline6\nline7");
+        let tail = crate::stderr_tail("line1\nline2\nline3\nline4\nline5\nline6\nline7");
         assert!(!tail.contains("line1"));
         assert!(!tail.contains("line2"));
         assert!(tail.contains("line7"));

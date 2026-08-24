@@ -6,6 +6,7 @@
 pub mod env;
 pub mod faster_whisper;
 pub mod options;
+pub mod provision;
 pub mod worker;
 
 use std::path::Path;
@@ -17,10 +18,18 @@ use cue_core::{Result, Transcript};
 pub use env::WorkerEnvironment;
 pub use faster_whisper::FasterWhisperTranscriber;
 pub use options::TranscriptionOptions;
+pub use provision::{provision, ProvisionAction};
 
 /// PATH lookup re-exported from cue-media for environment resolution.
 pub(crate) fn find_binary_on_path(name: &str) -> Option<PathBuf> {
     cue_media::tools::find_on_path(name)
+}
+
+/// Last few non-empty lines of a subprocess stderr, for error causes.
+pub(crate) fn stderr_tail(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).collect();
+    let start = lines.len().saturating_sub(5);
+    lines[start..].join("\n")
 }
 
 /// A provider that turns audio into a canonical transcript.
