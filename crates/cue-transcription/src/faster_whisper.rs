@@ -58,6 +58,16 @@ impl Transcriber for FasterWhisperTranscriber {
 
     #[instrument(skip(self, input, options), fields(model = %options.model))]
     async fn transcribe(&self, input: &Path, options: &TranscriptionOptions) -> Result<Transcript> {
+        self.transcribe_with_progress(input, options, None).await
+    }
+
+    #[instrument(skip(self, input, options, progress), fields(model = %options.model))]
+    async fn transcribe_with_progress(
+        &self,
+        input: &Path,
+        options: &TranscriptionOptions,
+        progress: Option<tokio::sync::mpsc::UnboundedSender<cue_core::PipelineEvent>>,
+    ) -> Result<Transcript> {
         debug!(worker = %self.env.script.display(), "launching worker");
 
         let mut command = tokio::process::Command::new(&self.env.python);
@@ -74,25 +84,79 @@ impl Transcriber for FasterWhisperTranscriber {
             command.arg("--language").arg(language);
         }
 
-        let output = command.output().await.map_err(|e| self.spawn_error(e))?;
+        let mut child = command.spawn().map_err(|e| self.spawn_error(e))?;
 
-        if !output.status.success() {
-            return Err(self.failure(&String::from_utf8_lossy(&output.stderr)));
+        // Drain stderr concurrently: PROGRESS markers become pipeline
+        // events, everything else is kept for error tails and debug logs.
+        let stderr = child.stderr.take().expect("stderr was piped");
+        let stderr_task = tokio::spawn(drain_stderr(stderr, progress));
+
+        let stdout = child.stdout.take().expect("stdout was piped");
+        let stdout_task = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf = Vec::new();
+            let mut stdout = stdout;
+            stdout
+                .read_to_end(&mut buf)
+                .await
+                .map(|_| buf)
+                .map_err(|e| e.to_string())
+        });
+
+        let status = child.wait().await.map_err(|e| self.spawn_error(e))?;
+        let stdout_bytes = stdout_task
+            .await
+            .map_err(|e| CueError::general("worker stdout reader failed").because(e.to_string()))?
+            .map_err(|e| CueError::general("could not read worker stdout").because(e))?;
+        let stderr_text = stderr_task.await.unwrap_or_default();
+
+        if !status.success() {
+            return Err(self.failure(&stderr_text));
         }
 
-        let parsed: WorkerOutput = serde_json::from_slice(&output.stdout).map_err(|e| {
+        let parsed: WorkerOutput = serde_json::from_slice(&stdout_bytes).map_err(|e| {
             CueError::new(
                 PipelineStage::Transcribe,
                 "the faster-whisper worker produced unreadable output",
             )
             .because(format!(
                 "{e}; stderr tail: {}",
-                crate::stderr_tail(&String::from_utf8_lossy(&output.stderr))
+                crate::stderr_tail(&String::from_utf8_lossy(&stdout_bytes))
             ))
         })?;
 
         Ok(parsed.into_transcript())
     }
+}
+
+/// Read worker stderr to completion, forwarding `PROGRESS <fraction>` lines
+/// as pipeline events and returning the full text for error tails.
+async fn drain_stderr(
+    stderr: impl tokio::io::AsyncRead + Unpin,
+    progress: Option<tokio::sync::mpsc::UnboundedSender<cue_core::PipelineEvent>>,
+) -> String {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let mut collected = String::new();
+    let mut lines = BufReader::new(stderr).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        collected.push_str(&line);
+        collected.push('\n');
+        if let Some(rest) = line.strip_prefix("PROGRESS ")
+            && let Ok(fraction) = rest.trim().parse::<f32>()
+            && let Some(sender) = &progress
+        {
+            let percent = (fraction.clamp(0.0, 1.0) * 100.0).round() as u64;
+            let _ = sender.send(cue_core::PipelineEvent::Progress {
+                stage: PipelineStage::Transcribe,
+                current: percent,
+                total: Some(100),
+            });
+        } else if !line.trim().is_empty() {
+            debug!(target: "cue_worker", "{line}");
+        }
+    }
+    collected
 }
 
 #[cfg(test)]
@@ -189,6 +253,66 @@ sys.exit(3)
         let rendered = err.to_string();
         assert!(rendered.contains("model not found"), "{rendered}");
         assert!(rendered.contains("cue doctor"), "{rendered}");
+    }
+
+    const FAKE_PROGRESS_SCRIPT: &str = r#"
+import json, sys
+for pct in ("0.25", "0.5", "0.75"):
+    sys.stderr.write(f"PROGRESS {pct}\n")
+    sys.stderr.flush()
+sys.stdout.write(json.dumps({
+    "version": 1, "language": "en", "duration": 2.0,
+    "segments": [{"id": 0, "start": 0.0, "end": 2.0, "text": " done.",
+                  "words": [{"word": " done.", "start": 0.0, "end": 2.0,
+                             "probability": 0.9}]}]
+}))
+"#;
+
+    #[tokio::test]
+    async fn progress_markers_become_pipeline_events() {
+        let dir = temp_dir("progress");
+        let script = write_script(&dir, "fake_progress.py", FAKE_PROGRESS_SCRIPT);
+        let transcriber = FasterWhisperTranscriber::new(WorkerEnvironment {
+            python: python(),
+            script,
+        });
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let transcript = transcriber
+            .transcribe_with_progress(
+                &fake_input(&dir),
+                &TranscriptionOptions::default(),
+                Some(tx),
+            )
+            .await
+            .unwrap();
+        assert_eq!(transcript.words.len(), 1);
+
+        let mut percents = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let cue_core::PipelineEvent::Progress { current, total, .. } = event {
+                assert_eq!(total, Some(100));
+                percents.push(current);
+            }
+        }
+        assert_eq!(percents, vec![25, 50, 75]);
+    }
+
+    #[tokio::test]
+    async fn plain_transcribe_ignores_progress_markers() {
+        let dir = temp_dir("noprogress");
+        let script = write_script(&dir, "fake_progress2.py", FAKE_PROGRESS_SCRIPT);
+        let transcriber = FasterWhisperTranscriber::new(WorkerEnvironment {
+            python: python(),
+            script,
+        });
+
+        // PROGRESS lines on stderr are simply ignored.
+        let transcript = transcriber
+            .transcribe(&fake_input(&dir), &TranscriptionOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(transcript.language, "en");
     }
 
     #[test]

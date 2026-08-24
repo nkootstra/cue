@@ -39,4 +39,20 @@ pub trait Transcriber: Send + Sync {
     fn name(&self) -> &str;
 
     async fn transcribe(&self, input: &Path, options: &TranscriptionOptions) -> Result<Transcript>;
+
+    /// Like [`Transcriber::transcribe`], reporting progress when the
+    /// provider supports it.
+    ///
+    /// Progress arrives as [`PipelineEvent::Progress`] with `current` as a
+    /// percentage (0-100) and `total` of 100. The default delegates to
+    /// `transcribe` without reporting anything.
+    async fn transcribe_with_progress(
+        &self,
+        input: &Path,
+        options: &TranscriptionOptions,
+        progress: Option<tokio::sync::mpsc::UnboundedSender<cue_core::PipelineEvent>>,
+    ) -> Result<Transcript> {
+        let _ = progress;
+        self.transcribe(input, options).await
+    }
 }

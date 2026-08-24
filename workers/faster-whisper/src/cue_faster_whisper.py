@@ -104,6 +104,11 @@ def transcribe(input_path: str, model_name: str, language: str | None) -> int:
                 "words": words,
             }
         )
+        # Machine-readable progress on stderr: the Rust adapter parses
+        # PROGRESS lines; anything else here is a human log.
+        if info.duration and info.duration > 0:
+            fraction = min(segment.end / info.duration, 1.0)
+            print(f"PROGRESS {fraction:.3f}", file=sys.stderr, flush=True)
 
     emit(
         {

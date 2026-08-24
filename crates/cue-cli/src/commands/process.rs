@@ -156,7 +156,9 @@ async fn process_file(
         None => {
             let _ = events.send(PipelineEvent::Started(PipelineStage::Transcribe));
             let transcriber = cue_transcription::FasterWhisperTranscriber::resolve(None)?;
-            let fresh = transcriber.transcribe(&wav_path, &options).await?;
+            let fresh = transcriber
+                .transcribe_with_progress(&wav_path, &options, Some(events.clone()))
+                .await?;
             store_cached(&transcript_cache, &transcript_cache_key, &fresh);
             let _ = events.send(PipelineEvent::Completed(PipelineStage::Transcribe));
             fresh

@@ -8,7 +8,6 @@
 use std::io::IsTerminal;
 
 use cue_core::{PipelineEvent, PipelineStage};
-
 /// One rendered line for an event, shared by both TTY and pipe renderers.
 ///
 /// Public so tests can assert on exact wording.
@@ -39,6 +38,7 @@ pub fn stage_label(stage: PipelineStage) -> &'static str {
 pub async fn run_renderer(mut rx: tokio::sync::mpsc::UnboundedReceiver<PipelineEvent>) {
     let interactive = std::io::stdout().is_terminal();
     let mut open_spinner: Option<indicatif::ProgressBar> = None;
+    let mut current_stage: Option<PipelineStage> = None;
 
     while let Some(event) = rx.recv().await {
         match (&event, interactive) {
@@ -56,6 +56,12 @@ pub async fn run_renderer(mut rx: tokio::sync::mpsc::UnboundedReceiver<PipelineE
                 spinner.set_message(stage_label(*stage).to_string());
                 spinner.enable_steady_tick(std::time::Duration::from_millis(120));
                 open_spinner = Some(spinner);
+                current_stage = Some(*stage);
+            }
+            (PipelineEvent::Progress { current, .. }, true) => {
+                if let (Some(spinner), Some(stage)) = (&open_spinner, current_stage) {
+                    spinner.set_message(format!("{} — {current}%", stage_label(stage)));
+                }
             }
             (PipelineEvent::Cached(_), true)
             | (PipelineEvent::Completed(_), true)
