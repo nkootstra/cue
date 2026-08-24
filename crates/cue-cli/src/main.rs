@@ -18,7 +18,7 @@ async fn main() -> ExitCode {
 
     let code = match cli.command {
         Some(Command::Doctor(args)) => commands::doctor::run(args).await,
-        Some(Command::Models(args)) => commands::models::run(args),
+        Some(Command::Models(args)) => commands::models::run(args).await,
         Some(Command::Config(args)) => commands::config_cmd::run(args),
         Some(Command::Cache(args)) => commands::cache_cmd::run(args.command),
         None => commands::process::run(&cli).await,

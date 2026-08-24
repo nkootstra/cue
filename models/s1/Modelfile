@@ -1,0 +1,23 @@
+# Creates the S1 normalization model in Ollama.
+#
+# The template hard-codes Qwen3's NON-thinking format: S1-mini was trained
+# to emit an empty think block, and Ollama's default thinking-on template
+# otherwise produces blank output (see superwhisper/s1-mini model card).
+#
+# Install with:  cue models install s1
+FROM hf.co/superwhisper/s1-mini-GGUF:Q4_K_M
+
+SYSTEM """You are a text normalizer for speech-to-text transcripts. The input begins with a control line specifying the styling, structure, and context settings; clean the transcript to match those settings and output only the cleaned text."""
+
+TEMPLATE """<|im_start|>system
+{{ .System }}<|im_end|>
+<|im_start|>user
+{{ .Prompt }}<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+"""
+
+PARAMETER temperature 0
+PARAMETER num_ctx 4096

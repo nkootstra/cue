@@ -94,7 +94,7 @@ async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Resul
     }
 
     // ---- Transcribe -----------------------------------------------------
-    println_line("  [3/4] transcribing");
+    println_line("  [3/5] transcribing");
     let transcriber = cue_transcription::FasterWhisperTranscriber::resolve(None)?;
     let options = cue_transcription::TranscriptionOptions {
         model: config.transcription.model.clone(),
@@ -102,8 +102,21 @@ async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Resul
     };
     let transcript = transcriber.transcribe(&wav_path, &options).await?;
 
+    // ---- Normalize (optional; stays local via Ollama) -------------------
+    println_line("  [4/5] normalizing");
+    let normalized =
+        match cue_normalization::normalize_if_ready(&config.normalization.ollama_url, &transcript)
+            .await
+        {
+            cue_normalization::NormalizationOutcome::Done(clean) => Some(clean),
+            cue_normalization::NormalizationOutcome::Skipped(reason) => {
+                println_line(&format!("         skipped — {reason}"));
+                None
+            }
+        };
+
     // ---- Render ---------------------------------------------------------
-    println_line("  [4/4] writing outputs");
+    println_line("  [5/5] writing outputs");
     let out_dir = output_directory(&path, cli)?;
     std::fs::create_dir_all(&out_dir)
         .map_err(|e| CueError::general(format!("could not create output directory {}", out_dir.display())).because(e.to_string()))?;
@@ -111,6 +124,12 @@ async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Resul
     write_json(&out_dir.join("transcript.json"), &transcript)?;
     std::fs::write(out_dir.join("transcript.txt"), transcript.plain_text())
         .map_err(|e| CueError::general("could not write transcript.txt").because(e.to_string()))?;
+
+    if let Some(clean) = &normalized {
+        write_json(&out_dir.join("normalized.json"), clean)?;
+        std::fs::write(out_dir.join("transcript.clean.txt"), clean.plain_text())
+            .map_err(|e| CueError::general("could not write transcript.clean.txt").because(e.to_string()))?;
+    }
 
     // Subtitles derive from the canonical transcript, never from cleaned
     // text.
