@@ -1,6 +1,7 @@
 //! External tool detection and media inspection.
 
 pub mod checks;
+pub mod extract;
 pub mod probe;
 pub mod tools;
 
