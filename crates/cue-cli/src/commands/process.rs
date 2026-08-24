@@ -96,7 +96,6 @@ async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Resul
 
     // ---- Transcribe -----------------------------------------------------
     println_line("  [3/6] transcribing");
-    let transcriber = cue_transcription::FasterWhisperTranscriber::resolve(None)?;
     let options = cue_transcription::TranscriptionOptions {
         model: config.transcription.model.clone(),
         language: cli.language.clone(),
@@ -114,70 +113,112 @@ async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Resul
         .as_bytes(),
     );
     let transcript_cache =
-        stage_dir.join("transcription").join(format!("{transcript_cache_key}.json"));
+        cue_cache::JsonCache::new(stage_dir.join("transcription"));
 
-    let transcript = if transcript_cache.exists() {
-        println_line("         cached");
-        match std::fs::read_to_string(&transcript_cache)
-            .map_err(|e| CueError::general("could not read cached transcript").because(e.to_string()))
-            .and_then(|text| {
-                serde_json::from_str::<cue_core::Transcript>(&text)
-                    .map_err(|e| {
-                        CueError::general("cached transcript is corrupt")
-                            .because(e.to_string())
-                            .remedy("delete the file or run `cue cache clear`")
-                    })
-            }) {
-            Ok(cached) => Some(cached),
-            Err(err) => {
-                tracing::warn!(error = %err, "ignoring bad cache entry");
-                None
-            }
+    let transcript = match load_cached(&transcript_cache, &transcript_cache_key) {
+        Some(cached) => {
+            println_line("         cached");
+            cached
         }
-    } else {
-        None
-    };
-
-    let transcript = match transcript {
-        Some(t) => t,
         None => {
+            let transcriber =
+                cue_transcription::FasterWhisperTranscriber::resolve(None)?;
             let fresh = transcriber.transcribe(&wav_path, &options).await?;
-            std::fs::create_dir_all(transcript_cache.parent().unwrap())
-                .map_err(|e| CueError::general("could not create transcription cache dir").because(e.to_string()))?;
-            write_json(&transcript_cache, &fresh)?;
+            store_cached(&transcript_cache, &transcript_cache_key, &fresh);
             fresh
         }
     };
 
     // ---- Normalize (optional; stays local via Ollama) -------------------
     println_line("  [4/6] normalizing");
-    let normalized =
-        match cue_normalization::normalize_if_ready(&config.normalization.ollama_url, &transcript)
+    let transcript_hash = cue_cache::bytes_hash(
+        serde_json::to_vec(&transcript)
+            .map_err(|e| CueError::general("could not hash transcript").because(e.to_string()))?
+            .as_slice(),
+    );
+
+    // Effective S1 settings participate in the key; when styling/structure/
+    // context become configurable they must join this string.
+    let normalization_settings_hash = cue_cache::bytes_hash(
+        format!("s1|{}|semi-formal|prose|general", config.normalization.provider)
+            .as_bytes(),
+    );
+
+    let normalized_cache = cue_cache::JsonCache::new(stage_dir.join("normalization"));
+    let normalization_key =
+        format!("{transcript_hash}-{normalization_settings_hash}");
+
+    let normalized = match load_cached(&normalized_cache, &normalization_key) {
+        Some(cached) => {
+            println_line("         cached");
+            Some(cached)
+        }
+        None => {
+            match cue_normalization::normalize_if_ready(
+                &config.normalization.ollama_url,
+                &transcript,
+            )
             .await
-        {
-            cue_normalization::NormalizationOutcome::Done(clean) => Some(clean),
-            cue_normalization::NormalizationOutcome::Skipped(reason) => {
-                println_line(&format!("         skipped — {reason}"));
-                None
+            {
+                cue_normalization::NormalizationOutcome::Done(clean) => {
+                    store_cached(&normalized_cache, &normalization_key, &clean);
+                    Some(clean)
+                }
+                cue_normalization::NormalizationOutcome::Skipped(reason) => {
+                    println_line(&format!("         skipped — {reason}"));
+                    None
+                }
             }
-        };
+        }
+    };
 
     // ---- Analyze (optional; needs a gateway and cleaned text) -----------
     let analysis = match (&config.llm, &normalized) {
         (Some(llm), Some(clean)) => {
             println_line("  [5/6] analyzing");
-            let client =
-                cue_llm::ChatClient::new(llm.base_url.clone(), llm.api_key());
-            let analyzer = cue_analysis::GatewayAnalyzer::new(client, &llm.model);
-            match analyzer
-                .analyze(&cue_analysis::AnalysisInput::from_normalized(clean))
-                .await
-            {
-                Ok(a) => Some(a),
-                Err(err) => {
-                    println_line("         skipped — analysis failed");
-                    tracing::warn!(error = %err, "analysis failed");
-                    None
+
+            let clean_hash = cue_cache::bytes_hash(
+                serde_json::to_vec(clean)
+                    .map_err(|e| {
+                        CueError::general("could not hash normalized text").because(e.to_string())
+                    })?
+                    .as_slice(),
+            );
+            let analysis_key = format!(
+                "{}-{}-{}",
+                clean_hash,
+                llm.model,
+                cue_analysis::PROMPT_VERSION
+            );
+            let analysis_cache =
+                cue_cache::JsonCache::new(stage_dir.join("analysis"));
+
+            match load_cached(&analysis_cache, &analysis_key) {
+                Some(cached) => {
+                    println_line("         cached");
+                    Some(cached)
+                }
+                None => {
+                    let client = cue_llm::ChatClient::new(
+                        llm.base_url.clone(),
+                        llm.api_key(),
+                    );
+                    let analyzer =
+                        cue_analysis::GatewayAnalyzer::new(client, &llm.model);
+                    match analyzer
+                        .analyze(&cue_analysis::AnalysisInput::from_normalized(clean))
+                        .await
+                    {
+                        Ok(a) => {
+                            store_cached(&analysis_cache, &analysis_key, &a);
+                            Some(a)
+                        }
+                        Err(err) => {
+                            println_line("         skipped — analysis failed");
+                            tracing::warn!(error = %err, "analysis failed");
+                            None
+                        }
+                    }
                 }
             }
         }
@@ -277,6 +318,33 @@ fn output_directory(input: &Path, cli: &Cue) -> Result<PathBuf> {
     match input.parent() {
         Some(parent) => Ok(parent.join(format!("{stem}.cue"))),
         None => Ok(PathBuf::from(format!("{stem}.cue"))),
+    }
+}
+
+/// Read a cache entry, treating corrupt entries as a miss (warned) rather
+/// than failing the run.
+fn load_cached<T: serde::de::DeserializeOwned>(
+    cache: &cue_cache::JsonCache,
+    key: &str,
+) -> Option<T> {
+    match cache.get(key) {
+        Ok(Some(value)) => Some(value),
+        Ok(None) => None,
+        Err(err) => {
+            tracing::warn!(error = %err, "ignoring bad cache entry");
+            None
+        }
+    }
+}
+
+/// Best-effort store: cache write failures never fail the pipeline.
+fn store_cached<T: serde::Serialize>(
+    cache: &cue_cache::JsonCache,
+    key: &str,
+    value: &T,
+) {
+    if let Err(err) = cache.store(key, value) {
+        tracing::warn!(error = %err, "could not store cache entry");
     }
 }
 
