@@ -6,3 +6,11 @@ license.workspace = true
 
 [dependencies]
 cue-core.workspace = true
+cue-llm.workspace = true
+async-trait = "0.1"
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+wiremock = "0.6"

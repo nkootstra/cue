@@ -11,6 +11,7 @@ members = [
     "crates/cue-cache",
     "crates/cue-llm",
     "crates/cue-normalization",
+    "crates/cue-analysis",
 ]
 
 [workspace.package]
@@ -27,6 +28,7 @@ cue-transcription = { path = "crates/cue-transcription" }
 cue-subtitles = { path = "crates/cue-subtitles" }
 cue-llm = { path = "crates/cue-llm" }
 cue-normalization = { path = "crates/cue-normalization" }
+cue-analysis = { path = "crates/cue-analysis" }
 
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

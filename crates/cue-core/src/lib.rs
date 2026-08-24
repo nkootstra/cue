@@ -1,3 +1,4 @@
+pub mod analysis;
 pub mod config;
 pub mod error;
 pub mod media;
@@ -5,6 +6,7 @@ pub mod normalized;
 pub mod pipeline;
 pub mod transcript;
 
+pub use analysis::{Analysis, Topic, ANALYSIS_SCHEMA_VERSION};
 pub use config::Config;
 pub use error::CueError;
 pub use media::{AudioStream, Media, VideoStream};
