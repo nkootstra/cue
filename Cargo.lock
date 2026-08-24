@@ -166,6 +166,7 @@ dependencies = [
 name = "cue-cli"
 version = "0.1.0"
 dependencies = [
+ "cue-analysis",
  "cue-cache",
  "cue-core",
  "cue-llm",

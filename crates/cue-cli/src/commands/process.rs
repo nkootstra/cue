@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use cue_core::config::{load_user_config, resolve, PartialConfig};
 use cue_core::media::Media;
 use cue_core::{CueError, Result};
+use cue_analysis::Analyzer as _;
 use cue_media::extract::{extract_audio, AudioExtractOptions};
 use cue_transcription::Transcriber;
 
@@ -52,7 +53,7 @@ async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Resul
 
     // ---- Inspect --------------------------------------------------------
     let ffprobe = require_tool("ffprobe", "inspect media files")?;
-    println_line("  [1/4] inspecting");
+    println_line("  [1/6] inspecting");
     let media = cue_media::probe::inspect(&ffprobe, &path).await?;
     print_media_summary(&media);
 
@@ -79,7 +80,7 @@ async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Resul
 
     // ---- Extract --------------------------------------------------------
     let ffmpeg = require_tool("ffmpeg", "extract audio")?;
-    println_line("  [2/4] extracting audio");
+    println_line("  [2/6] extracting audio");
     let wav_path = stage_dir.join("audio.wav");
     if !wav_path.exists() {
         extract_audio(
@@ -94,7 +95,7 @@ async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Resul
     }
 
     // ---- Transcribe -----------------------------------------------------
-    println_line("  [3/5] transcribing");
+    println_line("  [3/6] transcribing");
     let transcriber = cue_transcription::FasterWhisperTranscriber::resolve(None)?;
     let options = cue_transcription::TranscriptionOptions {
         model: config.transcription.model.clone(),
@@ -103,7 +104,7 @@ async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Resul
     let transcript = transcriber.transcribe(&wav_path, &options).await?;
 
     // ---- Normalize (optional; stays local via Ollama) -------------------
-    println_line("  [4/5] normalizing");
+    println_line("  [4/6] normalizing");
     let normalized =
         match cue_normalization::normalize_if_ready(&config.normalization.ollama_url, &transcript)
             .await
@@ -115,8 +116,37 @@ async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Resul
             }
         };
 
+    // ---- Analyze (optional; needs a gateway and cleaned text) -----------
+    let analysis = match (&config.llm, &normalized) {
+        (Some(llm), Some(clean)) => {
+            println_line("  [5/6] analyzing");
+            let client =
+                cue_llm::ChatClient::new(llm.base_url.clone(), llm.api_key());
+            let analyzer = cue_analysis::GatewayAnalyzer::new(client, &llm.model);
+            match analyzer
+                .analyze(&cue_analysis::AnalysisInput::from_normalized(clean))
+                .await
+            {
+                Ok(a) => Some(a),
+                Err(err) => {
+                    println_line("         skipped — analysis failed");
+                    tracing::warn!(error = %err, "analysis failed");
+                    None
+                }
+            }
+        }
+        (None, _) => {
+            println_line("         skipped — no LLM gateway configured (local outputs only)");
+            None
+        }
+        (Some(_), None) => {
+            println_line("         skipped — analysis needs cleaned text from S1");
+            None
+        }
+    };
+
     // ---- Render ---------------------------------------------------------
-    println_line("  [5/5] writing outputs");
+    println_line("  [6/6] writing outputs");
     let out_dir = output_directory(&path, cli)?;
     std::fs::create_dir_all(&out_dir)
         .map_err(|e| CueError::general(format!("could not create output directory {}", out_dir.display())).because(e.to_string()))?;
@@ -129,6 +159,14 @@ async fn process_file(file: &str, cli: &Cue, config: &cue_core::Config) -> Resul
         write_json(&out_dir.join("normalized.json"), clean)?;
         std::fs::write(out_dir.join("transcript.clean.txt"), clean.plain_text())
             .map_err(|e| CueError::general("could not write transcript.clean.txt").because(e.to_string()))?;
+    }
+
+    if let Some(analysis) = &analysis {
+        write_json(&out_dir.join("analysis.json"), analysis)?;
+        std::fs::write(out_dir.join("summary.md"), cue_analysis::render_summary(analysis))
+            .map_err(|e| CueError::general("could not write summary.md").because(e.to_string()))?;
+        std::fs::write(out_dir.join("description.md"), cue_analysis::render_description(analysis))
+            .map_err(|e| CueError::general("could not write description.md").because(e.to_string()))?;
     }
 
     // Subtitles derive from the canonical transcript, never from cleaned
