@@ -10,7 +10,7 @@ use usage::{Args, Cli, Subcommands};
 /// Processing runs locally; optional AI analysis uses your configured LLM
 /// gateway.
 #[derive(Debug, Cli)]
-#[usage(bin = "cue", version = "0.1.0", unknown_flags = "error")]
+#[usage(bin = "cue", version, unknown_flags = "error")]
 pub struct Cue {
     /// Print diagnostic logging to stderr
     #[usage(short = 'v', long, global)]
