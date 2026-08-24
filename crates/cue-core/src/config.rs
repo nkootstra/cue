@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::CueError;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Config {
     pub transcription: TranscriptionConfig,
     pub normalization: NormalizationConfig,
@@ -199,17 +199,6 @@ impl Default for AnalysisConfig {
     }
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Config {
-            transcription: TranscriptionConfig::default(),
-            normalization: NormalizationConfig::default(),
-            subtitles: SubtitlesConfig::default(),
-            llm: None,
-            analysis: AnalysisConfig::default(),
-        }
-    }
-}
 
 /// A configuration layer where every field is optional.
 ///

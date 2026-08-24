@@ -58,17 +58,15 @@ const PYTHON_MIN_MINOR: u32 = 10;
 
 pub async fn check_python() -> ToolReport {
     let mut report = check_tool(&PYTHON).await;
-    if let Some(path) = find_on_path(PYTHON.binary) {
-        if let Ok(version) = probe_version(&path, PYTHON.version_args).await {
-            if let Some(parsed) = parse_python_version(&version) {
-                if parsed.1 < PYTHON_MIN_MINOR {
-                    report.status = ToolStatus::Error(format!(
-                        "Python {}.{} found, but the transcription worker needs >= 3.{PYTHON_MIN_MINOR}",
-                        parsed.0, parsed.1
-                    ));
-                }
-            }
-        }
+    if let Some(path) = find_on_path(PYTHON.binary)
+        && let Ok(version) = probe_version(&path, PYTHON.version_args).await
+        && let Some(parsed) = parse_python_version(&version)
+        && parsed.1 < PYTHON_MIN_MINOR
+    {
+        report.status = ToolStatus::Error(format!(
+            "Python {}.{} found, but the transcription worker needs >= 3.{PYTHON_MIN_MINOR}",
+            parsed.0, parsed.1
+        ));
     }
     report
 }

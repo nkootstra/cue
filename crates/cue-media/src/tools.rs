@@ -122,13 +122,14 @@ mod tests {
     #[tokio::test]
     async fn probe_failing_command_is_error() {
         // `false` exits non-zero without output.
-        if !Path::new("/usr/bin/false").exists() && !Path::new("/bin/false").exists() {
+        let binary = if Path::new("/usr/bin/false").exists() {
+            PathBuf::from("/usr/bin/false")
+        } else {
+            PathBuf::from("/bin/false")
+        };
+        if !binary.exists() {
             return;
         }
-        let binary = Path::new("/usr/bin/false")
-            .exists()
-            .then(|| PathBuf::from("/usr/bin/false"))
-            .unwrap_or_else(|| PathBuf::from("/bin/false"));
         let result = probe_version(&binary, &[]).await;
         assert!(result.is_err());
     }

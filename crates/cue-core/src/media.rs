@@ -9,8 +9,13 @@ use serde::{Deserialize, Serialize};
 
 pub const MEDIA_SCHEMA_VERSION: u32 = 1;
 
+fn default_schema_version() -> u32 {
+    MEDIA_SCHEMA_VERSION
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Media {
+    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub path: PathBuf,
     /// Container duration in milliseconds.
