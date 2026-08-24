@@ -58,7 +58,7 @@ impl Analysis {
         let mut points: Vec<(&str, u64)> = self
             .topics
             .iter()
-            .filter(|t| t.title.trim().len() > 0 && t.start_ms < t.end_ms)
+            .filter(|t| !t.title.trim().is_empty() && t.start_ms < t.end_ms)
             .map(|t| (t.title.as_str(), t.start_ms))
             .collect();
         points.sort_by_key(|(_, ms)| *ms);

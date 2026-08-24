@@ -38,7 +38,7 @@ mod tests {
                 "Canonical transcript is the source of truth".into(),
                 "Only cleaned text leaves the machine".into(),
             ],
-            keywords: vec!["transcription", "local first"]
+            keywords: ["transcription", "local first"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
