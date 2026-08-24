@@ -101,6 +101,15 @@ pub fn resolve(python_override: Option<&Path>) -> Result<WorkerEnvironment> {
         })?,
     };
 
+    // Escape hatch for development and testing: point cue at an
+    // alternative worker implementation.
+    if let Some(script) = std::env::var_os("CUE_FASTER_WHISPER_SCRIPT") {
+        return Ok(WorkerEnvironment {
+            python,
+            script: PathBuf::from(script),
+        });
+    }
+
     let dir = worker_dir().ok_or_else(|| {
         CueError::new(
             PipelineStage::Transcribe,
@@ -127,4 +136,52 @@ fn find_python() -> Option<PathBuf> {
     }
     // Cheap PATH search without spawning anything: reuse cue-media's helper.
     crate::find_binary_on_path("python3")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn materializes_embedded_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = materialize_worker_script(dir.path()).unwrap();
+        assert_eq!(path.file_name().unwrap(), "cue_faster_whisper.py");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), WORKER_SCRIPT);
+    }
+
+    #[test]
+    fn rewrites_stale_scripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = materialize_worker_script(dir.path()).unwrap();
+        std::fs::write(&path, "# stale version").unwrap();
+
+        materialize_worker_script(dir.path()).unwrap();
+        // Restored to the embedded version.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), WORKER_SCRIPT);
+    }
+
+    #[test]
+    fn skips_rewrite_when_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = materialize_worker_script(dir.path()).unwrap();
+        let before = std::fs::metadata(&path).unwrap().len();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        materialize_worker_script(dir.path()).unwrap();
+        // Content untouched (mtime may not move, so compare bytes).
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), WORKER_SCRIPT);
+        assert_eq!(before, std::fs::metadata(&path).unwrap().len());
+    }
+
+    #[test]
+    fn command_prefix_is_interpreter_then_script() {
+        let env = WorkerEnvironment {
+            python: PathBuf::from("/usr/bin/python3"),
+            script: PathBuf::from("/data/worker.py"),
+        };
+        assert_eq!(
+            env.command_prefix(),
+            vec!["/usr/bin/python3", "/data/worker.py"]
+        );
+    }
 }

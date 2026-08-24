@@ -11,10 +11,13 @@ path = "src/main.rs"
 [dependencies]
 cue-core.workspace = true
 cue-media.workspace = true
+cue-cache.workspace = true
+cue-transcription.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 usage.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-serde_json.workspace = true
 
 [dev-dependencies]

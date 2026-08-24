@@ -21,6 +21,7 @@ repository = "https://github.com/nielskootstra/cue"
 cue-core = { path = "crates/cue-core" }
 cue-media = { path = "crates/cue-media" }
 cue-cache = { path = "crates/cue-cache" }
+cue-transcription = { path = "crates/cue-transcription" }
 
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
