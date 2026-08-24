@@ -159,6 +159,8 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "cue-core",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 
