@@ -22,9 +22,10 @@ Work in progress.
 - [x] Subtitle generation (SRT/WebVTT)
 - [x] S1-mini normalization via Ollama
 - [x] LLM analysis (OpenAI-compatible gateways: Ollama `/v1`, OpenRouter)
-- [x] Content-addressed caching for extraction and transcription
-- [ ] Pipeline event bus with progress rendering (indicatif)
-- [ ] Resumable multi-stage reruns beyond extraction/transcription
+- [x] Content-addressed caching for every stage; reruns skip completed work
+- [x] Pipeline event bus with TTY-aware rendering
+- [ ] Incremental progress within stages (worker-level reporting)
+- [ ] Parallel file processing
 
 ## Design principles
 
