@@ -13,16 +13,18 @@ configured — summaries, descriptions, and chapters.
 
 ## Status
 
-Work in progress. Current milestone: **foundation**.
+Work in progress.
 
 - [x] Workspace, CLI surface (`usage-rs`), configuration layering
 - [x] `cue doctor` environment checks (FFmpeg, FFprobe, Python)
 - [x] Media inspection via ffprobe
-- [ ] Local transcription (faster-whisper worker)
-- [ ] Subtitle generation (SRT/WebVTT)
-- [ ] S1-mini normalization via Ollama
-- [ ] LLM analysis (OpenAI-compatible gateways: Ollama `/v1`, OpenRouter)
-- [ ] Content-addressed caching and resumable pipeline
+- [x] Local transcription (faster-whisper worker, auto-provisioned venv)
+- [x] Subtitle generation (SRT/WebVTT)
+- [x] S1-mini normalization via Ollama
+- [x] LLM analysis (OpenAI-compatible gateways: Ollama `/v1`, OpenRouter)
+- [x] Content-addressed caching for extraction and transcription
+- [ ] Pipeline event bus with progress rendering (indicatif)
+- [ ] Resumable multi-stage reruns beyond extraction/transcription
 
 ## Design principles
 
