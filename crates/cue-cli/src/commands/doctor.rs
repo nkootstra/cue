@@ -1,7 +1,7 @@
 //! `cue doctor` — inspect the local environment, optionally fixing it.
 
-use cue_media::check_environment;
 use cue_media::ToolStatus;
+use cue_media::check_environment;
 
 use crate::cli::DoctorArgs;
 use crate::render::{println_line, tool_line};

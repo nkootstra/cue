@@ -77,8 +77,7 @@ mod tests {
     fn empty_chunks_render_empty_and_load_without_version() {
         assert_eq!(NormalizedTranscript::default().plain_text(), "");
 
-        let t: NormalizedTranscript =
-            serde_json::from_str(r#"{"chunks":[]}"#).unwrap();
+        let t: NormalizedTranscript = serde_json::from_str(r#"{"chunks":[]}"#).unwrap();
         assert_eq!(t.schema_version, NORMALIZED_SCHEMA_VERSION);
     }
 }

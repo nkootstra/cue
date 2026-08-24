@@ -72,7 +72,11 @@ impl Transcript {
     /// Subtitle segmentation uses this style of reconstruction when it needs
     /// sentence-level context beyond segment boundaries.
     pub fn full_text(&self) -> String {
-        self.words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ")
+        self.words
+            .iter()
+            .map(|w| w.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }
 

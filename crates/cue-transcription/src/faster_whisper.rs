@@ -7,10 +7,10 @@ use async_trait::async_trait;
 use cue_core::{CueError, PipelineStage, Result, Transcript};
 use tracing::{debug, instrument};
 
+use crate::Transcriber;
 use crate::env::WorkerEnvironment;
 use crate::options::TranscriptionOptions;
 use crate::worker::WorkerOutput;
-use crate::Transcriber;
 
 /// Runs transcription through the embedded worker script.
 pub struct FasterWhisperTranscriber {
@@ -57,11 +57,7 @@ impl Transcriber for FasterWhisperTranscriber {
     }
 
     #[instrument(skip(self, input, options), fields(model = %options.model))]
-    async fn transcribe(
-        &self,
-        input: &Path,
-        options: &TranscriptionOptions,
-    ) -> Result<Transcript> {
+    async fn transcribe(&self, input: &Path, options: &TranscriptionOptions) -> Result<Transcript> {
         debug!(worker = %self.env.script.display(), "launching worker");
 
         let mut command = tokio::process::Command::new(&self.env.python);
@@ -78,10 +74,7 @@ impl Transcriber for FasterWhisperTranscriber {
             command.arg("--language").arg(language);
         }
 
-        let output = command
-            .output()
-            .await
-            .map_err(|e| self.spawn_error(e))?;
+        let output = command.output().await.map_err(|e| self.spawn_error(e))?;
 
         if !output.status.success() {
             return Err(self.failure(&String::from_utf8_lossy(&output.stderr)));
@@ -162,8 +155,10 @@ sys.exit(3)
     async fn adapter_maps_worker_output_to_transcript() {
         let dir = temp_dir("ok");
         let script = write_script(&dir, "fake_ok.py", FAKE_OK_SCRIPT);
-        let transcriber =
-            FasterWhisperTranscriber::new(WorkerEnvironment { python: python(), script });
+        let transcriber = FasterWhisperTranscriber::new(WorkerEnvironment {
+            python: python(),
+            script,
+        });
 
         let transcript = transcriber
             .transcribe(&fake_input(&dir), &TranscriptionOptions::default())
@@ -180,8 +175,10 @@ sys.exit(3)
     async fn adapter_surfaces_stderr_tail_as_cause() {
         let dir = temp_dir("fail");
         let script = write_script(&dir, "fake_fail.py", FAKE_FAIL_SCRIPT);
-        let transcriber =
-            FasterWhisperTranscriber::new(WorkerEnvironment { python: python(), script });
+        let transcriber = FasterWhisperTranscriber::new(WorkerEnvironment {
+            python: python(),
+            script,
+        });
 
         let err = transcriber
             .transcribe(&fake_input(&dir), &TranscriptionOptions::default())

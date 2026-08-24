@@ -91,7 +91,10 @@ mod tests {
             rendered.contains("could not load model"),
             "missing cause: {rendered}"
         );
-        assert!(rendered.contains("cue doctor"), "missing remedy: {rendered}");
+        assert!(
+            rendered.contains("cue doctor"),
+            "missing remedy: {rendered}"
+        );
     }
 
     #[test]
@@ -122,8 +125,7 @@ mod tests {
 
     #[test]
     fn io_error_can_be_attributed_to_stage() {
-        let err =
-            CueError::new(PipelineStage::Extract, "ffmpeg failed").because("exit status 1");
+        let err = CueError::new(PipelineStage::Extract, "ffmpeg failed").because("exit status 1");
         assert_eq!(err.stage(), Some(PipelineStage::Extract));
     }
 }

@@ -1,6 +1,6 @@
 //! `cue models` — transcription and normalization model management.
 
-use cue_core::config::{load_user_config, resolve, PartialConfig};
+use cue_core::config::{PartialConfig, load_user_config, resolve};
 use cue_llm::OllamaAdmin;
 
 use crate::cli::{ModelsArgs, ModelsCommand};

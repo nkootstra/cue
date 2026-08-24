@@ -120,9 +120,7 @@ fn split_by_words(text: &str, max_chars: usize) -> Vec<String> {
     let mut pieces = Vec::new();
     let mut current = String::new();
     for word in text.split_whitespace() {
-        if !current.is_empty()
-            && current.chars().count() + 1 + word.chars().count() > max_chars
-        {
+        if !current.is_empty() && current.chars().count() + 1 + word.chars().count() > max_chars {
             pieces.push(std::mem::take(&mut current));
         }
         if !current.is_empty() {

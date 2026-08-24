@@ -6,8 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use cue_core::{CueError, Result};
 
@@ -37,22 +37,14 @@ impl JsonCache {
             return Ok(None);
         }
         let text = std::fs::read_to_string(&path).map_err(|e| {
-            CueError::general(format!(
-                "could not read cache entry {}",
-                path.display()
-            ))
-            .because(e.to_string())
+            CueError::general(format!("could not read cache entry {}", path.display()))
+                .because(e.to_string())
         })?;
-        serde_json::from_str(&text)
-            .map(Some)
-            .map_err(|e| {
-                CueError::general(format!(
-                    "cache entry {} is corrupt",
-                    path.display()
-                ))
+        serde_json::from_str(&text).map(Some).map_err(|e| {
+            CueError::general(format!("cache entry {} is corrupt", path.display()))
                 .because(e.to_string())
                 .remedy("run `cue cache clear` or delete the entry")
-            })
+        })
     }
 
     /// Store a value under `key`, creating the directory as needed.
@@ -66,9 +58,8 @@ impl JsonCache {
         })?;
         let json = serde_json::to_string_pretty(value)
             .map_err(|e| CueError::general("serialization failed").because(e.to_string()))?;
-        std::fs::write(self.path_for(key), json + "\n").map_err(|e| {
-            CueError::general("could not write cache entry").because(e.to_string())
-        })
+        std::fs::write(self.path_for(key), json + "\n")
+            .map_err(|e| CueError::general("could not write cache entry").because(e.to_string()))
     }
 
     /// Remove every entry in this stage's cache directory.
@@ -76,18 +67,22 @@ impl JsonCache {
         if !self.dir.exists() {
             return Ok(());
         }
-        for entry in std::fs::read_dir(&self.dir)
-            .map_err(|e| CueError::general("could not list cache directory").because(e.to_string()))?
-        {
+        for entry in std::fs::read_dir(&self.dir).map_err(|e| {
+            CueError::general("could not list cache directory").because(e.to_string())
+        })? {
             let path = entry
-                .map_err(|e| CueError::general("could not read cache entry").because(e.to_string()))?
+                .map_err(|e| {
+                    CueError::general("could not read cache entry").because(e.to_string())
+                })?
                 .path();
             if path.is_dir() {
-                std::fs::remove_dir_all(&path)
-                    .map_err(|e| CueError::general("could not remove cache dir").because(e.to_string()))?;
+                std::fs::remove_dir_all(&path).map_err(|e| {
+                    CueError::general("could not remove cache dir").because(e.to_string())
+                })?;
             } else {
-                std::fs::remove_file(&path)
-                    .map_err(|e| CueError::general("could not remove cache entry").because(e.to_string()))?;
+                std::fs::remove_file(&path).map_err(|e| {
+                    CueError::general("could not remove cache entry").because(e.to_string())
+                })?;
             }
         }
         Ok(())

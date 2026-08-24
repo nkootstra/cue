@@ -18,7 +18,7 @@ use cue_core::{Result, Transcript};
 pub use env::WorkerEnvironment;
 pub use faster_whisper::FasterWhisperTranscriber;
 pub use options::TranscriptionOptions;
-pub use provision::{provision, ProvisionAction};
+pub use provision::{ProvisionAction, provision};
 
 /// PATH lookup re-exported from cue-media for environment resolution.
 pub(crate) fn find_binary_on_path(name: &str) -> Option<PathBuf> {
@@ -38,9 +38,5 @@ pub trait Transcriber: Send + Sync {
     /// Human-readable provider name, used in logs and cache keys.
     fn name(&self) -> &str;
 
-    async fn transcribe(
-        &self,
-        input: &Path,
-        options: &TranscriptionOptions,
-    ) -> Result<Transcript>;
+    async fn transcribe(&self, input: &Path, options: &TranscriptionOptions) -> Result<Transcript>;
 }

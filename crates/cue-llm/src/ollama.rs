@@ -147,9 +147,11 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/tags"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                r#"{"models":[{"name":"s1-mini:latest"},{"name":"qwen3:8b"}]}"#,
-            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(
+                    r#"{"models":[{"name":"s1-mini:latest"},{"name":"qwen3:8b"}]}"#,
+                ),
+            )
             .mount(&server)
             .await;
 

@@ -10,11 +10,11 @@
 
 use std::path::{Path, PathBuf};
 
-use cue_core::config::{load_user_config, resolve, PartialConfig};
+use cue_analysis::Analyzer as _;
+use cue_core::config::{PartialConfig, load_user_config, resolve};
 use cue_core::media::Media;
 use cue_core::{CueError, Result};
-use cue_analysis::Analyzer as _;
-use cue_media::extract::{extract_audio, AudioExtractOptions};
+use cue_media::extract::{AudioExtractOptions, extract_audio};
 use cue_transcription::Transcriber;
 
 use crate::cli::Cue;
@@ -95,8 +95,9 @@ async fn process_file(
             .remedy("set CUE_CACHE_DIR to a writable directory")
     })?;
     let stage_dir = cue_cache::media_dir(&cache_root, &media_hash);
-    std::fs::create_dir_all(&stage_dir)
-        .map_err(|e| CueError::general("could not create cache directory").because(e.to_string()))?;
+    std::fs::create_dir_all(&stage_dir).map_err(|e| {
+        CueError::general("could not create cache directory").because(e.to_string())
+    })?;
 
     // Persist inspection so later stages (and reruns) can reuse it.
     write_json(&stage_dir.join("media.json"), &media)?;
@@ -108,13 +109,7 @@ async fn process_file(
         let _ = events.send(PipelineEvent::Cached(PipelineStage::Extract));
     } else {
         let _ = events.send(PipelineEvent::Started(PipelineStage::Extract));
-        extract_audio(
-            &ffmpeg,
-            &path,
-            &wav_path,
-            &AudioExtractOptions::default(),
-        )
-        .await?;
+        extract_audio(&ffmpeg, &path, &wav_path, &AudioExtractOptions::default()).await?;
         let _ = events.send(PipelineEvent::Completed(PipelineStage::Extract));
     }
 
@@ -135,8 +130,7 @@ async fn process_file(
         )
         .as_bytes(),
     );
-    let transcript_cache =
-        cue_cache::JsonCache::new(stage_dir.join("transcription"));
+    let transcript_cache = cue_cache::JsonCache::new(stage_dir.join("transcription"));
 
     let transcript = match load_cached(&transcript_cache, &transcript_cache_key) {
         Some(cached) => {
@@ -145,8 +139,7 @@ async fn process_file(
         }
         None => {
             let _ = events.send(PipelineEvent::Started(PipelineStage::Transcribe));
-            let transcriber =
-                cue_transcription::FasterWhisperTranscriber::resolve(None)?;
+            let transcriber = cue_transcription::FasterWhisperTranscriber::resolve(None)?;
             let fresh = transcriber.transcribe(&wav_path, &options).await?;
             store_cached(&transcript_cache, &transcript_cache_key, &fresh);
             let _ = events.send(PipelineEvent::Completed(PipelineStage::Transcribe));
@@ -164,12 +157,14 @@ async fn process_file(
     // Effective S1 settings participate in the key; when styling/structure/
     // context become configurable they must join this string.
     let normalization_settings_hash = cue_cache::bytes_hash(
-        format!("s1|{}|semi-formal|prose|general", config.normalization.provider)
-            .as_bytes(),
+        format!(
+            "s1|{}|semi-formal|prose|general",
+            config.normalization.provider
+        )
+        .as_bytes(),
     );
     let normalized_cache = cue_cache::JsonCache::new(stage_dir.join("normalization"));
-    let normalization_key =
-        format!("{transcript_hash}-{normalization_settings_hash}");
+    let normalization_key = format!("{transcript_hash}-{normalization_settings_hash}");
 
     let normalized = match load_cached(&normalized_cache, &normalization_key) {
         Some(cached) => {
@@ -185,8 +180,7 @@ async fn process_file(
             {
                 cue_normalization::NormalizationOutcome::Done(clean) => {
                     store_cached(&normalized_cache, &normalization_key, &clean);
-                    let _ =
-                        events.send(PipelineEvent::Completed(PipelineStage::Normalize));
+                    let _ = events.send(PipelineEvent::Completed(PipelineStage::Normalize));
                     Some(clean)
                 }
                 cue_normalization::NormalizationOutcome::Skipped(reason) => {
@@ -213,8 +207,7 @@ async fn process_file(
                 llm.model,
                 cue_analysis::PROMPT_VERSION
             );
-            let analysis_cache =
-                cue_cache::JsonCache::new(stage_dir.join("analysis"));
+            let analysis_cache = cue_cache::JsonCache::new(stage_dir.join("analysis"));
 
             match load_cached(&analysis_cache, &analysis_key) {
                 Some(cached) => {
@@ -223,20 +216,15 @@ async fn process_file(
                 }
                 None => {
                     let _ = events.send(PipelineEvent::Started(PipelineStage::Analyze));
-                    let client = cue_llm::ChatClient::new(
-                        llm.base_url.clone(),
-                        llm.api_key(),
-                    );
-                    let analyzer =
-                        cue_analysis::GatewayAnalyzer::new(client, &llm.model);
+                    let client = cue_llm::ChatClient::new(llm.base_url.clone(), llm.api_key());
+                    let analyzer = cue_analysis::GatewayAnalyzer::new(client, &llm.model);
                     match analyzer
                         .analyze(&cue_analysis::AnalysisInput::from_normalized(clean))
                         .await
                     {
                         Ok(a) => {
                             store_cached(&analysis_cache, &analysis_key, &a);
-                            let _ =
-                                events.send(PipelineEvent::Completed(PipelineStage::Analyze));
+                            let _ = events.send(PipelineEvent::Completed(PipelineStage::Analyze));
                             Some(a)
                         }
                         Err(err) => {
@@ -264,8 +252,13 @@ async fn process_file(
     // ---- Render ---------------------------------------------------------
     let _ = events.send(PipelineEvent::Started(PipelineStage::Render));
     let out_dir = output_directory(&path, cli)?;
-    std::fs::create_dir_all(&out_dir)
-        .map_err(|e| CueError::general(format!("could not create output directory {}", out_dir.display())).because(e.to_string()))?;
+    std::fs::create_dir_all(&out_dir).map_err(|e| {
+        CueError::general(format!(
+            "could not create output directory {}",
+            out_dir.display()
+        ))
+        .because(e.to_string())
+    })?;
 
     write_json(&out_dir.join("transcript.json"), &transcript)?;
     std::fs::write(out_dir.join("transcript.txt"), transcript.plain_text())
@@ -273,16 +266,23 @@ async fn process_file(
 
     if let Some(clean) = &normalized {
         write_json(&out_dir.join("normalized.json"), clean)?;
-        std::fs::write(out_dir.join("transcript.clean.txt"), clean.plain_text())
-            .map_err(|e| CueError::general("could not write transcript.clean.txt").because(e.to_string()))?;
+        std::fs::write(out_dir.join("transcript.clean.txt"), clean.plain_text()).map_err(|e| {
+            CueError::general("could not write transcript.clean.txt").because(e.to_string())
+        })?;
     }
 
     if let Some(analysis) = &analysis {
         write_json(&out_dir.join("analysis.json"), analysis)?;
-        std::fs::write(out_dir.join("summary.md"), cue_analysis::render_summary(analysis))
-            .map_err(|e| CueError::general("could not write summary.md").because(e.to_string()))?;
-        std::fs::write(out_dir.join("description.md"), cue_analysis::render_description(analysis))
-            .map_err(|e| CueError::general("could not write description.md").because(e.to_string()))?;
+        std::fs::write(
+            out_dir.join("summary.md"),
+            cue_analysis::render_summary(analysis),
+        )
+        .map_err(|e| CueError::general("could not write summary.md").because(e.to_string()))?;
+        std::fs::write(
+            out_dir.join("description.md"),
+            cue_analysis::render_description(analysis),
+        )
+        .map_err(|e| CueError::general("could not write description.md").because(e.to_string()))?;
     }
 
     // Subtitles derive from the canonical transcript, never from cleaned
@@ -297,12 +297,8 @@ async fn process_file(
     for format in &config.subtitles.formats {
         let path = out_dir.join(format!("subtitles.{}", format.extension()));
         let content = match format {
-            cue_core::config::SubtitleFormat::Srt => {
-                cue_subtitles::render_srt(&cues)
-            }
-            cue_core::config::SubtitleFormat::Vtt => {
-                cue_subtitles::render_vtt(&cues)
-            }
+            cue_core::config::SubtitleFormat::Srt => cue_subtitles::render_srt(&cues),
+            cue_core::config::SubtitleFormat::Vtt => cue_subtitles::render_vtt(&cues),
         };
         std::fs::write(&path, content).map_err(|e| {
             CueError::general(format!("could not write {}", path.display())).because(e.to_string())
@@ -319,12 +315,9 @@ async fn process_file(
 
 fn require_tool(binary: &str, purpose: &str) -> Result<PathBuf> {
     cue_media::tools::find_on_path(binary).ok_or_else(|| {
-        CueError::general(format!(
-            "{} is required to {purpose}",
-            capitalize(binary)
-        ))
-        .because(format!("{binary} was not found on PATH"))
-        .remedy("install FFmpeg and verify with `cue doctor`")
+        CueError::general(format!("{} is required to {purpose}", capitalize(binary)))
+            .because(format!("{binary} was not found on PATH"))
+            .remedy("install FFmpeg and verify with `cue doctor`")
     })
 }
 
@@ -368,11 +361,7 @@ fn load_cached<T: serde::de::DeserializeOwned>(
 }
 
 /// Best-effort store: cache write failures never fail the pipeline.
-fn store_cached<T: serde::Serialize>(
-    cache: &cue_cache::JsonCache,
-    key: &str,
-    value: &T,
-) {
+fn store_cached<T: serde::Serialize>(cache: &cue_cache::JsonCache, key: &str, value: &T) {
     if let Err(err) = cache.store(key, value) {
         tracing::warn!(error = %err, "could not store cache entry");
     }
@@ -381,8 +370,9 @@ fn store_cached<T: serde::Serialize>(
 fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     let json = serde_json::to_string_pretty(value)
         .map_err(|e| CueError::general("serialization failed").because(e.to_string()))?;
-    std::fs::write(path, json + "\n")
-        .map_err(|e| CueError::general(format!("could not write {}", path.display())).because(e.to_string()))
+    std::fs::write(path, json + "\n").map_err(|e| {
+        CueError::general(format!("could not write {}", path.display())).because(e.to_string())
+    })
 }
 
 fn print_usage_hint() {

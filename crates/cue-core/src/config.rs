@@ -141,10 +141,10 @@ impl SubtitleFormat {
         match value.to_ascii_lowercase().as_str() {
             "srt" => Ok(SubtitleFormat::Srt),
             "vtt" => Ok(SubtitleFormat::Vtt),
-            other => Err(CueError::general(format!(
-                "unknown subtitle format \"{other}\""
-            ))
-            .remedy("supported formats are \"srt\" and \"vtt\"")),
+            other => Err(
+                CueError::general(format!("unknown subtitle format \"{other}\""))
+                    .remedy("supported formats are \"srt\" and \"vtt\""),
+            ),
         }
     }
 }
@@ -198,7 +198,6 @@ impl Default for AnalysisConfig {
         }
     }
 }
-
 
 /// A configuration layer where every field is optional.
 ///
@@ -272,8 +271,14 @@ partial_section!(
 pub fn resolve(layers: &[&PartialConfig]) -> Config {
     let mut config = Config::default();
     for layer in layers.iter().rev() {
-        layer.transcription.clone().apply_to(&mut config.transcription);
-        layer.normalization.clone().apply_to(&mut config.normalization);
+        layer
+            .transcription
+            .clone()
+            .apply_to(&mut config.transcription);
+        layer
+            .normalization
+            .clone()
+            .apply_to(&mut config.normalization);
         layer.subtitles.clone().apply_to(&mut config.subtitles);
         if let Some(llm) = &layer.llm {
             config.llm = llm.clone();
@@ -285,8 +290,11 @@ pub fn resolve(layers: &[&PartialConfig]) -> Config {
 
 /// Parse user configuration from TOML text.
 pub fn parse_toml(text: &str) -> Result<PartialConfig, CueError> {
-    let raw: RawToml = toml::from_str(text)
-        .map_err(|e| CueError::general("configuration file is not valid TOML").because(e.to_string()).remedy("check the syntax of your cue.toml"))?;
+    let raw: RawToml = toml::from_str(text).map_err(|e| {
+        CueError::general("configuration file is not valid TOML")
+            .because(e.to_string())
+            .remedy("check the syntax of your cue.toml")
+    })?;
     raw.finish()
 }
 

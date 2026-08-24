@@ -1,6 +1,6 @@
 //! `cue config` — show resolved configuration.
 
-use cue_core::config::{load_user_config, resolve, user_config_path, PartialConfig};
+use cue_core::config::{PartialConfig, load_user_config, resolve, user_config_path};
 
 use crate::cli::ConfigArgs;
 use crate::render::println_line;

@@ -135,11 +135,13 @@ impl Analyzer for GatewayAnalyzer {
         let raw = match chunks.len() {
             0 => return Ok(empty_analysis(&input.language)),
             // Short content: single direct request, no map stage.
-            1 => self.complete_json(SCHEMA_INSTRUCTION, direct_prompt(input)).await?,
+            1 => {
+                self.complete_json(SCHEMA_INSTRUCTION, direct_prompt(input))
+                    .await?
+            }
             _ => {
-                let mut combined = String::from(
-                    "Partial analyses of consecutive transcript excerpts follow.\n\n",
-                );
+                let mut combined =
+                    String::from("Partial analyses of consecutive transcript excerpts follow.\n\n");
                 for (index, chunk) in chunks.iter().enumerate() {
                     let partial_raw = self
                         .complete_json(
@@ -150,9 +152,7 @@ impl Analyzer for GatewayAnalyzer {
                             ),
                         )
                         .await?;
-                    combined.push_str(&format!(
-                        "--- Partial {index} ---\n{partial_raw}\n\n"
-                    ));
+                    combined.push_str(&format!("--- Partial {index} ---\n{partial_raw}\n\n"));
                 }
                 combined.push_str(
                     "Synthesize these partials into a single analysis for the whole video.",
@@ -201,15 +201,14 @@ fn empty_analysis(language: &str) -> Analysis {
 /// falling back to defaults per-field where possible.
 fn parse_analysis(raw: &str, language: &str) -> cue_core::Result<Analysis> {
     let json = parse_lenient_json(raw)?;
-    let mut analysis: Analysis =
-        serde_json::from_value(json).map_err(|e| {
-            cue_core::CueError::new(
-                cue_core::PipelineStage::Analyze,
-                "analysis did not match the expected schema",
-            )
-            .because(e.to_string())
-            .remedy("retry, or try a different gateway model")
-        })?;
+    let mut analysis: Analysis = serde_json::from_value(json).map_err(|e| {
+        cue_core::CueError::new(
+            cue_core::PipelineStage::Analyze,
+            "analysis did not match the expected schema",
+        )
+        .because(e.to_string())
+        .remedy("retry, or try a different gateway model")
+    })?;
     if analysis.schema_version != cue_core::ANALYSIS_SCHEMA_VERSION {
         analysis.schema_version = cue_core::ANALYSIS_SCHEMA_VERSION;
     }
@@ -252,18 +251,19 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(body_string_contains("Video transcript"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_string(format!(
-                    r#"{{"choices":[{{"message":{{"role":"assistant","content":{}}}}}]}}"#,
-                    serde_json::to_string(&analysis_json("Direct")).unwrap()
-                )),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"choices":[{{"message":{{"role":"assistant","content":{}}}}}]}}"#,
+                serde_json::to_string(&analysis_json("Direct")).unwrap()
+            )))
             .mount(&server)
             .await;
 
         let analyzer =
             GatewayAnalyzer::new(cue_llm::ChatClient::new(server.uri(), None), "test-model");
-        let result = analyzer.analyze(&input(&[("hello world.", 0, 1_000)])).await.unwrap();
+        let result = analyzer
+            .analyze(&input(&[("hello world.", 0, 1_000)]))
+            .await
+            .unwrap();
         assert_eq!(result.title, "Direct");
         assert_eq!(result.chapters().len(), 1);
     }
@@ -285,12 +285,10 @@ mod tests {
         // Reduce request asks for synthesis; return the merged analysis.
         Mock::given(method("POST"))
             .and(body_string_contains("Synthesize these partials"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                format!(
-                    r#"{{"choices":[{{"message":{{"content":{}}}}}]}}"#,
-                    serde_json::to_string(&analysis_json("Merged")).unwrap()
-                )
-            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"choices":[{{"message":{{"content":{}}}}}]}}"#,
+                serde_json::to_string(&analysis_json("Merged")).unwrap()
+            )))
             .mount(&server)
             .await;
 
@@ -321,9 +319,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        let analyzer =
-            GatewayAnalyzer::new(cue_llm::ChatClient::new(server.uri(), None), "m");
-        let result = analyzer.analyze(&input(&[("text.", 0, 100)])).await.unwrap();
+        let analyzer = GatewayAnalyzer::new(cue_llm::ChatClient::new(server.uri(), None), "m");
+        let result = analyzer
+            .analyze(&input(&[("text.", 0, 100)]))
+            .await
+            .unwrap();
         assert_eq!(result.title, "Fenced");
     }
 
@@ -340,7 +340,12 @@ mod tests {
     async fn empty_input_yields_empty_analysis_without_network() {
         let analyzer =
             GatewayAnalyzer::new(cue_llm::ChatClient::new("http://127.0.0.1:9", None), "m");
-        let result = analyzer.analyze(&AnalysisInput { language: "en".into(), spans: vec![] }).await;
+        let result = analyzer
+            .analyze(&AnalysisInput {
+                language: "en".into(),
+                spans: vec![],
+            })
+            .await;
         // No request is made; an empty analysis comes back.
         assert!(result.is_ok());
     }

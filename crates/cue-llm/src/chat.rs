@@ -213,9 +213,10 @@ mod tests {
     async fn gateway_error_does_not_echo_response_body() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(401).set_body_string(
-                r#"{"error":"bad key for secret-input"}"#,
-            ))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_string(r#"{"error":"bad key for secret-input"}"#),
+            )
             .mount(&server)
             .await;
 

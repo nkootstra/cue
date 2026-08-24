@@ -4,13 +4,13 @@ pub mod analyzer;
 pub mod json;
 pub mod render;
 
-pub use analyzer::{AnalysisInput, GatewayAnalyzer, Analyzer, PROMPT_VERSION};
+pub use analyzer::{AnalysisInput, Analyzer, GatewayAnalyzer, PROMPT_VERSION};
 pub use render::{render_description, render_summary};
 
 #[cfg(test)]
 mod tests {
     use super::render::*;
-    use cue_core::{Analysis, Topic, ANALYSIS_SCHEMA_VERSION};
+    use cue_core::{ANALYSIS_SCHEMA_VERSION, Analysis, Topic};
 
     fn sample() -> Analysis {
         Analysis {
@@ -60,7 +60,10 @@ mod tests {
         // 90_000 ms -> 01:30
         assert!(md.contains("- 01:30 Subtitles"), "{md}");
         assert!(md.contains("#transcription #localfirst"), "{md}");
-        assert!(md.contains("- Only cleaned text leaves the machine"), "{md}");
+        assert!(
+            md.contains("- Only cleaned text leaves the machine"),
+            "{md}"
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@ mod render;
 
 use std::process::ExitCode;
 
-use cli::{Cue, Command};
+use cli::{Command, Cue};
 
 #[tokio::main]
 async fn main() -> ExitCode {

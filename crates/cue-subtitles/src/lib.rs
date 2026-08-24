@@ -6,7 +6,7 @@ pub mod segment;
 
 pub use lines::break_lines;
 pub use render::{render_srt, render_vtt};
-pub use segment::{segment, Cue, SubtitlePolicy};
+pub use segment::{Cue, SubtitlePolicy, segment};
 
 use cue_core::Transcript;
 
@@ -22,8 +22,9 @@ pub fn build_cues(transcript: &Transcript, policy: &SubtitlePolicy) -> Vec<Cue> 
 
 #[cfg(test)]
 mod tests {
-    use super::segment::{segment, Cue, SubtitlePolicy};
-    use cue_core::{Segment, Transcript, Word, TRANSCRIPT_SCHEMA_VERSION};    fn word(text: &str, start_ms: u64, end_ms: u64) -> Word {
+    use super::segment::{Cue, SubtitlePolicy, segment};
+    use cue_core::{Segment, TRANSCRIPT_SCHEMA_VERSION, Transcript, Word};
+    fn word(text: &str, start_ms: u64, end_ms: u64) -> Word {
         Word {
             text: text.into(),
             start_ms,
@@ -98,7 +99,11 @@ mod tests {
         let mut words = Vec::new();
         let mut ms = 0u64;
         for i in 0..40 {
-            let text = if i == 39 { "endless.".to_string() } else { format!("word{i:02}") };
+            let text = if i == 39 {
+                "endless.".to_string()
+            } else {
+                format!("word{i:02}")
+            };
             words.push(word(&text, ms, ms + 100));
             ms += 150;
         }
@@ -151,10 +156,7 @@ mod tests {
             max_chars_per_second: None,
         };
         // Each emoji is one char but four bytes.
-        let t = transcript(vec![
-            word("😀😀😀", 0, 100),
-            word("😀😀😀", 110, 200),
-        ]);
+        let t = transcript(vec![word("😀😀😀", 0, 100), word("😀😀😀", 110, 200)]);
         let cues = segment(&t, &policy);
         // Budget is 5 chars; each word is 3 chars so they cannot share a cue
         // (3 + 1 + 3 > 5).
@@ -178,11 +180,7 @@ mod tests {
 
     #[test]
     fn very_short_words_survive_and_keep_order() {
-        let t = transcript(vec![
-            word("a", 0, 20),
-            word("i", 30, 40),
-            word("o", 50, 70),
-        ]);
+        let t = transcript(vec![word("a", 0, 20), word("i", 30, 40), word("o", 50, 70)]);
         let cues = segment(&t, &SubtitlePolicy::default());
         assert_eq!(cues.len(), 1);
         assert_eq!(cues[0].text, "a i o");
@@ -201,10 +199,7 @@ mod tests {
 
     #[test]
     fn cues_carry_sorted_times_within_themselves() {
-        let t = transcript(vec![
-            word("fine.", 100, 400),
-            word("later.", 800, 1_100),
-        ]);
+        let t = transcript(vec![word("fine.", 100, 400), word("later.", 800, 1_100)]);
         let cues: Vec<Cue> = segment(&t, &SubtitlePolicy::default());
         for cue in &cues {
             assert!(cue.start_ms <= cue.end_ms, "{cue:?}");

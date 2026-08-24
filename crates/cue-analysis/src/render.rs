@@ -43,13 +43,7 @@ pub fn render_description(analysis: &Analysis) -> String {
         let _ = writeln!(out);
         for (title, start_ms) in analysis.chapters() {
             let seconds = start_ms / 1000;
-            let _ = writeln!(
-                out,
-                "- {:02}:{:02} {}",
-                seconds / 60,
-                seconds % 60,
-                title
-            );
+            let _ = writeln!(out, "- {:02}:{:02} {}", seconds / 60, seconds % 60, title);
         }
     }
 

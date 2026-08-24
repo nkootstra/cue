@@ -1,7 +1,7 @@
 //! Named checks for the tools cue depends on, consumed by `cue doctor`.
 
-use super::tools::{find_on_path, probe_version};
 use super::ToolStatus;
+use super::tools::{find_on_path, probe_version};
 use crate::ToolReport;
 
 /// A named external tool and how to ask it for a version banner.

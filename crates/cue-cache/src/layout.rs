@@ -22,14 +22,12 @@ pub fn cache_dir_from(env: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf>
     if let Some(dir) = env("CUE_CACHE_DIR") {
         return Some(PathBuf::from(dir));
     }
-    let base = env("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            env("HOME")
-                .filter(|h| !h.is_empty())
-                .map(PathBuf::from)
-                .map(|h| h.join(".cache"))
-        })?;
+    let base = env("XDG_CACHE_HOME").map(PathBuf::from).or_else(|| {
+        env("HOME")
+            .filter(|h| !h.is_empty())
+            .map(PathBuf::from)
+            .map(|h| h.join(".cache"))
+    })?;
     Some(base.join("cue"))
 }
 

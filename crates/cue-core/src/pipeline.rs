@@ -104,7 +104,10 @@ mod tests {
             current: 5,
             total: Some(10),
         };
-        assert!(matches!(progress, PipelineEvent::Progress { current: 5, .. }));
+        assert!(matches!(
+            progress,
+            PipelineEvent::Progress { current: 5, .. }
+        ));
 
         let failed = PipelineEvent::Failed {
             stage: PipelineStage::Analyze,

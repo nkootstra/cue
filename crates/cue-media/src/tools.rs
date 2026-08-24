@@ -61,7 +61,9 @@ fn is_executable(path: &Path) -> bool {
 
 #[cfg(not(unix))]
 fn is_executable(path: &Path) -> bool {
-    std::fs::metadata(path).map(|m| m.is_file()).unwrap_or(false)
+    std::fs::metadata(path)
+        .map(|m| m.is_file())
+        .unwrap_or(false)
 }
 
 /// Run `<binary> <args>` and return its first stdout line.

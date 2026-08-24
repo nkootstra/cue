@@ -36,9 +36,7 @@ pub fn stage_label(stage: PipelineStage) -> &'static str {
 }
 
 /// Consume events and print them appropriately for the output medium.
-pub async fn run_renderer(
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<PipelineEvent>,
-) {
+pub async fn run_renderer(mut rx: tokio::sync::mpsc::UnboundedReceiver<PipelineEvent>) {
     let interactive = std::io::stdout().is_terminal();
     let mut open_spinner: Option<indicatif::ProgressBar> = None;
 
@@ -78,10 +76,18 @@ pub async fn run_renderer(
                         println!("  [{}] {}", short_stage(*stage), stage_label(*stage));
                     }
                     PipelineEvent::Cached(stage) => {
-                        println!("  [{}] {} (cached)", short_stage(*stage), stage_label(*stage));
+                        println!(
+                            "  [{}] {} (cached)",
+                            short_stage(*stage),
+                            stage_label(*stage)
+                        );
                     }
                     PipelineEvent::Failed { stage, error } => {
-                        println!("  [{}] {} failed: {error}", short_stage(*stage), stage_label(*stage));
+                        println!(
+                            "  [{}] {} failed: {error}",
+                            short_stage(*stage),
+                            stage_label(*stage)
+                        );
                     }
                     PipelineEvent::Completed(_) | PipelineEvent::Progress { .. } => {}
                 }

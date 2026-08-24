@@ -27,8 +27,7 @@ pub fn parse_lenient_json(raw: &str) -> cue_core::Result<serde_json::Value> {
             b'}' => {
                 depth -= 1;
                 if depth == 0 {
-                    return serde_json::from_str(&text[start..=offset])
-                        .map_err(|_| invalid(raw));
+                    return serde_json::from_str(&text[start..=offset]).map_err(|_| invalid(raw));
                 }
             }
             _ => {}
@@ -87,8 +86,7 @@ mod tests {
 
     #[test]
     fn extracts_object_from_surrounding_prose() {
-        let v =
-            parse_lenient_json("Here you go:\n{\"ok\": true}\nHope that helps!").unwrap();
+        let v = parse_lenient_json("Here you go:\n{\"ok\": true}\nHope that helps!").unwrap();
         assert_eq!(v["ok"], true);
     }
 

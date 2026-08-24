@@ -19,8 +19,10 @@ pub async fn inspect(ffprobe: &Path, input: &Path) -> cue_core::Result<Media> {
 
     let output = tokio::process::Command::new(ffprobe)
         .args([
-            "-v", "quiet",
-            "-print_format", "json",
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
             "-show_format",
             "-show_streams",
         ])
@@ -29,7 +31,9 @@ pub async fn inspect(ffprobe: &Path, input: &Path) -> cue_core::Result<Media> {
         .stderr(Stdio::null())
         .output()
         .await
-        .map_err(|e| CueError::new(PipelineStage::Inspect, "could not run ffprobe").because(e.to_string()))?;
+        .map_err(|e| {
+            CueError::new(PipelineStage::Inspect, "could not run ffprobe").because(e.to_string())
+        })?;
 
     if !output.status.success() {
         return Err(CueError::new(
@@ -112,7 +116,11 @@ impl FfProbeOutput {
                 Some("audio") => audio_streams.push(AudioStream {
                     index: stream.index,
                     codec: stream.codec_name.clone().unwrap_or_default(),
-                    sample_rate_hz: stream.sample_rate.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0),
+                    sample_rate_hz: stream
+                        .sample_rate
+                        .as_deref()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0),
                     channels: stream.channels.unwrap_or(0),
                 }),
                 Some("video") => video_streams.push(VideoStream {
@@ -159,11 +167,16 @@ mod tests {
         let status = tokio::process::Command::new("ffmpeg")
             .args([
                 "-y",
-                "-v", "error",
-                "-f", "lavfi",
-                "-i", &format!("sine=frequency=440:duration={seconds}"),
-                "-ar", "16000",
-                "-ac", "1",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("sine=frequency=440:duration={seconds}"),
+                "-ar",
+                "16000",
+                "-ac",
+                "1",
             ])
             .arg(&out)
             .status()
@@ -179,7 +192,9 @@ mod tests {
 
     #[tokio::test]
     async fn inspects_generated_wav() {
-        let Some(ffprobe) = ffprobe_path() else { return };
+        let Some(ffprobe) = ffprobe_path() else {
+            return;
+        };
         let dir = std::env::temp_dir().join("cue-test-fixtures");
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let wav = make_wav(&dir, 1).await;
@@ -200,7 +215,9 @@ mod tests {
 
     #[tokio::test]
     async fn missing_file_is_actionable_error() {
-        let Some(ffprobe) = ffprobe_path() else { return };
+        let Some(ffprobe) = ffprobe_path() else {
+            return;
+        };
         let err = inspect(&ffprobe, Path::new("/nonexistent/file.mp4"))
             .await
             .unwrap_err();
@@ -210,11 +227,15 @@ mod tests {
 
     #[tokio::test]
     async fn text_file_is_not_valid_media() {
-        let Some(ffprobe) = ffprobe_path() else { return };
+        let Some(ffprobe) = ffprobe_path() else {
+            return;
+        };
         let dir = std::env::temp_dir().join("cue-test-fixtures");
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let fake = dir.join("not-media.txt");
-        tokio::fs::write(&fake, b"this is not a media file").await.unwrap();
+        tokio::fs::write(&fake, b"this is not a media file")
+            .await
+            .unwrap();
 
         let err = inspect(&ffprobe, &fake).await.unwrap_err();
         assert_eq!(err.stage(), Some(PipelineStage::Inspect));

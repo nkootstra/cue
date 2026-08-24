@@ -4,9 +4,9 @@ pub mod chunk;
 pub mod s1;
 
 use async_trait::async_trait;
-use cue_core::{Result, NormalizedTranscript, Transcript};
+use cue_core::{NormalizedTranscript, Result, Transcript};
 
-pub use chunk::{chunk_transcript, TranscriptChunk};
+pub use chunk::{TranscriptChunk, chunk_transcript};
 pub use s1::S1Normalizer;
 
 /// A provider that rewrites raw transcript text into clean prose.
@@ -62,10 +62,7 @@ pub enum NormalizationOutcome {
 }
 
 /// Normalize via S1 when available; produce a skip reason otherwise.
-pub async fn normalize_if_ready(
-    ollama_url: &str,
-    transcript: &Transcript,
-) -> NormalizationOutcome {
+pub async fn normalize_if_ready(ollama_url: &str, transcript: &Transcript) -> NormalizationOutcome {
     let admin = cue_llm::OllamaAdmin::new(ollama_url);
     if !s1_ready(&admin).await {
         return NormalizationOutcome::Skipped(format!(

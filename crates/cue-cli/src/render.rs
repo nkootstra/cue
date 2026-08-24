@@ -14,9 +14,7 @@ pub fn tool_line(report: &ToolReport) -> String {
         ToolStatus::Available { path, version } => {
             format!("{label} ok       {path} ({version})")
         }
-        ToolStatus::Missing => format!(
-            "{label} missing  not found on PATH"
-        ),
+        ToolStatus::Missing => format!("{label} missing  not found on PATH"),
         ToolStatus::Error(reason) => {
             format!("{label} broken   {reason}")
         }

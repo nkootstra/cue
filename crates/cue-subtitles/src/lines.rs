@@ -41,9 +41,7 @@ fn greedy_wrap(words: &[&str], policy: &SubtitlePolicy) -> Vec<String> {
     for word in words {
         if current.is_empty() {
             current.push_str(word);
-        } else if current.chars().count() + 1 + word.chars().count()
-            <= policy.max_chars_per_line
-        {
+        } else if current.chars().count() + 1 + word.chars().count() <= policy.max_chars_per_line {
             current.push(' ');
             current.push_str(word);
         } else {
@@ -72,8 +70,7 @@ fn balance_two_lines(mut lines: Vec<String>, policy: &SubtitlePolicy) -> String 
         };
         let new_second_len = tail.chars().count() + 1 + lines[1].chars().count();
         // Only rebalance while line 1 remains strictly longer.
-        if head.chars().count() >= new_second_len && new_second_len <= policy.max_chars_per_line
-        {
+        if head.chars().count() >= new_second_len && new_second_len <= policy.max_chars_per_line {
             lines[0] = head.to_string();
             lines[1] = format!("{tail} {}", lines[1]);
         } else {
@@ -151,7 +148,9 @@ mod tests {
         let result = break_lines(text, &policy(8));
         assert_eq!(
             result.split_whitespace().collect::<Vec<_>>(),
-            vec!["one", "two", "three", "four", "five", "six", "seven", "eight"]
+            vec![
+                "one", "two", "three", "four", "five", "six", "seven", "eight"
+            ]
         );
     }
 }

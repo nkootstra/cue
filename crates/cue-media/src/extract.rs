@@ -42,17 +42,16 @@ pub async fn extract_audio(
     }
 
     let output = tokio::process::Command::new(ffmpeg)
-        .args([
-            "-y",
-            "-v", "error",
-            "-i",
-        ])
+        .args(["-y", "-v", "error", "-i"])
         .arg(input)
         .args([
-            "-vn",                    // drop video entirely
-            "-acodec", "pcm_s16le",   // raw PCM for whisper-family models
-            "-ar", &options.sample_rate_hz.to_string(),
-            "-ac", &options.channels.to_string(),
+            "-vn", // drop video entirely
+            "-acodec",
+            "pcm_s16le", // raw PCM for whisper-family models
+            "-ar",
+            &options.sample_rate_hz.to_string(),
+            "-ac",
+            &options.channels.to_string(),
         ])
         .arg(output)
         .output()
@@ -90,7 +89,10 @@ fn extract_failure(input: &Path, stderr: &str) -> CueError {
     } else {
         CueError::new(
             PipelineStage::Extract,
-            format!("ffmpeg failed while extracting audio from {}", input.display()),
+            format!(
+                "ffmpeg failed while extracting audio from {}",
+                input.display()
+            ),
         )
         .because(stderr_tail(stderr))
     }
@@ -123,7 +125,12 @@ mod tests {
         let status = tokio::process::Command::new(find_on_path("ffmpeg").unwrap())
             .args(["-y", "-v", "error"])
             .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=2"])
-            .args(["-f", "lavfi", "-i", "testsrc=duration=2:size=160x120:rate=15"])
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=2:size=160x120:rate=15",
+            ])
             .args(["-shortest"])
             .arg(&out)
             .status()
@@ -139,9 +146,14 @@ mod tests {
         let input = make_mp4(&dir).await;
         let output = dir.join("extracted.wav");
 
-        extract_audio(&ffmpeg_path().await, &input, &output, &AudioExtractOptions::default())
-            .await
-            .unwrap();
+        extract_audio(
+            &ffmpeg_path().await,
+            &input,
+            &output,
+            &AudioExtractOptions::default(),
+        )
+        .await
+        .unwrap();
 
         // Verify the result by re-inspecting it with ffprobe.
         let ffprobe = find_on_path("ffprobe").unwrap();
@@ -173,9 +185,14 @@ mod tests {
         std::fs::write(&fake, b"definitely not media").unwrap();
         let output = dir.join("out.wav");
 
-        let err = extract_audio(&ffmpeg_path().await, &fake, &output, &AudioExtractOptions::default())
-            .await
-            .unwrap_err();
+        let err = extract_audio(
+            &ffmpeg_path().await,
+            &fake,
+            &output,
+            &AudioExtractOptions::default(),
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(err.stage(), Some(PipelineStage::Extract));
         let rendered = err.to_string();
@@ -185,7 +202,10 @@ mod tests {
 
     #[test]
     fn failure_classifier_matches_ffmpeg_messages() {
-        let invalid = extract_failure(Path::new("/x.mp4"), "Invalid data found when processing input");
+        let invalid = extract_failure(
+            Path::new("/x.mp4"),
+            "Invalid data found when processing input",
+        );
         assert!(invalid.to_string().contains("not readable"));
 
         let generic = extract_failure(Path::new("/x.mp4"), "some other error");

@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use cue_core::{NormalizedChunk, NormalizedTranscript, Transcript};
 use tracing::instrument;
 
-use crate::chunk::{chunk_transcript, TranscriptChunk};
 use crate::TranscriptNormalizer;
+use crate::chunk::{TranscriptChunk, chunk_transcript};
 
 /// Styling knobs from S1's control line.
 #[derive(Debug, Clone, PartialEq)]
@@ -50,7 +50,10 @@ impl S1Normalizer {
     /// Point at Ollama's OpenAI-compatible endpoint (`<ollama_url>/v1`).
     pub fn new(ollama_url: &str) -> Self {
         Self {
-            client: cue_llm::ChatClient::new(format!("{}/v1", ollama_url.trim_end_matches('/')), None),
+            client: cue_llm::ChatClient::new(
+                format!("{}/v1", ollama_url.trim_end_matches('/')),
+                None,
+            ),
             model: crate::S1_MODEL_NAME.to_string(),
             settings: S1Settings::default(),
             max_chunk_chars: 2_000,
@@ -174,8 +177,7 @@ mod tests {
 
         // Two sentences well past half the budget close into two chunks.
         let t = transcript_with_segments(&["first bit.", "second bit."]);
-        let normalizer =
-            S1Normalizer::new(&server.uri()).with_chunk_limit(20);
+        let normalizer = S1Normalizer::new(&server.uri()).with_chunk_limit(20);
 
         let result = normalizer.normalize(&t).await.unwrap();
 

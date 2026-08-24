@@ -10,11 +10,14 @@ use cue_core::{CueError, Result};
 
 /// BLAKE3 hex digest of a file's contents.
 pub fn file_hash(path: &Path) -> Result<String> {
-    let mut file = std::fs::File::open(path)
-        .map_err(|e| CueError::general(format!("could not open {} for hashing", path.display())).because(e.to_string()))?;
+    let mut file = std::fs::File::open(path).map_err(|e| {
+        CueError::general(format!("could not open {} for hashing", path.display()))
+            .because(e.to_string())
+    })?;
     let mut hasher = Hasher::new();
-    std::io::copy(&mut file, &mut hasher)
-        .map_err(|e| CueError::general("could not read file while hashing").because(e.to_string()))?;
+    std::io::copy(&mut file, &mut hasher).map_err(|e| {
+        CueError::general("could not read file while hashing").because(e.to_string())
+    })?;
     Ok(hasher.finalize().to_hex().to_string())
 }
 

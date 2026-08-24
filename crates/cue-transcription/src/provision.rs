@@ -32,7 +32,10 @@ pub fn venv_python(venv: &Path) -> PathBuf {
 /// True when a previously-created venv has a usable interpreter.
 pub fn is_provisioned(venv: &Path) -> bool {
     let python = venv_python(venv);
-    python.exists() && std::fs::metadata(&python).map(|m| m.len() > 0).unwrap_or(false)
+    python.exists()
+        && std::fs::metadata(&python)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,8 +68,9 @@ pub async fn provision(
 
 async fn create_venv(base_python: &Path, venv: &Path) -> Result<()> {
     if let Some(parent) = venv.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| provision_error("could not create venv directory").because(e.to_string()))?;
+        std::fs::create_dir_all(parent).map_err(|e| {
+            provision_error("could not create venv directory").because(e.to_string())
+        })?;
     }
 
     let output = tokio::process::Command::new(base_python)
@@ -83,9 +87,8 @@ async fn create_venv(base_python: &Path, venv: &Path) -> Result<()> {
         })?;
 
     if !output.status.success() {
-        return Err(provision_error("venv creation failed").because(crate::stderr_tail(
-            &String::from_utf8_lossy(&output.stderr),
-        )));
+        return Err(provision_error("venv creation failed")
+            .because(crate::stderr_tail(&String::from_utf8_lossy(&output.stderr))));
     }
     Ok(())
 }
@@ -106,14 +109,14 @@ async fn install_requirements(venv: &Path) -> Result<()> {
         .map_err(|e| provision_error("could not run pip in the venv").because(e.to_string()))?;
 
     if !output.status.success() {
-        return Err(provision_error(
-            "installing transcription dependencies failed",
-        )
-        .because(crate::stderr_tail(&String::from_utf8_lossy(&output.stderr)))
-        .remedy(
-            "check your network connection; pip output above names the \
+        return Err(
+            provision_error("installing transcription dependencies failed")
+                .because(crate::stderr_tail(&String::from_utf8_lossy(&output.stderr)))
+                .remedy(
+                    "check your network connection; pip output above names the \
              failing package",
-        ));
+                ),
+        );
     }
     Ok(())
 }
@@ -137,9 +140,7 @@ async fn verify_worker(python: &Path) -> Result<()> {
         return Err(provision_error(
             "the transcription worker failed its self-check after installation",
         )
-        .because(crate::stderr_tail(&String::from_utf8_lossy(
-            &output.stderr,
-        ))));
+        .because(crate::stderr_tail(&String::from_utf8_lossy(&output.stderr))));
     }
     Ok(())
 }

@@ -3,7 +3,7 @@
 //! Keeping this pure (no I/O) makes the adapter contract testable without
 //! spawning processes or models.
 
-use cue_core::{Segment, Transcript, Word, TRANSCRIPT_SCHEMA_VERSION};
+use cue_core::{Segment, TRANSCRIPT_SCHEMA_VERSION, Transcript, Word};
 use serde::Deserialize;
 
 /// Root object emitted by the faster-whisper worker on stdout.
@@ -165,13 +165,16 @@ mod tests {
         assert_eq!(transcript.segments[1].word_end, 5);
 
         // Times are integer milliseconds; text is trimmed.
-        assert_eq!(transcript.words[0], Word {
-            text: "hello".into(),
-            start_ms: 0,
-            end_ms: 300,
-            confidence: Some(0.97),
-            speaker: None,
-        });
+        assert_eq!(
+            transcript.words[0],
+            Word {
+                text: "hello".into(),
+                start_ms: 0,
+                end_ms: 300,
+                confidence: Some(0.97),
+                speaker: None,
+            }
+        );
         assert_eq!(transcript.words[1].start_ms, 310);
     }
 
@@ -213,8 +216,8 @@ mod tests {
     #[test]
     fn unknown_fields_are_tolerated_for_forward_compatibility() {
         let json = r#"{"language": "en", "future_field": true, "segments": []}"#;
-        let output: WorkerOutput = serde_json::from_str(json)
-            .expect("worker v1 must tolerate unknown fields");
+        let output: WorkerOutput =
+            serde_json::from_str(json).expect("worker v1 must tolerate unknown fields");
         assert_eq!(output.into_transcript().language, "en");
     }
 }
