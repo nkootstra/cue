@@ -11,8 +11,8 @@
 # needed, and grade mechanical assertions.
 #
 # Usage:
-#   scripts/skill-eval-harness.sh           # generate fixtures + cue runs
-#   scripts/skill-eval-harness.sh --grade   # also grade assertions
+#   scripts/skill-eval-harness.sh           # generate fixtures + cue runs + prompts
+#   scripts/skill-eval-harness.sh --grade   # grade an EXISTING workspace (no re-seed)
 #
 # The with_skill/without_skill *agent* runs are prompts you execute in your
 # agent (any harness). See iteration output below.
@@ -26,7 +26,10 @@ ITER="$ROOT/skills/transcribe-workspace/iteration-1"
 GRADE=0
 [ "${1:-}" = "--grade" ] && GRADE=1
 
-mkdir -p "$FILES_DIR"
+if [ "$GRADE" = "0" ]; then
+  # Setup only runs when seeding a fresh workspace; grading skips it so a
+  # `--grade` pass never wipes agent-applied corrections.
+  mkdir -p "$FILES_DIR"
 
 # ---- 1. Generate deterministic speech fixtures (macOS `say` + ffmpeg) ----
 # Spoken content uses the placeholder speaker "John Doe" and the public
@@ -74,7 +77,7 @@ echo "fixtures ready: $FILES_DIR"
 # then reads/corrects these outputs, so the with/without contrast isolates
 # the skill's behavior rather than whisper's nondeterminism.
 mkdir -p "$ITER"
-for case in eval-basic-transcribe eval-context-correction eval-batch-context; do
+for case in eval-basic-transcribe eval-context-correction eval-batch-context eval-existing-correction; do
   for variant in with_skill without_skill; do
     mkdir -p "$ITER/$case/$variant/outputs"
   done
@@ -96,12 +99,34 @@ run_cue clip-02 "$ITER/eval-batch-context/with_skill/outputs/clip-02"
 run_cue clip-01 "$ITER/eval-batch-context/without_skill/outputs/clip-01"
 run_cue clip-02 "$ITER/eval-batch-context/without_skill/outputs/clip-02"
 
+# ---- 3. Seed the "existing outputs" case (eval 4) -----------------------
+# Simulates the situation the skill must handle: an already-transcribed
+# folder whose transcript.txt (and subtitles) contain a genuine mishearing
+# from clip-02 ("open telemetry"), plus a NEW sibling clip to transcribe.
+# The pre-existing transcript.json must stay untouched.
+seed_existing() {
+  local variant="$1"
+  local dir="$ITER/eval-existing-correction/$variant/outputs"
+  mkdir -p "$dir/1. welcome.cue" "$dir"
+
+  # Pre-existing output transcribed from clip-02: whisper genuinely writes
+  # "open telemetry" here, so transcript and subtitles both carry the garble.
+  run_cue clip-02 "$dir/1. welcome.cue"
+
+  # The new sibling clip to transcribe sits in the same folder.
+  cp "$FILES_DIR/clip-01.mp3" "$dir/2. what we cover.mp3"
+}
+seed_existing with_skill
+seed_existing without_skill
+
 # Copy the context file into the correction cases (the skill tells agents to
 # look for it next to the media).
 cp "$FILES_DIR/context.md" "$ITER/eval-context-correction/with_skill/outputs/"
 cp "$FILES_DIR/context.md" "$ITER/eval-context-correction/without_skill/outputs/"
 cp "$FILES_DIR/context.md" "$ITER/eval-batch-context/with_skill/outputs/"
 cp "$FILES_DIR/context.md" "$ITER/eval-batch-context/without_skill/outputs/"
+cp "$FILES_DIR/context.md" "$ITER/eval-existing-correction/with_skill/outputs/"
+cp "$FILES_DIR/context.md" "$ITER/eval-existing-correction/without_skill/outputs/"
 
 echo "cue runs done"
 
@@ -147,28 +172,80 @@ cat <<EOF
   Input:  $ITER/eval-batch-context/without_skill/outputs/
   Save outputs to: $ITER/eval-batch-context/without_skill/outputs
 
+[existing-correction] with_skill
+  Prompt: There is a media file ("2. what we cover.mp3") and an
+  already-transcribed folder ("1. welcome.cue") in the current directory,
+  plus a shared context file. Transcribe the new clip, then write a
+  corrections.md manifest for the misheard term and apply it with
+  cue correct to the existing folder.
+  Input:  $ITER/eval-existing-correction/with_skill/outputs/
+  Save outputs to: $ITER/eval-existing-correction/with_skill/outputs
+
+[existing-correction] without_skill
+  Prompt: There is a media file and an already-transcribed folder in the
+  current directory. Transcribe the new clip.
+  Input:  $ITER/eval-existing-correction/without_skill/outputs/
+  Save outputs to: $ITER/eval-existing-correction/without_skill/outputs
+
 === Then run: scripts/skill-eval-harness.sh --grade ===
 EOF
 
+fi # end of setup (skipped when grading)
+
 if [ "$GRADE" = "1" ]; then
-  echo "=== grading ==="
-  grade_case() {
-    local dir="$1" label="$2"
-    local txt="$dir/outputs/transcript.txt"
-    local pass=0 fail=0
-    local t
-    if [ -f "$txt" ] && [ -s "$txt" ]; then
-      if grep -qi observability "$txt"; then pass=$((pass+1)); else fail=$((fail+1)); fi
-    else
-      fail=$((fail+1))
-    fi
-    # Speaker spelling from context; OpenTelemetry is the garbled term.
-    t=$(grep -ci "john doe" "$txt" 2>/dev/null || echo 0)
-    o=$(grep -ci "opentelemetry" "$txt" 2>/dev/null || echo 0)
-    [ "$t" -ge 1 ] && pass=$((pass+1)) || fail=$((fail+1))
-    [ "$o" -ge 1 ] && pass=$((pass+1)) || fail=$((fail+1))
-    echo "$label: pass=$pass fail=$fail"
+  echo "=== grading (per evals.json assertions) ==="
+  PASS=0; FAIL=0
+  grade() { # ok name
+    if [ "$1" = "1" ]; then PASS=$((PASS+1)); echo "PASS  $2"; else FAIL=$((FAIL+1)); echo "FAIL  $2"; fi
   }
-  grade_case "$ITER/eval-context-correction/with_skill" "correction-with"
-  grade_case "$ITER/eval-context-correction/without_skill" "correction-without"
+
+  # case 1: basic-transcribe (clip-01)
+  T="$ITER/eval-basic-transcribe/with_skill/outputs/transcript.txt"
+  [ -s "$T" ] && grade 1 "case1 transcript non-empty" || grade 0 "case1 transcript non-empty"
+  grep -qi observability "$T" && grade 1 "case1 contains observability" || grade 0 "case1 contains observability"
+  [ -f "$ITER/eval-basic-transcribe/with_skill/outputs/subtitles.srt" ] \
+    && [ -f "$ITER/eval-basic-transcribe/with_skill/outputs/subtitles.vtt" ] \
+    && grade 1 "case1 subtitles exist" || grade 0 "case1 subtitles exist"
+
+  # case 2: context-correction (clip-02)
+  T="$ITER/eval-context-correction/with_skill/outputs/transcript.txt"
+  if [ ! -s "$T" ]; then
+    grade 0 "case2 transcript exists and is non-empty"
+    grade 0 "case2 uses Doe"
+    grade 0 "case2 uses OpenTelemetry"
+    grade 0 "case2 no split/lowercase garble"
+  else
+    grade 1 "case2 transcript exists and is non-empty"
+    grep -qi "john doe" "$T" && grade 1 "case2 uses Doe" || grade 0 "case2 uses Doe"
+    grep -qi opentelemetry "$T" && grade 1 "case2 uses OpenTelemetry" || grade 0 "case2 uses OpenTelemetry"
+    grep -qi "open telemetry" "$T" && grade 0 "case2 no split/lowercase garble" || grade 1 "case2 no split/lowercase garble"
+  fi
+  [ -f "$ITER/eval-context-correction/with_skill/outputs/transcript.json" ] \
+    && grade 1 "case2 transcript.json intact" || grade 0 "case2 transcript.json intact"
+
+  # case 3: batch-context
+  for clip in clip-01 clip-02; do
+    T="$ITER/eval-batch-context/with_skill/outputs/$clip/transcript.txt"
+    [ -s "$T" ] && grade 1 "case3 $clip non-empty" || grade 0 "case3 $clip non-empty"
+    grep -qi "john doe" "$T" && grade 1 "case3 $clip uses Doe" || grade 0 "case3 $clip uses Doe"
+  done
+  grep -qi opentelemetry "$ITER/eval-batch-context/with_skill/outputs/clip-02/transcript.txt" \
+    && grade 1 "case3 clip-02 OpenTelemetry" || grade 0 "case3 clip-02 OpenTelemetry"
+
+  # case 4: existing-outputs correction (manifest + cue correct)
+  EX="$ITER/eval-existing-correction/with_skill/outputs"
+  T="$EX/1. welcome.cue/transcript.txt"
+  grep -qi "open telemetry -> opentelemetry" "$EX/corrections.md" \
+    && grade 1 "case4 manifest maps the garbled term" || grade 0 "case4 manifest maps the garbled term"
+  [ -s "$T" ] && grade 1 "case4 existing transcript non-empty" || grade 0 "case4 existing transcript non-empty"
+  grep -qi opentelemetry "$T" && grade 1 "case4 existing transcript corrected" || grade 0 "case4 existing transcript corrected"
+  grep -qi "open telemetry" "$T" && grade 0 "case4 no garble in transcript" || grade 1 "case4 no garble in transcript"
+  grep -qi opentelemetry "$EX/1. welcome.cue/subtitles.srt" \
+    && grade 1 "case4 subtitles corrected" || grade 0 "case4 subtitles corrected"
+  [ -f "$EX/1. welcome.cue/transcript.json" ] \
+    && grade 1 "case4 transcript.json intact" || grade 0 "case4 transcript.json intact"
+  [ -s "$EX/2. what we cover.cue/transcript.txt" ] \
+    && grade 1 "case4 new clip transcribed" || grade 0 "case4 new clip transcribed"
+
+  echo "TOTAL: $PASS passed, $FAIL failed"
 fi

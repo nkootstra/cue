@@ -97,21 +97,63 @@ In this order, until you have enough:
 
 ### Apply corrections
 
+**Corrections are applied deterministically, not by editing files by hand.**
+Your job is to *identify* the corrections from context; `cue correct` applies
+them to every text artifact (transcript, subtitles) mechanically. This
+guarantees the fix lands everywhere and never corrupts the raw transcript.
+
 1. Read `transcript.txt` from the output directory.
-2. Fix **only** places where the text conflicts with known context —
-   misheard names, wrong technical terms, garbled proper nouns.
-3. Do **not** rewrite style, fillers, phrasing, or anything that does not
-   conflict with known facts. Keep the speaker's wording.
-4. Write the corrected text back into `transcript.txt` (in place).
-5. If the user asked for corrected subtitles, mirror the same fixes into
-   `subtitles.srt` and `subtitles.vtt` (same timestamps, corrected words).
-6. Leave `transcript.json` untouched — it is the raw archive and the source
-   of truth.
+2. Identify **only** places where the text conflicts with known context —
+   misheard names, wrong technical terms, garbled proper nouns. Do **not**
+   rewrite style, fillers, phrasing, or anything that does not conflict with
+   known facts.
+3. Write a `corrections.md` manifest next to the output directory, one rule
+   per line in `phrase to find -> replacement` form:
+
+   ```text
+   # corrections.md — applied by: cue correct <file>.cue
+   open telemetry -> OpenTelemetry
+   John Dough -> John Doe
+   ```
+
+   See `references/corrections-file.md` in this skill for the full format.
+4. Preview and apply. The manifest is auto-discovered from the output
+   directory (or its parent), so no `--corrections` flag is needed when the
+   manifest sits next to the outputs:
+
+   ```bash
+   cue correct <file>.cue --dry-run
+   cue correct <file>.cue
+   ```
+
+   If the manifest lives elsewhere, pass it explicitly: `cue correct
+   <file>.cue --corrections /path/to/corrections.md`.
+
+5. `cue correct` rewrites `transcript.txt`, `transcript.clean.txt`, and
+   `subtitles.srt`/`.vtt` in place, reports per-file replacement counts, and
+   **never touches `transcript.json`** (the raw archive) or analysis outputs.
+
+### Verify corrections
+
+After applying, confirm the fixes actually landed:
+
+1. Grep the corrected spelling in `transcript.txt` (and `subtitles.srt`) and
+   confirm it is present.
+2. If a misheard variant remains, add it to the manifest and re-run
+   `cue correct`.
+3. Report what you changed (old -> new), so the user can review.
 
 **Never re-run cue on an already-corrected file.** cue regenerates
 `transcript.txt` and subtitles from `transcript.json`, which would silently
 discard your corrections. If a re-transcription is needed, preserve the
 corrected text first (e.g., copy it aside).
+
+### Identity rule
+
+Only include a correction when context gives you **high confidence**. If you
+cannot verify the correct spelling (no reliable source, contradictory cues),
+ask the user instead of guessing — a wrong correction is worse than leaving
+the mishearing.
 
 ### Worked example
 
@@ -121,31 +163,74 @@ transcribed, and the transcript contains:
 > "I'm John Dough and I'm going to walk you through..."
 
 The talk page lists the speaker as John **Doe** (and the product as
-**OpenTelemetry**). Correct the transcript to read "John Doe" and
-"OpenTelemetry" (fixing the misheard surname and the garbled product name),
-and note the fixes when you report back. Do not "fix" anything else unless
-it also conflicts with known context.
+**OpenTelemetry**). Write a `corrections.md` next to the outputs:
+
+```text
+John Dough -> John Doe
+open telemetry -> OpenTelemetry
+```
+
+then run `cue correct 01-opening.cue --dry-run` (auto-discovers the manifest)
+and apply it. Do not add any other corrections unless they also conflict
+with known context.
 
 ## 4. Batch / course mode
 
-For a folder of related media (a course, a lecture series):
+For a folder of related media (a course, a lecture series), follow this
+order:
 
-1. Create one shared context file next to the folder (or files) that
-   captures what all episodes share — speaker name, platform, series,
-   recurring terms:
+1. **Scan the folder first.** List the media files and look for any existing
+   `*.cue/` output directories. If outputs already exist, read their
+   `transcript.txt` files — they may contain mishearings that the shared
+   context should correct, and they may already reveal the speaker and terms
+   you need.
+2. **Write the shared context file before transcribing anything.** Create
+   `context.md` next to the folder (or files) capturing what all episodes
+   share — speaker name, platform, series, recurring terms:
 
    ```markdown
    # Talk / series context
-   Platform: Acme Dev Conf
-   Talk: Intro to Observability
-   Speaker: Dr. Ada Rivas
-   Terms: OpenTelemetry, traces, spans, metrics, distributed tracing
+
+   ## Speaker
+   - John Doe (main presenter)
+
+   ## Platform
+   - Acme Dev Conf 2025
+
+   ## Material
+   - Talk: Intro to Observability
+
+   ## Terms
+   - OpenTelemetry
+   - traces
+   - spans
+   - metrics
    ```
 
    See `references/context-file.md` in this skill for the full template.
-2. Run cue once per episode (loop over the files), then apply the shared
-   context corrections to each `transcript.txt`.
-3. Optionally, if the runs produced `analysis.json` per episode, summarize
+   This file persists your context so every episode is corrected
+   consistently, not just the one you transcribed first.
+3. **Write a shared corrections manifest.** After you have gathered enough
+   context (step 1-2), write one `corrections.md` for the folder capturing
+   the mishearings shared across episodes — speaker name, product terms:
+
+   ```text
+   # corrections.md — applied to every episode
+   John Dough -> John Doe
+   open telemetry -> OpenTelemetry
+   ```
+
+4. **Loop, then apply.** Transcribe each media file, then run `cue correct`
+   against every output directory (including the existing `*.cue/` outputs
+   found in step 1 — transcribing a new file is not a reason to leave older
+   transcripts with known mishearings). Put the shared manifest where
+   auto-discovery finds it (next to the outputs) and omit `--corrections`:
+
+   ```bash
+   cue correct <file>.cue
+   ```
+
+5. Optionally, if the runs produced `analysis.json` per episode, summarize
    them into a course index (titles, topics, chapters) for the user.
 
 ## 5. Privacy

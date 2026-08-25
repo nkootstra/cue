@@ -65,7 +65,8 @@ echo
 echo "== end-to-end pipeline (mock gateway) =="
 python3 "$MOCK" &
 GW=$!
-trap 'kill $GW 2>/dev/null || true' EXIT
+VERIFY_DIR=""
+trap 'kill $GW 2>/dev/null || true; rm -rf "$VERIFY_DIR" 2>/dev/null || true' EXIT
 sleep 1
 
 mkdir -p "$CFG_DIR"
@@ -125,6 +126,23 @@ check "skill argv"         bash -c "grep -q 'npx skills add' crates/cue-cli/src/
 check "SKILL.md frontmatter" bash -c "grep -q '^name: transcribe' skills/transcribe/SKILL.md && grep -q '^description:' skills/transcribe/SKILL.md"
 check "evals.json valid"   bash -c "python3 -c \"import json; d=json.load(open('skills/transcribe/evals/evals.json')); assert len(d['evals'])>=2; assert all(c['assertions'] for c in d['evals'])\""
 check_fail "no real identifiers" bash -c "grep -riE 'eastham|dometrain' skills/transcribe/ || exit 1; exit 0"
+
+echo
+echo "== correct command =="
+VERIFY_DIR=$(mktemp -d /tmp/cue-verify-correct.XXXXXX)
+mkdir -p "$VERIFY_DIR/talk.cue"
+printf 'I am John Dough. See open telemetry.\n' > "$VERIFY_DIR/talk.cue/transcript.txt"
+printf 'open telemetry is key.\n' > "$VERIFY_DIR/talk.cue/subtitles.srt"
+printf '{"schema_version":1}\n' > "$VERIFY_DIR/talk.cue/transcript.json"
+printf 'John Dough -> John Doe\nopen telemetry -> OpenTelemetry\n' > "$VERIFY_DIR/corrections.md"
+BEFORE=$(shasum -a 256 "$VERIFY_DIR/talk.cue/transcript.txt" "$VERIFY_DIR/talk.cue/subtitles.srt" "$VERIFY_DIR/talk.cue/transcript.json" | shasum | cut -d' ' -f1)
+check "correct dry-run writes nothing" bash -c "$CUE correct $VERIFY_DIR/talk.cue --dry-run 2>&1 | grep -q 'Dry run'"
+AFTER=$(shasum -a 256 "$VERIFY_DIR/talk.cue/transcript.txt" "$VERIFY_DIR/talk.cue/subtitles.srt" "$VERIFY_DIR/talk.cue/transcript.json" | shasum | cut -d' ' -f1)
+check "correct dry-run leaves all artifacts unchanged" test "$BEFORE" = "$AFTER"
+check "correct applies"               bash -c "$CUE correct $VERIFY_DIR/talk.cue 2>&1 | grep -q 'replacement(s)'"
+check "correct fixed transcript"      bash -c "grep -q 'OpenTelemetry' $VERIFY_DIR/talk.cue/transcript.txt && ! grep -q 'John Dough' $VERIFY_DIR/talk.cue/transcript.txt"
+check "correct fixed subtitles"       bash -c "grep -q 'OpenTelemetry' $VERIFY_DIR/talk.cue/subtitles.srt"
+check "correct kept json"             bash -c "grep -q 'schema_version' $VERIFY_DIR/talk.cue/transcript.json"
 
 kill $GW 2>/dev/null || true
 

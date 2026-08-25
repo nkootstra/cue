@@ -46,6 +46,8 @@ pub enum Command {
     Cache(CacheArgs),
     /// Install the transcribe agent skill for AI agents
     Skill(SkillArgs),
+    /// Apply transcript corrections from a manifest to cue outputs
+    Correct(CorrectArgs),
 }
 
 /// Transcribe files
@@ -110,6 +112,21 @@ pub struct SkillArgs {
     /// Which skill action to run
     #[usage(subcommand)]
     pub command: Option<SkillCommand>,
+}
+
+/// Apply transcript corrections from a manifest
+#[derive(Debug, Args)]
+pub struct CorrectArgs {
+    /// A cue output directory (e.g. "video.cue/") or a media file whose
+    /// sibling ".cue/" directory exists
+    pub output: String,
+    /// Corrections manifest file (default: corrections.md in the output
+    /// directory, then in its parent)
+    #[usage(long)]
+    pub corrections: Option<String>,
+    /// Preview what would change without writing any files
+    #[usage(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Subcommands)]
