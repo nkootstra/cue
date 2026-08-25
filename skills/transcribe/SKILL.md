@@ -155,6 +155,11 @@ cannot verify the correct spelling (no reliable source, contradictory cues),
 ask the user instead of guessing — a wrong correction is worse than leaving
 the mishearing.
 
+Never present an unverified speaker or platform identity as fact. If you name
+who is speaking in a report or a context file, either verify it from a
+reliable source or explicitly mark it as unverified (e.g. "speaker appears to
+be X — unverified"), and never base a correction on an unverified guess.
+
 ### Worked example
 
 A file `Talks/acme-dev-conf-2025/intro-to-observability/01-opening.mp4` is
