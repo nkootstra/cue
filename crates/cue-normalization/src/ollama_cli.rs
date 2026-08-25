@@ -81,13 +81,18 @@ fn stderr_tail(stderr: &str) -> String {
 
 /// Search PATH for the `ollama` executable.
 fn find_ollama() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    find_ollama_on(&path)
+}
+
+/// PATH lookup separated from the environment so it is unit-testable.
+fn find_ollama_on(path: &std::ffi::OsString) -> Option<PathBuf> {
     let exe = if cfg!(windows) {
         "ollama.exe"
     } else {
         "ollama"
     };
-    let path_var = std::env::var_os("PATH")?;
-    std::env::split_paths(&path_var)
+    std::env::split_paths(path)
         .filter(|dir| dir.is_dir())
         .map(|dir| dir.join(exe))
         .find(|candidate| candidate.is_file())
@@ -98,10 +103,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ollama_is_detected_on_this_machine() {
-        // The CI/local harness that exercises `cue models install` has
-        // Ollama installed; treat absence as a valid "not present" state.
-        assert!(find_ollama().is_some() || std::env::var("OLLAMA_HOST").is_ok());
+    fn finds_ollama_in_a_prepended_path_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join(if cfg!(windows) {
+            "ollama.exe"
+        } else {
+            "ollama"
+        });
+        std::fs::write(&exe, b"#!/bin/sh\nexit 0").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let path = std::ffi::OsString::from(dir.path().display().to_string());
+        assert!(find_ollama_on(&path).is_some());
+    }
+
+    #[test]
+    fn returns_none_when_path_has_no_ollama() {
+        let path = std::ffi::OsString::from("/usr/bin:/bin");
+        assert_eq!(find_ollama_on(&path), None);
     }
 
     #[test]

@@ -241,6 +241,7 @@ dependencies = [
  "cue-core",
  "cue-llm",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "wiremock",
