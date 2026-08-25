@@ -11,6 +11,29 @@ produces a `video.cue/` directory containing transcripts (`json`, `txt`,
 cleaned `txt`), subtitles (`srt`, `vtt`) and — when an LLM gateway is
 configured — summaries, descriptions, and chapters.
 
+## Why cue?
+
+- **Local-first privacy.** Media, audio, the raw transcript, and subtitles
+  never leave your machine. Only cleaned transcript text may be sent to an
+  LLM gateway you explicitly configure (Ollama `/v1` or OpenRouter).
+- **Canonical transcript as source of truth.** The raw timed transcript
+  (`transcript.json`) is never overwritten. Cleaned text, subtitles, and
+  analysis all derive from it.
+- **Deterministic corrections.** Fix misheard names and terms by writing a
+  plain-text corrections manifest and running `cue correct` — applied
+  mechanically, never corrupting the raw archive.
+- **Fast reruns.** Content-addressed caching means a rerun skips completed
+  extraction, transcription, normalization, and analysis.
+- **Replaceable providers.** faster-whisper, S1, and OpenAI-compatible
+  gateways sit behind traits, so you can swap local models or gateways
+  without changing how you work.
+- **Self-contained.** One binary that embeds and auto-provisions its Python
+  worker (`cue doctor --fix`); no manual environment setup.
+- **Agent-ready.** Ships a `transcribe` agent skill with an eval suite, so
+  coding agents can transcribe and correct media for you.
+- **Word-level timestamps.** Accurate per-word timing powers subtitles and
+  timestamped analysis.
+
 ## Installation
 
 **Homebrew** (macOS and Linux):

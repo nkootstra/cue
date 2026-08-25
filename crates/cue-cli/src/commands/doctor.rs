@@ -20,12 +20,13 @@ pub async fn run(args: DoctorArgs) -> i32 {
         println_line(&tool_line(report));
     }
 
-    println_line("\nOptional:");
+    println_line("\nOptional (not required for local transcription):");
     let user = load_user_config().unwrap_or_default();
     let config = resolve(&[&PartialConfig::default(), &user]);
     for line in integration_lines(&config).await {
         println_line(&line);
     }
+    println_line("\nLocal transcription and subtitles work without any of these.");
 
     let fixed_ok = if args.fix {
         Some(try_fix(&env).await)
@@ -71,7 +72,7 @@ pub async fn integration_lines(config: &cue_core::Config) -> Vec<String> {
         }
         Err(reason) => {
             lines.push(format!(
-                "{:<10} missing  not reachable at {}",
+                "{:<10} not configured  not reachable at {}",
                 "Ollama", config.normalization.ollama_url
             ));
             tracing::debug!(reason = %reason, "ollama probe failed");
@@ -88,7 +89,7 @@ fn s1_line(installed: bool, model_name: &str) -> String {
         format!("{:<10} ok       {model_name} ready", "S1")
     } else {
         format!(
-            "{:<10} missing  run `cue models install s1` for cleaned transcripts",
+            "{:<10} not configured  run `cue models install s1` for cleaned transcripts",
             "S1"
         )
     }
@@ -97,7 +98,7 @@ fn s1_line(installed: bool, model_name: &str) -> String {
 fn llm_line(llm: Option<&cue_core::config::LlmConfig>) -> String {
     match llm {
         None => format!(
-            "{:<10} off      no gateway configured; local outputs still work",
+            "{:<10} not configured  no gateway — summaries/descriptions skipped",
             "LLM"
         ),
         Some(config) => {
@@ -164,20 +165,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn s1_line_distinguishes_installed_from_missing() {
+    fn s1_line_distinguishes_installed_from_not_configured() {
         let ok = s1_line(true, "cue-s1-mini");
         assert!(ok.contains("ready"), "{ok}");
 
-        let missing = s1_line(false, "cue-s1-mini");
-        assert!(missing.contains("missing"), "{missing}");
-        assert!(missing.contains("models install"), "{missing}");
+        let not_configured = s1_line(false, "cue-s1-mini");
+        assert!(
+            not_configured.contains("not configured"),
+            "{not_configured}"
+        );
+        assert!(
+            not_configured.contains("models install"),
+            "{not_configured}"
+        );
     }
 
     #[test]
-    fn llm_line_reports_off_when_unconfigured() {
+    fn llm_line_reports_not_configured_when_unconfigured() {
         let line = llm_line(None);
-        assert!(line.contains("off"), "{line}");
-        assert!(line.contains("local outputs still work"), "{line}");
+        assert!(line.contains("not configured"), "{line}");
+        assert!(line.contains("summaries/descriptions"), "{line}");
     }
 
     #[test]

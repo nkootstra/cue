@@ -155,6 +155,11 @@ cannot verify the correct spelling (no reliable source, contradictory cues),
 ask the user instead of guessing — a wrong correction is worse than leaving
 the mishearing.
 
+Never present an unverified speaker or platform identity as fact. If you name
+who is speaking in a report or a context file, either verify it from a
+reliable source or explicitly mark it as unverified (e.g. "speaker appears to
+be X — unverified"), and never base a correction on an unverified guess.
+
 ### Worked example
 
 A file `Talks/acme-dev-conf-2025/intro-to-observability/01-opening.mp4` is
@@ -248,4 +253,5 @@ analysis). Never upload media files anywhere.
 | Transcription fails on a short/quiet clip | Expected: whisper may return an empty transcript for music/silence/no-speech |
 | No `transcript.clean.txt` / `summary.md` / `description.md` | Optional integrations (Ollama S1, LLM gateway) are not configured — local transcription still works |
 | S1 cleanup needed | `cue models install s1` (pulls ~460 MB into Ollama) |
+| `cue models install s1` fails with a 400 from Ollama | A known Ollama API limitation with `FROM hf.co/...` Modelfiles; run `ollama create cue-s1-mini -f <path-to-Modelfile>` manually and retry |
 | Subtitle timing looks off | Re-run with a larger `max_duration_ms` in `~/.config/cue/cue.toml` `[subtitles]` |
