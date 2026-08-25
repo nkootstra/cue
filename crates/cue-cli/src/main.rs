@@ -31,6 +31,7 @@ async fn main() -> ExitCode {
         Some(Command::Config(args)) => commands::config_cmd::run(args),
         Some(Command::Cache(args)) => commands::cache_cmd::run(args.command),
         Some(Command::Skill(args)) => commands::skill::run(args).await,
+        Some(Command::Correct(args)) => commands::correct::run(args),
         None => commands::process::run(&cli).await,
     };
 

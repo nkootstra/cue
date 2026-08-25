@@ -1,5 +1,6 @@
 pub mod analysis;
 pub mod config;
+pub mod correct;
 pub mod error;
 pub mod media;
 pub mod normalized;
