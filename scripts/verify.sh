@@ -65,7 +65,8 @@ echo
 echo "== end-to-end pipeline (mock gateway) =="
 python3 "$MOCK" &
 GW=$!
-trap 'kill $GW 2>/dev/null || true' EXIT
+VERIFY_DIR=""
+trap 'kill $GW 2>/dev/null || true; rm -rf "$VERIFY_DIR" 2>/dev/null || true' EXIT
 sleep 1
 
 mkdir -p "$CFG_DIR"
@@ -128,17 +129,20 @@ check_fail "no real identifiers" bash -c "grep -riE 'eastham|dometrain' skills/t
 
 echo
 echo "== correct command =="
-rm -rf /tmp/cue-verify-correct && mkdir -p /tmp/cue-verify-correct/talk.cue
-printf 'I am John Dough. See open telemetry.\n' > /tmp/cue-verify-correct/talk.cue/transcript.txt
-printf 'open telemetry is key.\n' > /tmp/cue-verify-correct/talk.cue/subtitles.srt
-printf '{"schema_version":1}\n' > /tmp/cue-verify-correct/talk.cue/transcript.json
-printf 'John Dough -> John Doe\nopen telemetry -> OpenTelemetry\n' > /tmp/cue-verify-correct/corrections.md
-check "correct dry-run writes nothing" bash -c "$CUE correct /tmp/cue-verify-correct/talk.cue --dry-run 2>&1 | grep -q 'Dry run'"
-check "correct dry-run leaves garble"  bash -c "grep -q 'open telemetry' /tmp/cue-verify-correct/talk.cue/transcript.txt"
-check "correct applies"               bash -c "$CUE correct /tmp/cue-verify-correct/talk.cue 2>&1 | grep -q 'replacement(s)'"
-check "correct fixed transcript"      bash -c "grep -q 'OpenTelemetry' /tmp/cue-verify-correct/talk.cue/transcript.txt && ! grep -q 'John Dough' /tmp/cue-verify-correct/talk.cue/transcript.txt"
-check "correct fixed subtitles"       bash -c "grep -q 'OpenTelemetry' /tmp/cue-verify-correct/talk.cue/subtitles.srt"
-check "correct kept json"             bash -c "grep -q 'schema_version' /tmp/cue-verify-correct/talk.cue/transcript.json"
+VERIFY_DIR=$(mktemp -d /tmp/cue-verify-correct.XXXXXX)
+mkdir -p "$VERIFY_DIR/talk.cue"
+printf 'I am John Dough. See open telemetry.\n' > "$VERIFY_DIR/talk.cue/transcript.txt"
+printf 'open telemetry is key.\n' > "$VERIFY_DIR/talk.cue/subtitles.srt"
+printf '{"schema_version":1}\n' > "$VERIFY_DIR/talk.cue/transcript.json"
+printf 'John Dough -> John Doe\nopen telemetry -> OpenTelemetry\n' > "$VERIFY_DIR/corrections.md"
+BEFORE=$(shasum -a 256 "$VERIFY_DIR/talk.cue/transcript.txt" "$VERIFY_DIR/talk.cue/subtitles.srt" "$VERIFY_DIR/talk.cue/transcript.json" | shasum | cut -d' ' -f1)
+check "correct dry-run writes nothing" bash -c "$CUE correct $VERIFY_DIR/talk.cue --dry-run 2>&1 | grep -q 'Dry run'"
+AFTER=$(shasum -a 256 "$VERIFY_DIR/talk.cue/transcript.txt" "$VERIFY_DIR/talk.cue/subtitles.srt" "$VERIFY_DIR/talk.cue/transcript.json" | shasum | cut -d' ' -f1)
+check "correct dry-run leaves all artifacts unchanged" test "$BEFORE" = "$AFTER"
+check "correct applies"               bash -c "$CUE correct $VERIFY_DIR/talk.cue 2>&1 | grep -q 'replacement(s)'"
+check "correct fixed transcript"      bash -c "grep -q 'OpenTelemetry' $VERIFY_DIR/talk.cue/transcript.txt && ! grep -q 'John Dough' $VERIFY_DIR/talk.cue/transcript.txt"
+check "correct fixed subtitles"       bash -c "grep -q 'OpenTelemetry' $VERIFY_DIR/talk.cue/subtitles.srt"
+check "correct kept json"             bash -c "grep -q 'schema_version' $VERIFY_DIR/talk.cue/transcript.json"
 
 kill $GW 2>/dev/null || true
 

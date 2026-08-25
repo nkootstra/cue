@@ -18,9 +18,12 @@ phrase to find -> replacement
   where the phrase is bounded by non-alphanumeric characters, so `dough`
   never matches inside `doughnut`. Multi-word phrases are fine.
 - Rules apply **in order** — list specific phrases before generic ones.
-- `replacement` may be empty (removes the phrase); the phrase to find must
-  not be empty.
-- Applying the same manifest twice is a no-op.
+  Avoid chains where one rule's replacement matches another rule's phrase
+  (e.g. `a -> b` followed by `b -> c`): such chains change output again on a
+  second pass, so a manifest is only a no-op on re-apply when its rules do
+  not overlap.
+- `replacement` may be empty to delete a phrase (`remove this ->`); the
+  phrase to find must not be empty.
 
 ## Worked example
 

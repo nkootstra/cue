@@ -51,7 +51,7 @@
         "A corrections.md manifest exists and maps the garbled term to 'OpenTelemetry'",
         "cue correct was run (or the fix is otherwise applied) and the pre-existing transcript.txt now uses 'OpenTelemetry'",
         "The pre-existing output folder's transcript.json is unchanged from the seeded state",
-        "The pre-existing output folder's subtitles, if present, received the same correction",
+        "The pre-existing output folder's subtitles received the same correction",
         "The new clip produced a transcript.txt that is non-empty"
       ]
     }

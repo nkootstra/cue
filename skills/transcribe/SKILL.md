@@ -117,12 +117,17 @@ guarantees the fix lands everywhere and never corrupts the raw transcript.
    ```
 
    See `references/corrections-file.md` in this skill for the full format.
-4. Preview and apply:
+4. Preview and apply. The manifest is auto-discovered from the output
+   directory (or its parent), so no `--corrections` flag is needed when the
+   manifest sits next to the outputs:
 
    ```bash
-   cue correct <file>.cue --corrections corrections.md --dry-run
-   cue correct <file>.cue --corrections corrections.md
+   cue correct <file>.cue --dry-run
+   cue correct <file>.cue
    ```
+
+   If the manifest lives elsewhere, pass it explicitly: `cue correct
+   <file>.cue --corrections /path/to/corrections.md`.
 
 5. `cue correct` rewrites `transcript.txt`, `transcript.clean.txt`, and
    `subtitles.srt`/`.vtt` in place, reports per-file replacement counts, and
@@ -158,15 +163,16 @@ transcribed, and the transcript contains:
 > "I'm John Dough and I'm going to walk you through..."
 
 The talk page lists the speaker as John **Doe** (and the product as
-**OpenTelemetry**). Write a `corrections.md`:
+**OpenTelemetry**). Write a `corrections.md` next to the outputs:
 
 ```text
 John Dough -> John Doe
 open telemetry -> OpenTelemetry
 ```
 
-then run `cue correct 01-opening.cue --dry-run` and apply it. Do not add any
-other corrections unless they also conflict with known context.
+then run `cue correct 01-opening.cue --dry-run` (auto-discovers the manifest)
+and apply it. Do not add any other corrections unless they also conflict
+with known context.
 
 ## 4. Batch / course mode
 
@@ -217,10 +223,11 @@ order:
 4. **Loop, then apply.** Transcribe each media file, then run `cue correct`
    against every output directory (including the existing `*.cue/` outputs
    found in step 1 — transcribing a new file is not a reason to leave older
-   transcripts with known mishearings):
+   transcripts with known mishearings). Put the shared manifest where
+   auto-discovery finds it (next to the outputs) and omit `--corrections`:
 
    ```bash
-   cue correct <file>.cue --corrections corrections.md
+   cue correct <file>.cue
    ```
 
 5. Optionally, if the runs produced `analysis.json` per episode, summarize

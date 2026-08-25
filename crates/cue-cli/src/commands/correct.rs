@@ -134,6 +134,9 @@ fn run_inner(args: &CorrectArgs) -> Result<()> {
         println_line("\nDry run — nothing written. Re-run without --dry-run to apply.");
     } else {
         println_line("\nApplied. transcript.json and analysis outputs were left untouched.");
+        println_line(
+            "Note: re-running cue on the source media regenerates these outputs from the raw transcript, discarding the corrections. Re-apply corrections after a re-run.",
+        );
     }
     Ok(())
 }

@@ -209,9 +209,17 @@ if [ "$GRADE" = "1" ]; then
 
   # case 2: context-correction (clip-02)
   T="$ITER/eval-context-correction/with_skill/outputs/transcript.txt"
-  grep -qi "john doe" "$T" && grade 1 "case2 uses Doe" || grade 0 "case2 uses Doe"
-  grep -qi opentelemetry "$T" && grade 1 "case2 uses OpenTelemetry" || grade 0 "case2 uses OpenTelemetry"
-  grep -qi "open telemetry" "$T" && grade 0 "case2 no split/lowercase garble" || grade 1 "case2 no split/lowercase garble"
+  if [ ! -s "$T" ]; then
+    grade 0 "case2 transcript exists and is non-empty"
+    grade 0 "case2 uses Doe"
+    grade 0 "case2 uses OpenTelemetry"
+    grade 0 "case2 no split/lowercase garble"
+  else
+    grade 1 "case2 transcript exists and is non-empty"
+    grep -qi "john doe" "$T" && grade 1 "case2 uses Doe" || grade 0 "case2 uses Doe"
+    grep -qi opentelemetry "$T" && grade 1 "case2 uses OpenTelemetry" || grade 0 "case2 uses OpenTelemetry"
+    grep -qi "open telemetry" "$T" && grade 0 "case2 no split/lowercase garble" || grade 1 "case2 no split/lowercase garble"
+  fi
   [ -f "$ITER/eval-context-correction/with_skill/outputs/transcript.json" ] \
     && grade 1 "case2 transcript.json intact" || grade 0 "case2 transcript.json intact"
 

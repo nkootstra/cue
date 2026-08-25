@@ -19,8 +19,8 @@ pub struct Correction {
 /// Parse a corrections manifest.
 ///
 /// Format: one rule per line, `old -> new`. `#` comments and blank lines
-/// are ignored. A rule's `new` may be empty (delete the phrase); `old` must
-/// not be empty.
+/// are ignored. A rule's `new` may be empty (delete the phrase) by writing
+/// `old ->`; the phrase to find (`old`) must not be empty.
 pub fn parse_manifest(text: &str) -> Result<Vec<Correction>, CueError> {
     let mut rules = Vec::new();
     for (index, raw_line) in text.lines().enumerate() {
@@ -28,7 +28,9 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Correction>, CueError> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let Some((old, new)) = line.split_once(" -> ") else {
+        // Split on the first ` ->` marker. `old -> new`, `old ->new`, and a
+        // bare `old ->` (empty replacement, a deletion rule) all parse.
+        let Some((old, new)) = line.split_once(" ->") else {
             return Err(CueError::general(format!(
                 "corrections manifest line {} is not 'old -> new': {line:?}",
                 index + 1
@@ -38,8 +40,6 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Correction>, CueError> {
             ));
         };
         let old = old.trim();
-        // old cannot be empty here: leading/trailing trim would have removed
-        // the space before `->` in `" -> x"`, making it fail the split.
         rules.push(Correction {
             old: old.to_string(),
             new: new.trim().to_string(),
@@ -53,8 +53,9 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Correction>, CueError> {
 ///
 /// Matching is case-insensitive and whole-phrase: a rule matches only where
 /// the characters immediately before and after the phrase are not
-/// alphanumeric, so "dough" never matches inside "doughnut". Applying the
-/// same rules twice is a no-op.
+/// alphanumeric, so "dough" never matches inside "doughnut". Case folding is
+/// ASCII-only (byte offsets must stay stable), so phrases with non-ASCII
+/// letters must be written in the same case as the transcript.
 pub fn apply_counted(text: &str, rules: &[Correction]) -> (String, usize) {
     let mut out = text.to_string();
     let mut replacements = 0usize;
@@ -71,14 +72,16 @@ pub fn apply(text: &str, rules: &[Correction]) -> String {
     apply_counted(text, rules).0
 }
 
-/// Count which rules would match the text at all (before application).
+/// Count which rules would change the text at all (before application).
+///
+/// Matching uses the same whole-phrase boundary rule as [`apply`], so a rule
+/// like `dough -> paste` does not count against "doughnut".
 /// Useful for dry-run previews: report the rules that would change output.
 pub fn matched_rules(text: &str, rules: &[Correction]) -> Vec<usize> {
-    let lower = text.to_ascii_lowercase();
     rules
         .iter()
         .enumerate()
-        .filter(|(_, rule)| lower.contains(&rule.old.to_ascii_lowercase()))
+        .filter(|(_, rule)| replace_phrase(text, &rule.old, &rule.new).1 > 0)
         .map(|(index, _)| index)
         .collect()
 }
@@ -238,6 +241,26 @@ mod tests {
     fn matched_rules_reports_which_rules_would_fire() {
         let matched = matched_rules("traces with open telemetry.", &rules());
         assert_eq!(matched, vec![0]); // rule 1 fires, rule 2 (John Dough) does not
+    }
+
+    #[test]
+    fn matched_rules_respects_whole_phrase_boundaries() {
+        let rule = [Correction {
+            old: "dough".into(),
+            new: "paste".into(),
+        }];
+        // "dough" inside "doughnut" is not a whole-phrase match.
+        assert!(matched_rules("the doughnut", &rule).is_empty());
+        assert!(matched_rules("the dough", &rule) == vec![0]);
+    }
+
+    #[test]
+    fn parses_deletion_rule_with_empty_replacement() {
+        let rules = parse_manifest("remove this ->\nkeep -> that\n").unwrap();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].old, "remove this");
+        assert_eq!(rules[0].new, "");
+        assert_eq!(rules[1].new, "that");
     }
 
     #[test]
