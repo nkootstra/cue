@@ -124,6 +124,9 @@ pub struct SkillInstallArgs {
     /// Skill source repo in owner/repo form
     #[usage(long, default = "nkootstra/cue")]
     pub repo: String,
+    /// Target agent (e.g. "opencode", "claude-code"); auto-detect when unset
+    #[usage(long)]
+    pub agent: Option<String>,
     /// Opt out of the skills CLI's anonymous telemetry
     #[usage(long)]
     pub no_telemetry: bool,

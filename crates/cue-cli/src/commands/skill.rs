@@ -7,22 +7,30 @@
 use crate::cli::{SkillArgs, SkillCommand};
 use crate::render::println_line;
 
-/// The repository the skill ships in.
 /// The repository the skill ships in; also the CLI's `--repo` default.
 #[cfg_attr(not(test), allow(dead_code))]
 pub const DEFAULT_SKILL_REPO: &str = "nkootstra/cue";
 
 /// Build the exact argv that installs the skill for the given options.
 ///
-/// Pure and unit-tested without executing anything. Telemetry opt-out is
-/// carried by the `DISABLE_TELEMETRY` env var (the skills CLI has no flag).
-pub fn install_argv(repo: &str) -> Vec<String> {
-    vec![
+/// Pure and unit-tested without executing anything. Always passes `-y` so
+/// the skills CLI never blocks on an interactive prompt; `--agent` targets
+/// a specific harness and auto-detection is the default. Telemetry opt-out
+/// is carried by the `DISABLE_TELEMETRY` env var (the skills CLI has no
+/// flag).
+pub fn install_argv(repo: &str, agent: Option<&str>) -> Vec<String> {
+    let mut argv = vec![
         "npx".to_string(),
         "skills".to_string(),
         "add".to_string(),
         repo.to_string(),
-    ]
+        "-y".to_string(),
+    ];
+    if let Some(agent) = agent {
+        argv.push("--agent".to_string());
+        argv.push(agent.to_string());
+    }
+    argv
 }
 
 pub async fn run(args: SkillArgs) -> i32 {
@@ -34,13 +42,18 @@ pub async fn run(args: SkillArgs) -> i32 {
             0
         }
         Some(SkillCommand::Install(install)) => {
-            run_install(&install.repo, install.no_telemetry).await
+            run_install(
+                &install.repo,
+                install.agent.as_deref(),
+                install.no_telemetry,
+            )
+            .await
         }
     }
 }
 
-async fn run_install(repo: &str, no_telemetry: bool) -> i32 {
-    let argv = install_argv(repo);
+async fn run_install(repo: &str, agent: Option<&str>, no_telemetry: bool) -> i32 {
+    let argv = install_argv(repo, agent);
 
     let mut command = tokio::process::Command::new(&argv[0]);
     command.args(&argv[1..]);
@@ -80,16 +93,32 @@ mod tests {
     #[test]
     fn builds_default_install_command() {
         assert_eq!(
-            install_argv(DEFAULT_SKILL_REPO),
-            vec!["npx", "skills", "add", "nkootstra/cue"]
+            install_argv(DEFAULT_SKILL_REPO, None),
+            vec!["npx", "skills", "add", "nkootstra/cue", "-y"]
         );
     }
 
     #[test]
     fn custom_repo() {
         assert_eq!(
-            install_argv("someone/fork"),
-            vec!["npx", "skills", "add", "someone/fork"]
+            install_argv("someone/fork", None),
+            vec!["npx", "skills", "add", "someone/fork", "-y"]
+        );
+    }
+
+    #[test]
+    fn targets_a_specific_agent() {
+        assert_eq!(
+            install_argv("nkootstra/cue", Some("opencode")),
+            vec![
+                "npx",
+                "skills",
+                "add",
+                "nkootstra/cue",
+                "-y",
+                "--agent",
+                "opencode"
+            ]
         );
     }
 }
