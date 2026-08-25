@@ -40,6 +40,56 @@ requirements: FFmpeg on PATH (`brew install ffmpeg` / `apt install ffmpeg`);
 Ollama optional, for S1 transcript cleanup. After installing, run
 `cue doctor` to check your environment.
 
+## Commands
+
+| Command | What it does |
+|---|---|
+| `cue <file>...` | Run the full pipeline: inspect, extract audio, transcribe, normalize (S1), analyze (gateway), render |
+| `cue transcribe <file>...` | Stop after the canonical transcript (no subtitles/analysis) |
+| `cue correct <file>.cue` | Apply transcript corrections from a manifest deterministically |
+| `cue doctor` | Check required and optional tools; `--fix` provisions the Python worker |
+| `cue models list/check/install s1` | Manage transcription/normalization models in Ollama |
+| `cue skill install` | Install the `transcribe` agent skill via `npx skills add` |
+| `cue config` | Show resolved configuration and its sources |
+| `cue cache dir/clear` | Inspect or clear the content-addressed cache |
+
+## Outputs
+
+`cue ./video.mp4` writes into `video.cue/`:
+
+| File | Role |
+|---|---|
+| `transcript.json` | Raw canonical transcript (timed words) — the source of truth, never edited |
+| `transcript.txt` | Plain text derived from the canonical transcript |
+| `transcript.clean.txt` / `normalized.json` | S1-cleaned prose (when Ollama has S1) |
+| `subtitles.srt` / `subtitles.vtt` | Subtitles from the canonical transcript |
+| `analysis.json` / `summary.md` / `description.md` | LLM analysis (when a gateway is configured) |
+| `corrections.md` | Optional manifest you write to fix misheard names/terms |
+
+## Correcting transcripts
+
+Speech-to-text mishears names and technical terms. Instead of editing files
+by hand, write a corrections manifest and let cue apply it deterministically
+to every text artifact:
+
+```text
+# corrections.md
+John Dough -> John Doe
+open telemetry -> OpenTelemetry
+```
+
+```bash
+cue correct video.cue --corrections corrections.md --dry-run  # preview
+cue correct video.cue --corrections corrections.md            # apply
+```
+
+`cue correct` rewrites `transcript.txt`, `transcript.clean.txt`, and
+`subtitles.srt`/`.vtt` in place (reporting per-file replacement counts),
+and never touches `transcript.json` or the analysis outputs. Matching is
+case-insensitive and whole-phrase, so `dough` won't affect `doughnut`.
+Without `--corrections`, cue looks for `corrections.md` in the output
+directory, then its parent.
+
 ## Agent skill
 
 AI coding agents (Claude Code, opencode, Codex, Cursor, ...) can transcribe
@@ -53,10 +103,10 @@ npx skills add nkootstra/cue
 ```
 
 The skill teaches agents to install cue when missing, run the pipeline,
-correct speech-to-text errors using speaker/domain context (e.g. a surname
-whisper misheard, fixed from a context file), batch-process course folders,
-and respect the privacy boundary (media stays local). All examples in the
-skill use fictional identities.
+gather speaker/domain context, write a corrections manifest, and apply it
+with `cue correct` (batch-processing course folders and correcting existing
+outputs too), and to respect the privacy boundary (media stays local). All
+examples in the skill use fictional identities.
 
 The skill lives in `skills/transcribe/` and ships with an eval suite
 (`skills/transcribe/evals/evals.json`). Run the eval harness to regenerate
@@ -80,6 +130,8 @@ Work in progress.
 - [x] LLM analysis (OpenAI-compatible gateways: Ollama `/v1`, OpenRouter)
 - [x] Content-addressed caching for every stage; reruns skip completed work
 - [x] Pipeline event bus with TTY-aware rendering
+- [x] Deterministic transcript corrections (`cue correct`)
+- [x] `transcribe` agent skill with evals
 - [ ] Incremental progress within stages (worker-level reporting)
 - [ ] Parallel file processing
 

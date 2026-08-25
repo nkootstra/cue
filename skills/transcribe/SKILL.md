@@ -97,30 +97,45 @@ In this order, until you have enough:
 
 ### Apply corrections
 
-**When you find a mishearing, fix it immediately, in place — do not defer
-and do not ask permission.** Corrections are conservative by design: only
-tokens that conflict with known context are changed, so applying them is
-safe to do without a confirmation round-trip.
+**Corrections are applied deterministically, not by editing files by hand.**
+Your job is to *identify* the corrections from context; `cue correct` applies
+them to every text artifact (transcript, subtitles) mechanically. This
+guarantees the fix lands everywhere and never corrupts the raw transcript.
 
 1. Read `transcript.txt` from the output directory.
-2. Fix **only** places where the text conflicts with known context —
-   misheard names, wrong technical terms, garbled proper nouns.
-3. Do **not** rewrite style, fillers, phrasing, or anything that does not
-   conflict with known facts. Keep the speaker's wording.
-4. Write the corrected text back into `transcript.txt` (in place).
-5. Mirror the same fixes into `subtitles.srt` and `subtitles.vtt` when they
-   exist (same timestamps, corrected words). Do not skip subtitles; a name
-   that appears there is a name that must be corrected there too.
-6. Leave `transcript.json` untouched — it is the raw archive and the source
-   of truth.
+2. Identify **only** places where the text conflicts with known context —
+   misheard names, wrong technical terms, garbled proper nouns. Do **not**
+   rewrite style, fillers, phrasing, or anything that does not conflict with
+   known facts.
+3. Write a `corrections.md` manifest next to the output directory, one rule
+   per line in `phrase to find -> replacement` form:
+
+   ```text
+   # corrections.md — applied by: cue correct <file>.cue
+   open telemetry -> OpenTelemetry
+   John Dough -> John Doe
+   ```
+
+   See `references/corrections-file.md` in this skill for the full format.
+4. Preview and apply:
+
+   ```bash
+   cue correct <file>.cue --corrections corrections.md --dry-run
+   cue correct <file>.cue --corrections corrections.md
+   ```
+
+5. `cue correct` rewrites `transcript.txt`, `transcript.clean.txt`, and
+   `subtitles.srt`/`.vtt` in place, reports per-file replacement counts, and
+   **never touches `transcript.json`** (the raw archive) or analysis outputs.
 
 ### Verify corrections
 
-After applying corrections, confirm they actually landed:
+After applying, confirm the fixes actually landed:
 
-1. Grep the corrected spelling in `transcript.txt` (e.g. the fixed name or
-   term) and confirm it is present.
-2. If a misheard variant remains anywhere, fix it and re-check.
+1. Grep the corrected spelling in `transcript.txt` (and `subtitles.srt`) and
+   confirm it is present.
+2. If a misheard variant remains, add it to the manifest and re-run
+   `cue correct`.
 3. Report what you changed (old -> new), so the user can review.
 
 **Never re-run cue on an already-corrected file.** cue regenerates
@@ -130,10 +145,10 @@ corrected text first (e.g., copy it aside).
 
 ### Identity rule
 
-Only correct a name when context gives you **high confidence**. If you
-cannot verify the correct spelling (no reliable source, contradictory
-cues), ask the user instead of guessing — a wrong correction is worse than
-leaving the mishearing.
+Only include a correction when context gives you **high confidence**. If you
+cannot verify the correct spelling (no reliable source, contradictory cues),
+ask the user instead of guessing — a wrong correction is worse than leaving
+the mishearing.
 
 ### Worked example
 
@@ -143,10 +158,15 @@ transcribed, and the transcript contains:
 > "I'm John Dough and I'm going to walk you through..."
 
 The talk page lists the speaker as John **Doe** (and the product as
-**OpenTelemetry**). Correct the transcript to read "John Doe" and
-"OpenTelemetry" (fixing the misheard surname and the garbled product name),
-and note the fixes when you report back. Do not "fix" anything else unless
-it also conflicts with known context.
+**OpenTelemetry**). Write a `corrections.md`:
+
+```text
+John Dough -> John Doe
+open telemetry -> OpenTelemetry
+```
+
+then run `cue correct 01-opening.cue --dry-run` and apply it. Do not add any
+other corrections unless they also conflict with known context.
 
 ## 4. Batch / course mode
 
@@ -184,12 +204,26 @@ order:
    See `references/context-file.md` in this skill for the full template.
    This file persists your context so every episode is corrected
    consistently, not just the one you transcribed first.
-3. **Loop.** For each media file: run cue, then correct its `transcript.txt`
-   (and subtitles) against the shared context, verifying each correction as
-   described in section 3. This includes existing `*.cue/` outputs found in
-   step 1 — transcribing a new file is not a reason to leave older
-   transcripts with known mishearings.
-4. Optionally, if the runs produced `analysis.json` per episode, summarize
+3. **Write a shared corrections manifest.** After you have gathered enough
+   context (step 1-2), write one `corrections.md` for the folder capturing
+   the mishearings shared across episodes — speaker name, product terms:
+
+   ```text
+   # corrections.md — applied to every episode
+   John Dough -> John Doe
+   open telemetry -> OpenTelemetry
+   ```
+
+4. **Loop, then apply.** Transcribe each media file, then run `cue correct`
+   against every output directory (including the existing `*.cue/` outputs
+   found in step 1 — transcribing a new file is not a reason to leave older
+   transcripts with known mishearings):
+
+   ```bash
+   cue correct <file>.cue --corrections corrections.md
+   ```
+
+5. Optionally, if the runs produced `analysis.json` per episode, summarize
    them into a course index (titles, topics, chapters) for the user.
 
 ## 5. Privacy

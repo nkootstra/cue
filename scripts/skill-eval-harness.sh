@@ -175,8 +175,9 @@ cat <<EOF
 [existing-correction] with_skill
   Prompt: There is a media file ("2. what we cover.mp3") and an
   already-transcribed folder ("1. welcome.cue") in the current directory,
-  plus a shared context file. Transcribe the new clip, and correct the
-  existing transcript against the context too.
+  plus a shared context file. Transcribe the new clip, then write a
+  corrections.md manifest for the misheard term and apply it with
+  cue correct to the existing folder.
   Input:  $ITER/eval-existing-correction/with_skill/outputs/
   Save outputs to: $ITER/eval-existing-correction/with_skill/outputs
 
@@ -223,9 +224,11 @@ if [ "$GRADE" = "1" ]; then
   grep -qi opentelemetry "$ITER/eval-batch-context/with_skill/outputs/clip-02/transcript.txt" \
     && grade 1 "case3 clip-02 OpenTelemetry" || grade 0 "case3 clip-02 OpenTelemetry"
 
-  # case 4: existing-outputs correction
+  # case 4: existing-outputs correction (manifest + cue correct)
   EX="$ITER/eval-existing-correction/with_skill/outputs"
   T="$EX/1. welcome.cue/transcript.txt"
+  grep -qi "open telemetry -> opentelemetry" "$EX/corrections.md" \
+    && grade 1 "case4 manifest maps the garbled term" || grade 0 "case4 manifest maps the garbled term"
   [ -s "$T" ] && grade 1 "case4 existing transcript non-empty" || grade 0 "case4 existing transcript non-empty"
   grep -qi opentelemetry "$T" && grade 1 "case4 existing transcript corrected" || grade 0 "case4 existing transcript corrected"
   grep -qi "open telemetry" "$T" && grade 0 "case4 no garble in transcript" || grade 1 "case4 no garble in transcript"

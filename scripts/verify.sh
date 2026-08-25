@@ -126,6 +126,20 @@ check "SKILL.md frontmatter" bash -c "grep -q '^name: transcribe' skills/transcr
 check "evals.json valid"   bash -c "python3 -c \"import json; d=json.load(open('skills/transcribe/evals/evals.json')); assert len(d['evals'])>=2; assert all(c['assertions'] for c in d['evals'])\""
 check_fail "no real identifiers" bash -c "grep -riE 'eastham|dometrain' skills/transcribe/ || exit 1; exit 0"
 
+echo
+echo "== correct command =="
+rm -rf /tmp/cue-verify-correct && mkdir -p /tmp/cue-verify-correct/talk.cue
+printf 'I am John Dough. See open telemetry.\n' > /tmp/cue-verify-correct/talk.cue/transcript.txt
+printf 'open telemetry is key.\n' > /tmp/cue-verify-correct/talk.cue/subtitles.srt
+printf '{"schema_version":1}\n' > /tmp/cue-verify-correct/talk.cue/transcript.json
+printf 'John Dough -> John Doe\nopen telemetry -> OpenTelemetry\n' > /tmp/cue-verify-correct/corrections.md
+check "correct dry-run writes nothing" bash -c "$CUE correct /tmp/cue-verify-correct/talk.cue --dry-run 2>&1 | grep -q 'Dry run'"
+check "correct dry-run leaves garble"  bash -c "grep -q 'open telemetry' /tmp/cue-verify-correct/talk.cue/transcript.txt"
+check "correct applies"               bash -c "$CUE correct /tmp/cue-verify-correct/talk.cue 2>&1 | grep -q 'replacement(s)'"
+check "correct fixed transcript"      bash -c "grep -q 'OpenTelemetry' /tmp/cue-verify-correct/talk.cue/transcript.txt && ! grep -q 'John Dough' /tmp/cue-verify-correct/talk.cue/transcript.txt"
+check "correct fixed subtitles"       bash -c "grep -q 'OpenTelemetry' /tmp/cue-verify-correct/talk.cue/subtitles.srt"
+check "correct kept json"             bash -c "grep -q 'schema_version' /tmp/cue-verify-correct/talk.cue/transcript.json"
+
 kill $GW 2>/dev/null || true
 
 echo
