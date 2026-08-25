@@ -30,6 +30,7 @@ async fn main() -> ExitCode {
         Some(Command::Models(args)) => commands::models::run(args).await,
         Some(Command::Config(args)) => commands::config_cmd::run(args),
         Some(Command::Cache(args)) => commands::cache_cmd::run(args.command),
+        Some(Command::Skill(args)) => commands::skill::run(args).await,
         None => commands::process::run(&cli).await,
     };
 

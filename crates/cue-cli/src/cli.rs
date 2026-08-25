@@ -44,6 +44,8 @@ pub enum Command {
     Config(ConfigArgs),
     /// Manage the processing cache
     Cache(CacheArgs),
+    /// Install the transcribe agent skill for AI agents
+    Skill(SkillArgs),
 }
 
 /// Transcribe files
@@ -100,6 +102,31 @@ pub struct CacheArgs {
     /// Which cache action to run
     #[usage(subcommand)]
     pub command: Option<CacheCommand>,
+}
+
+/// Manage the transcribe agent skill
+#[derive(Debug, Args)]
+pub struct SkillArgs {
+    /// Which skill action to run
+    #[usage(subcommand)]
+    pub command: Option<SkillCommand>,
+}
+
+#[derive(Debug, Subcommands)]
+pub enum SkillCommand {
+    /// Install the transcribe skill for AI agents (proxies `npx skills add`)
+    Install(SkillInstallArgs),
+}
+
+/// Install the transcribe skill
+#[derive(Debug, Args)]
+pub struct SkillInstallArgs {
+    /// Skill source repo in owner/repo form
+    #[usage(long, default = "nkootstra/cue")]
+    pub repo: String,
+    /// Opt out of the skills CLI's anonymous telemetry
+    #[usage(long)]
+    pub no_telemetry: bool,
 }
 
 #[derive(Debug, Subcommands)]

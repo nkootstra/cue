@@ -40,6 +40,33 @@ requirements: FFmpeg on PATH (`brew install ffmpeg` / `apt install ffmpeg`);
 Ollama optional, for S1 transcript cleanup. After installing, run
 `cue doctor` to check your environment.
 
+## Agent skill
+
+AI coding agents (Claude Code, opencode, Codex, Cursor, ...) can transcribe
+media and correct misheard names and terminology with context using the
+bundled `transcribe` skill. Install it for your agents:
+
+```bash
+cue skill install          # proxies `npx skills add nkootstra/cue`
+# or, without cue installed:
+npx skills add nkootstra/cue
+```
+
+The skill teaches agents to install cue when missing, run the pipeline,
+correct speech-to-text errors using speaker/domain context (e.g. a surname
+whisper misheard, fixed from a context file), batch-process course folders,
+and respect the privacy boundary (media stays local). All examples in the
+skill use fictional identities.
+
+The skill lives in `skills/transcribe/` and ships with an eval suite
+(`skills/transcribe/evals/evals.json`). Run the eval harness to regenerate
+fixtures and re-run the correction cases:
+
+```bash
+scripts/skill-eval-harness.sh      # fixtures + cue runs + agent prompts
+scripts/skill-eval-harness.sh --grade
+```
+
 ## Status
 
 Work in progress.

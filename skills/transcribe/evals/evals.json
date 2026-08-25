@@ -1,0 +1,43 @@
+{
+  "skill_name": "transcribe",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Can you transcribe this conference welcome clip for me? It's an mp3 in the current directory.",
+      "expected_output": "A transcript of the clip (transcript.txt) plus subtitle files, produced locally by cue.",
+      "files": ["evals/files/clip-01.mp3"],
+      "assertions": [
+        "A transcript.txt exists and is non-empty",
+        "transcript.txt contains the word 'observability'",
+        "subtitles.srt and subtitles.vtt both exist"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Transcribe this conference welcome clip. A context file describing the talk is provided next to the clip — use it to fix any misheard names or terms in the transcript.",
+      "expected_output": "A corrected transcript.txt where the speaker's name and product terms match the context file.",
+      "files": ["evals/files/clip-02.mp3", "evals/files/context.md"],
+      "assertions": [
+        "transcript.txt uses the spelling 'Doe' for the speaker's name",
+        "transcript.txt uses the product spelling 'OpenTelemetry' (not a lowercased or split variant)",
+        "transcript.json still exists and is unchanged (the raw canonical transcript is kept intact)"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "There are two conference welcome clips and one shared context file in the current directory. Transcribe both clips and apply the shared speaker context to both transcripts.",
+      "expected_output": "Two output directories (one per clip), each with a transcript.txt corrected to match the shared context spelling.",
+      "files": [
+        "evals/files/clip-01.mp3",
+        "evals/files/clip-02.mp3",
+        "evals/files/context.md"
+      ],
+      "assertions": [
+        "Both clips produced a transcript.txt that is non-empty",
+        "Both transcripts use the spelling 'Doe' for the speaker's name",
+        "Both transcripts use the product spelling 'OpenTelemetry' where the term appears",
+        "The second transcript contains the term 'OpenTelemetry'"
+      ]
+    }
+  ]
+}
