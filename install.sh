@@ -81,22 +81,23 @@ command -v curl > /dev/null 2>&1 || {
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+cd "$tmp"
 
 echo "downloading..."
-curl -fsSL -o "$tmp/$ASSET" "${BASE_URL}/${ASSET}"
-curl -fsSL -o "$tmp/${ASSET}.sha256" "${BASE_URL}/${ASSET}.sha256"
+curl -fsSL -o "$ASSET" "${BASE_URL}/${ASSET}"
+curl -fsSL -o "${ASSET}.sha256" "${BASE_URL}/${ASSET}.sha256"
 
 echo "verifying checksum..."
 if command -v shasum > /dev/null 2>&1; then
-    echo "$(cat "$tmp/${ASSET}.sha256")" | shasum -a 256 -c - > /dev/null
+    shasum -a 256 -c "${ASSET}.sha256" > /dev/null
 else
-    echo "$(cat "$tmp/${ASSET}.sha256")" | sha256sum -c - > /dev/null
+    sha256sum -c "${ASSET}.sha256" > /dev/null
 fi
 
-tar xzf "$tmp/$ASSET" -C "$tmp"
+tar xzf "$ASSET"
 
 mkdir -p "$INSTALL_DIR"
-mv "$tmp/cue-${TARGET}/cue" "$INSTALL_DIR/cue"
+mv "cue-${TARGET}/cue" "$INSTALL_DIR/cue"
 chmod +x "$INSTALL_DIR/cue"
 
 echo
