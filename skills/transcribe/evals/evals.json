@@ -38,6 +38,21 @@
         "Both transcripts use the product spelling 'OpenTelemetry' where the term appears",
         "The second transcript contains the term 'OpenTelemetry'"
       ]
+    },
+    {
+      "id": 4,
+      "prompt": "There is a media file and an already-transcribed output folder in this directory, plus a shared context file. Transcribe the new clip, and correct the existing transcript against the context too.",
+      "expected_output": "A new transcription for the clip plus the pre-existing transcript.txt corrected to match the context (e.g. OpenTelemetry), with its transcript.json left untouched.",
+      "files": [
+        "evals/files/clip-01.mp3",
+        "evals/files/context.md"
+      ],
+      "assertions": [
+        "The new clip produced a transcript.txt that is non-empty",
+        "The pre-existing output folder's transcript.txt was corrected to use the spelling 'OpenTelemetry'",
+        "The pre-existing output folder's transcript.json is unchanged from the seeded state",
+        "The pre-existing output folder's subtitles, if present, received the same correction"
+      ]
     }
   ]
 }

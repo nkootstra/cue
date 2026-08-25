@@ -97,21 +97,43 @@ In this order, until you have enough:
 
 ### Apply corrections
 
+**When you find a mishearing, fix it immediately, in place — do not defer
+and do not ask permission.** Corrections are conservative by design: only
+tokens that conflict with known context are changed, so applying them is
+safe to do without a confirmation round-trip.
+
 1. Read `transcript.txt` from the output directory.
 2. Fix **only** places where the text conflicts with known context —
    misheard names, wrong technical terms, garbled proper nouns.
 3. Do **not** rewrite style, fillers, phrasing, or anything that does not
    conflict with known facts. Keep the speaker's wording.
 4. Write the corrected text back into `transcript.txt` (in place).
-5. If the user asked for corrected subtitles, mirror the same fixes into
-   `subtitles.srt` and `subtitles.vtt` (same timestamps, corrected words).
+5. Mirror the same fixes into `subtitles.srt` and `subtitles.vtt` when they
+   exist (same timestamps, corrected words). Do not skip subtitles; a name
+   that appears there is a name that must be corrected there too.
 6. Leave `transcript.json` untouched — it is the raw archive and the source
    of truth.
+
+### Verify corrections
+
+After applying corrections, confirm they actually landed:
+
+1. Grep the corrected spelling in `transcript.txt` (e.g. the fixed name or
+   term) and confirm it is present.
+2. If a misheard variant remains anywhere, fix it and re-check.
+3. Report what you changed (old -> new), so the user can review.
 
 **Never re-run cue on an already-corrected file.** cue regenerates
 `transcript.txt` and subtitles from `transcript.json`, which would silently
 discard your corrections. If a re-transcription is needed, preserve the
 corrected text first (e.g., copy it aside).
+
+### Identity rule
+
+Only correct a name when context gives you **high confidence**. If you
+cannot verify the correct spelling (no reliable source, contradictory
+cues), ask the user instead of guessing — a wrong correction is worse than
+leaving the mishearing.
 
 ### Worked example
 
@@ -128,24 +150,46 @@ it also conflicts with known context.
 
 ## 4. Batch / course mode
 
-For a folder of related media (a course, a lecture series):
+For a folder of related media (a course, a lecture series), follow this
+order:
 
-1. Create one shared context file next to the folder (or files) that
-   captures what all episodes share — speaker name, platform, series,
-   recurring terms:
+1. **Scan the folder first.** List the media files and look for any existing
+   `*.cue/` output directories. If outputs already exist, read their
+   `transcript.txt` files — they may contain mishearings that the shared
+   context should correct, and they may already reveal the speaker and terms
+   you need.
+2. **Write the shared context file before transcribing anything.** Create
+   `context.md` next to the folder (or files) capturing what all episodes
+   share — speaker name, platform, series, recurring terms:
 
    ```markdown
    # Talk / series context
-   Platform: Acme Dev Conf
-   Talk: Intro to Observability
-   Speaker: Dr. Ada Rivas
-   Terms: OpenTelemetry, traces, spans, metrics, distributed tracing
+
+   ## Speaker
+   - John Doe (main presenter)
+
+   ## Platform
+   - Acme Dev Conf 2025
+
+   ## Material
+   - Talk: Intro to Observability
+
+   ## Terms
+   - OpenTelemetry
+   - traces
+   - spans
+   - metrics
    ```
 
    See `references/context-file.md` in this skill for the full template.
-2. Run cue once per episode (loop over the files), then apply the shared
-   context corrections to each `transcript.txt`.
-3. Optionally, if the runs produced `analysis.json` per episode, summarize
+   This file persists your context so every episode is corrected
+   consistently, not just the one you transcribed first.
+3. **Loop.** For each media file: run cue, then correct its `transcript.txt`
+   (and subtitles) against the shared context, verifying each correction as
+   described in section 3. This includes existing `*.cue/` outputs found in
+   step 1 — transcribing a new file is not a reason to leave older
+   transcripts with known mishearings.
+4. Optionally, if the runs produced `analysis.json` per episode, summarize
    them into a course index (titles, topics, chapters) for the user.
 
 ## 5. Privacy
