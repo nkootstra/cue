@@ -118,13 +118,13 @@ corrected text first (e.g., copy it aside).
 A file `Talks/acme-dev-conf-2025/intro-to-observability/01-opening.mp4` is
 transcribed, and the transcript contains:
 
-> "I'm Dr. Ada River and I'm going to walk you through..."
+> "I'm John Dough and I'm going to walk you through..."
 
-The conference is "Acme Dev Conf", the talk is "Intro to Observability",
-and the speaker's name is Dr. Ada **Rivas** (verifiable from the talk
-page / schedule). Correct the transcript to read "Dr. Ada Rivas" and note
-the fix when you report back. Do not "fix" anything else unless it also
-conflicts with known context.
+The talk page lists the speaker as John **Doe** (and the product as
+**OpenTelemetry**). Correct the transcript to read "John Doe" and
+"OpenTelemetry" (fixing the misheard surname and the garbled product name),
+and note the fixes when you report back. Do not "fix" anything else unless
+it also conflicts with known context.
 
 ## 4. Batch / course mode
 

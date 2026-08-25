@@ -10,7 +10,7 @@ for the media you are processing.
 # Talk / series context
 
 ## Speaker
-- Dr. Ada Rivas (main presenter)
+- John Doe (main presenter; placeholder name, spelled D-O-E)
 
 ## Platform
 - Acme Dev Conf 2025
@@ -19,7 +19,7 @@ for the media you are processing.
 - Talk: Intro to Observability
 
 ## Terms
-- OpenTelemetry
+- OpenTelemetry (one word, capital O and T)
 - traces
 - spans
 - metrics
@@ -27,14 +27,17 @@ for the media you are processing.
 - instrumentation
 
 ## Notes
-- The speaker's last name is Rivas (rhymes with "leaves"), not "River".
+- The speaker is a fictional placeholder; real speakers should be named from
+  actual context.
+- The product is always written "OpenTelemetry", never split or lowercased.
 - The conference is always referred to as "Acme Dev Conf", never just "Dev Conf".
 ```
 
 ## Tips
 
 - **Names first.** Speaker and guest names are the most commonly misheard
-  words. Include them even when they seem obvious.
+  words. Include them even when they seem obvious. Use placeholder names
+  (John Doe) only in examples — in real use, name actual speakers.
 - **Product and technical terms** that the speech engine could garble
   ("OpenTelemetry" -> "open telemetry", "cargo" -> "kargo").
 - **Corrections should be conservative.** Context tells the agent what a

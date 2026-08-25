@@ -29,9 +29,10 @@ GRADE=0
 mkdir -p "$FILES_DIR"
 
 # ---- 1. Generate deterministic speech fixtures (macOS `say` + ffmpeg) ----
-# Spoken text uses "Burn" so whisper hears /bɜrn/; the context file tells
-# agents the spelling is "Byrne" — the same phonetic trap as real misheard
-# proper nouns, with fictional identities.
+# Spoken content uses the placeholder speaker "John Doe" and the public
+# project name "OpenTelemetry", which ASR reliably lowercases/splits
+# ("open telemetry"); the context file gives agents the correct spelling.
+# All identities are clearly fictional; nothing personal or paid is echoed.
 gen_clip() {
   local text="$1" out="$2"
   say -o "$out.aiff" "$text"
@@ -40,17 +41,17 @@ gen_clip() {
 }
 
 gen_clip \
-  "Hi there, I'm Kira Burn and this is the observability workshop. Welcome to Acme Dev Conf." \
+  "Hi there, I'm John Doe and this is the observability workshop. Welcome to Acme Dev Conf." \
   "$FILES_DIR/clip-01"
 gen_clip \
-  "Welcome back, I'm Kira Burn again. Today we cover spans, metrics, and traces with OpenTelemetry." \
+  "Welcome back, I'm John Doe again. Today we cover spans, metrics, and traces with open telemetry." \
   "$FILES_DIR/clip-02"
 
 cat > "$FILES_DIR/context.md" <<'EOF'
 # Talk / series context
 
 ## Speaker
-- Kira Byrne (main presenter; surname spelled B-Y-R-N-E)
+- John Doe (main presenter; placeholder name, spelled D-O-E)
 
 ## Platform
 - Acme Dev Conf 2025
@@ -59,7 +60,7 @@ cat > "$FILES_DIR/context.md" <<'EOF'
 - Talk: Intro to Observability
 
 ## Terms
-- OpenTelemetry
+- OpenTelemetry (one word, capital O and T)
 - traces
 - spans
 - metrics
@@ -81,13 +82,15 @@ done
 
 run_cue() {
   local clip="$1" outdir="$2"
-  "$ROOT/target/debug/cue" transcribe "$FILES_DIR/$clip.mp3" --output "$outdir" > /dev/null 2>&1
+  # Full cue (not `cue transcribe`): matches what the skill teaches as the
+  # default, producing subtitles alongside the transcript.
+  "$ROOT/target/debug/cue" "$FILES_DIR/$clip.mp3" --output "$outdir" > /dev/null 2>&1
 }
 
 run_cue clip-01 "$ITER/eval-basic-transcribe/with_skill/outputs"
 run_cue clip-01 "$ITER/eval-basic-transcribe/without_skill/outputs"
-run_cue clip-01 "$ITER/eval-context-correction/with_skill/outputs"
-run_cue clip-01 "$ITER/eval-context-correction/without_skill/outputs"
+run_cue clip-02 "$ITER/eval-context-correction/with_skill/outputs"
+run_cue clip-02 "$ITER/eval-context-correction/without_skill/outputs"
 run_cue clip-01 "$ITER/eval-batch-context/with_skill/outputs/clip-01"
 run_cue clip-02 "$ITER/eval-batch-context/with_skill/outputs/clip-02"
 run_cue clip-01 "$ITER/eval-batch-context/without_skill/outputs/clip-01"
@@ -155,14 +158,15 @@ if [ "$GRADE" = "1" ]; then
     local pass=0 fail=0
     local t
     if [ -f "$txt" ] && [ -s "$txt" ]; then
-      # Clip 1 vs clip 2 share the speaker line; check the common term.
       if grep -qi observability "$txt"; then pass=$((pass+1)); else fail=$((fail+1)); fi
     else
       fail=$((fail+1))
     fi
-    t=$(grep -ci byrne "$txt" 2>/dev/null || echo 0)
-    b=$(grep -ci "burn" "$txt" 2>/dev/null || echo 0)
-    [ "$t" -ge 1 ] && [ "$b" -eq 0 ] && pass=$((pass+1)) || fail=$((fail+1))
+    # Speaker spelling from context; OpenTelemetry is the garbled term.
+    t=$(grep -ci "john doe" "$txt" 2>/dev/null || echo 0)
+    o=$(grep -ci "opentelemetry" "$txt" 2>/dev/null || echo 0)
+    [ "$t" -ge 1 ] && pass=$((pass+1)) || fail=$((fail+1))
+    [ "$o" -ge 1 ] && pass=$((pass+1)) || fail=$((fail+1))
     echo "$label: pass=$pass fail=$fail"
   }
   grade_case "$ITER/eval-context-correction/with_skill" "correction-with"

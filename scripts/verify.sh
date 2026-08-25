@@ -118,6 +118,14 @@ check "transcript exists"     test -s /tmp/cue-verify-trans/transcript.txt
 check_fail "no subtitles"     test -s /tmp/cue-verify-trans/subtitles.srt
 check_fail "no analysis"      test -s /tmp/cue-verify-trans/analysis.json
 
+echo
+echo "== skill =="
+check "skill help"         $CUE skill --help
+check "skill argv"         bash -c "grep -q 'npx skills add' crates/cue-cli/src/commands/skill.rs"
+check "SKILL.md frontmatter" bash -c "grep -q '^name: transcribe' skills/transcribe/SKILL.md && grep -q '^description:' skills/transcribe/SKILL.md"
+check "evals.json valid"   bash -c "python3 -c \"import json; d=json.load(open('skills/transcribe/evals/evals.json')); assert len(d['evals'])>=2; assert all(c['assertions'] for c in d['evals'])\""
+check_fail "no real identifiers" bash -c "grep -riE 'eastham|dometrain' skills/transcribe/ || exit 1; exit 0"
+
 kill $GW 2>/dev/null || true
 
 echo

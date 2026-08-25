@@ -14,12 +14,12 @@
     },
     {
       "id": 2,
-      "prompt": "Transcribe this conference welcome clip. A context file describing the talk is provided next to the clip — use it to fix any misheard names in the transcript.",
-      "expected_output": "A corrected transcript.txt where the speaker's name matches the spelling in the context file.",
-      "files": ["evals/files/clip-01.mp3", "evals/files/context.md"],
+      "prompt": "Transcribe this conference welcome clip. A context file describing the talk is provided next to the clip — use it to fix any misheard names or terms in the transcript.",
+      "expected_output": "A corrected transcript.txt where the speaker's name and product terms match the context file.",
+      "files": ["evals/files/clip-02.mp3", "evals/files/context.md"],
       "assertions": [
-        "transcript.txt uses the spelling 'Byrne' for the speaker's name",
-        "transcript.txt does not contain 'Burn' as the speaker's name",
+        "transcript.txt uses the spelling 'Doe' for the speaker's name",
+        "transcript.txt uses the product spelling 'OpenTelemetry' (not a lowercased or split variant)",
         "transcript.json still exists and is unchanged (the raw canonical transcript is kept intact)"
       ]
     },
@@ -34,8 +34,8 @@
       ],
       "assertions": [
         "Both clips produced a transcript.txt that is non-empty",
-        "Both transcripts use the spelling 'Byrne' for the speaker's name",
-        "Neither transcript contains 'Burn' as the speaker's name",
+        "Both transcripts use the spelling 'Doe' for the speaker's name",
+        "Both transcripts use the product spelling 'OpenTelemetry' where the term appears",
         "The second transcript contains the term 'OpenTelemetry'"
       ]
     }
