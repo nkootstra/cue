@@ -248,4 +248,5 @@ analysis). Never upload media files anywhere.
 | Transcription fails on a short/quiet clip | Expected: whisper may return an empty transcript for music/silence/no-speech |
 | No `transcript.clean.txt` / `summary.md` / `description.md` | Optional integrations (Ollama S1, LLM gateway) are not configured — local transcription still works |
 | S1 cleanup needed | `cue models install s1` (pulls ~460 MB into Ollama) |
+| `cue models install s1` fails with a 400 from Ollama | A known Ollama API limitation with `FROM hf.co/...` Modelfiles; run `ollama create cue-s1-mini -f <path-to-Modelfile>` manually and retry |
 | Subtitle timing looks off | Re-run with a larger `max_duration_ms` in `~/.config/cue/cue.toml` `[subtitles]` |

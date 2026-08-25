@@ -22,6 +22,12 @@ impl OllamaAdmin {
         }
     }
 
+    /// The server base URL this client talks to (e.g.
+    /// `http://localhost:11434`), without the trailing slash.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     /// Names of models already present locally.
     pub async fn list_models(&self) -> Result<Vec<OllamaModel>> {
         let response: TagsResponse = self
@@ -42,9 +48,15 @@ impl OllamaAdmin {
             .collect())
     }
 
-    /// True when a model with this exact name exists.
+    /// True when a model with this name exists, treating the default
+    /// `:latest` tag as equivalent (`cue-s1-mini` matches
+    /// `cue-s1-mini:latest`).
     pub async fn has_model(&self, name: &str) -> Result<bool> {
-        Ok(self.list_models().await?.iter().any(|m| m.name == name))
+        Ok(self
+            .list_models()
+            .await?
+            .iter()
+            .any(|m| model_name_matches(&m.name, name)))
     }
 
     /// Pull a model by reference (e.g. an `hf.co/...` GGUF tag).
@@ -68,16 +80,17 @@ impl OllamaAdmin {
             .map_err(|e| ollama_unreachable(e.to_string()))?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            return Err(ollama_error(
-                format!("pulling {model_ref} failed ({status})"),
-                "see the Ollama server log for details".into(),
-            ));
+            return Err(http_error("pulling", model_ref, response).await);
         }
         Ok(())
     }
 
     /// Create a named model from Modelfile text.
+    ///
+    /// Note: current Ollama releases reject Modelfiles whose `FROM` names a
+    /// registry ref (e.g. `hf.co/...`) through this API. `cue models install`
+    /// uses the `ollama` CLI instead; this method remains for plain local
+    /// Modelfiles.
     pub async fn create(&self, name: &str, modelfile: &str) -> Result<()> {
         #[derive(Serialize)]
         struct CreateRequest<'a> {
@@ -100,14 +113,25 @@ impl OllamaAdmin {
             .map_err(|e| ollama_unreachable(e.to_string()))?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            return Err(ollama_error(
-                format!("creating model {name} failed ({status})"),
-                "check the Modelfile syntax and the Ollama server log".into(),
-            ));
+            return Err(http_error("creating model", name, response).await);
         }
         Ok(())
     }
+}
+
+/// Build an error that includes the server's response body (the reason for
+/// the failure), truncated, with the full body at debug trace.
+async fn http_error(verb: &str, subject: &str, response: reqwest::Response) -> CueError {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let trimmed = body.chars().take(300).collect::<String>();
+    tracing::debug!(%status, %body, "ollama http error body");
+    CueError::new(
+        cue_core::PipelineStage::Normalize,
+        format!("{verb} {subject} failed ({status})"),
+    )
+    .because(trimmed)
+    .remedy("run `cue doctor` to inspect the local Ollama setup, or use the `ollama` CLI directly")
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -136,11 +160,24 @@ struct TagsModel {
     name: String,
 }
 
+/// `name == target`, or `name == "{target}:latest"` (Ollama's default tag).
+fn model_name_matches(name: &str, target: &str) -> bool {
+    name == target || name == format!("{target}:latest")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn default_latest_tag_is_equivalent() {
+        assert!(model_name_matches("cue-s1-mini:latest", "cue-s1-mini"));
+        assert!(model_name_matches("cue-s1-mini", "cue-s1-mini"));
+        assert!(!model_name_matches("cue-s1-mini:other", "cue-s1-mini"));
+        assert!(!model_name_matches("qwen3:8b", "cue-s1-mini"));
+    }
 
     #[tokio::test]
     async fn lists_models_from_tags_endpoint() {

@@ -8,9 +8,9 @@ license.workspace = true
 cue-core.workspace = true
 cue-llm.workspace = true
 async-trait = "0.1"
+tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
 wiremock = "0.6"
 serde_json.workspace = true
