@@ -8,7 +8,9 @@
 //!
 //! Subtitles, normalization, and analysis come online in later phases.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 
 use cue_analysis::Analyzer as _;
 use cue_core::media::Media;
@@ -17,6 +19,7 @@ use cue_media::extract::extract_audio;
 use cue_transcription::Transcriber;
 
 use crate::cli::Cue;
+use crate::commands::inputs::{ResolvedInput, resolve_inputs};
 use crate::render::{human_duration, println_line};
 
 #[derive(serde::Serialize)]
@@ -114,17 +117,17 @@ impl ProcessMode {
 }
 
 pub async fn run(cli: &Cue, config: &cue_core::Config) -> i32 {
-    run_mode(cli, &cli.files, ProcessMode::Full, config).await
+    run_mode(cli, &cli.paths, ProcessMode::Full, config).await
 }
 
 /// Process files under one of the supported artifact contracts.
 pub async fn run_mode(
     cli: &Cue,
-    files: &[String],
+    paths: &[PathBuf],
     mode: ProcessMode,
     config: &cue_core::Config,
 ) -> i32 {
-    match run_inner(files, mode, cli, config).await {
+    match run_inner(paths, mode, cli, config).await {
         Ok(code) => code,
         Err(err) => {
             eprintln!("{err}");
@@ -134,40 +137,130 @@ pub async fn run_mode(
 }
 
 async fn run_inner(
-    files: &[String],
+    paths: &[PathBuf],
     mode: ProcessMode,
     cli: &Cue,
     config: &cue_core::Config,
 ) -> Result<i32> {
-    if files.is_empty() {
+    if paths.is_empty() {
         print_usage_hint();
         return Ok(0);
     }
+
+    // Resolve the complete batch before starting any media work. This keeps
+    // discovery and output collisions from producing partial batches.
+    let plan = resolve_inputs(paths, cli.recursive, cli.output.as_deref().map(Path::new))?;
 
     // Stage logic emits events; the renderer decides presentation. Core
     // pipeline behavior never depends on terminal output.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let renderer = tokio::spawn(crate::events::run_renderer(rx));
 
-    let result: Result<()> = async {
-        let mut s1_readiness = None;
-        for file in files {
-            process_file(file, cli, config, &tx, mode, &mut s1_readiness).await?;
-        }
-        Ok(())
-    }
-    .await;
+    let mut processor = PipelineProcessor {
+        cli,
+        config,
+        events: &tx,
+        mode,
+        s1_readiness: None,
+    };
+    let result =
+        process_resolved_inputs(&plan.inputs, plan.is_batch, &mut processor, |input, err| {
+            use cue_core::{PipelineEvent, PipelineStage};
+
+            let _ = tx.send(PipelineEvent::Failed {
+                stage: err.stage().unwrap_or(PipelineStage::Inspect),
+                error: format!("{}: {err}", input.source.display()),
+            });
+        })
+        .await;
 
     drop(tx); // close so the renderer can finish
     if let Err(join_err) = renderer.await {
         tracing::warn!(error = %join_err, "event renderer stopped early");
     }
 
-    result.map(|_| 0)
+    result.map(|outcome| {
+        if plan.is_batch {
+            println_line(&format!(
+                "Batch complete: {} succeeded, {} failed",
+                outcome.succeeded, outcome.failed
+            ));
+        }
+        outcome.exit_code()
+    })
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct BatchOutcome {
+    succeeded: usize,
+    failed: usize,
+}
+
+impl BatchOutcome {
+    fn exit_code(&self) -> i32 {
+        i32::from(self.failed > 0)
+    }
+}
+
+trait MediaProcessor {
+    fn process<'a>(
+        &'a mut self,
+        input: &'a ResolvedInput,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
+}
+
+struct PipelineProcessor<'a> {
+    cli: &'a Cue,
+    config: &'a cue_core::Config,
+    events: &'a tokio::sync::mpsc::UnboundedSender<cue_core::PipelineEvent>,
+    mode: ProcessMode,
+    s1_readiness: Option<bool>,
+}
+
+impl MediaProcessor for PipelineProcessor<'_> {
+    fn process<'a>(
+        &'a mut self,
+        input: &'a ResolvedInput,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
+        Box::pin(process_file(
+            &input.source,
+            &input.output,
+            self.cli,
+            self.config,
+            self.events,
+            self.mode,
+            &mut self.s1_readiness,
+        ))
+    }
+}
+
+async fn process_resolved_inputs<P, F>(
+    inputs: &[ResolvedInput],
+    is_batch: bool,
+    processor: &mut P,
+    mut on_failure: F,
+) -> Result<BatchOutcome>
+where
+    P: MediaProcessor,
+    F: FnMut(&ResolvedInput, &CueError),
+{
+    let mut outcome = BatchOutcome::default();
+    for input in inputs {
+        match processor.process(input).await {
+            Ok(()) => outcome.succeeded += 1,
+            Err(err) if is_batch => {
+                outcome.failed += 1;
+                on_failure(input, &err);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(outcome)
 }
 
 async fn process_file(
-    file: &str,
+    path: &Path,
+    out_dir: &Path,
     cli: &Cue,
     config: &cue_core::Config,
     events: &tokio::sync::mpsc::UnboundedSender<cue_core::PipelineEvent>,
@@ -176,14 +269,12 @@ async fn process_file(
 ) -> Result<()> {
     use cue_core::{PipelineEvent, PipelineStage};
 
-    let path = PathBuf::from(file);
-
     println_line(&format!("Processing {}...", path.display()));
 
     // ---- Inspect --------------------------------------------------------
     let ffprobe = require_tool("ffprobe", "inspect media files")?;
     let _ = events.send(PipelineEvent::Started(PipelineStage::Inspect));
-    let media = cue_media::probe::inspect(&ffprobe, &path).await?;
+    let media = cue_media::probe::inspect(&ffprobe, path).await?;
     print_media_summary(&media);
     let _ = events.send(PipelineEvent::Completed(PipelineStage::Inspect));
 
@@ -196,7 +287,7 @@ async fn process_file(
     }
 
     // Content cache layout keyed by the media bytes themselves.
-    let media_hash = cue_cache::file_hash(&path)?;
+    let media_hash = cue_cache::file_hash(path)?;
     let cache_root = cue_cache::cache_dir().ok_or_else(|| {
         CueError::general("could not determine a cache directory")
             .remedy("set CUE_CACHE_DIR to a writable directory")
@@ -216,7 +307,7 @@ async fn process_file(
         let _ = events.send(PipelineEvent::Cached(PipelineStage::Extract));
     } else {
         let _ = events.send(PipelineEvent::Started(PipelineStage::Extract));
-        extract_audio(&ffmpeg, &path, &wav_path).await?;
+        extract_audio(&ffmpeg, path, &wav_path).await?;
         let _ = events.send(PipelineEvent::Completed(PipelineStage::Extract));
     }
 
@@ -269,8 +360,7 @@ async fn process_file(
     // `cue transcribe` stops here: canonical transcript only.
     if !mode.includes(PipelineStage::Normalize) {
         let _ = events.send(PipelineEvent::Started(PipelineStage::Render));
-        let out_dir = output_directory(&path, cli)?;
-        std::fs::create_dir_all(&out_dir).map_err(|e| {
+        std::fs::create_dir_all(out_dir).map_err(|e| {
             CueError::general(format!(
                 "could not create output directory {}",
                 out_dir.display()
@@ -430,8 +520,7 @@ async fn process_file(
 
     // ---- Render ---------------------------------------------------------
     let _ = events.send(PipelineEvent::Started(PipelineStage::Render));
-    let out_dir = output_directory(&path, cli)?;
-    std::fs::create_dir_all(&out_dir).map_err(|e| {
+    std::fs::create_dir_all(out_dir).map_err(|e| {
         CueError::general(format!(
             "could not create output directory {}",
             out_dir.display()
@@ -449,7 +538,7 @@ async fn process_file(
             CueError::general("could not write transcript.clean.txt").because(e.to_string())
         })?;
     } else {
-        remove_stale_artifacts(&out_dir, &["normalized.json", "transcript.clean.txt"])?;
+        remove_stale_artifacts(out_dir, &["normalized.json", "transcript.clean.txt"])?;
     }
 
     if let Some(analysis) = &analysis {
@@ -465,7 +554,7 @@ async fn process_file(
         )
         .map_err(|e| CueError::general("could not write description.md").because(e.to_string()))?;
     } else {
-        remove_stale_artifacts(&out_dir, &["analysis.json", "summary.md", "description.md"])?;
+        remove_stale_artifacts(out_dir, &["analysis.json", "summary.md", "description.md"])?;
     }
 
     // Subtitles derive from the canonical transcript, never from cleaned
@@ -511,21 +600,6 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-/// `<stem>.cue/` next to the input, or `--output <dir>` when given.
-fn output_directory(input: &Path, cli: &Cue) -> Result<PathBuf> {
-    if let Some(dir) = &cli.output {
-        return Ok(PathBuf::from(dir));
-    }
-    let stem = input
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "output".to_string());
-    match input.parent() {
-        Some(parent) => Ok(parent.join(format!("{stem}.cue"))),
-        None => Ok(PathBuf::from(format!("{stem}.cue"))),
-    }
-}
-
 /// Read a cache entry, treating corrupt entries as a miss (warned) rather
 /// than failing the run.
 fn load_cached<T: serde::de::DeserializeOwned>(
@@ -562,9 +636,9 @@ fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
 }
 
 fn print_usage_hint() {
-    println_line("cue processes local video and audio files.");
+    println_line("cue processes local video and audio files or directories.");
     println_line("\nUsage:");
-    println_line("    cue <file>...");
+    println_line("    cue <path>...");
     println_line("\nOther commands:");
     println_line("    doctor    Check the local environment");
     println_line("    models    Manage transcription and normalization models");
@@ -600,7 +674,87 @@ fn print_media_summary(media: &Media) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use super::*;
+
+    struct StubProcessor {
+        results: VecDeque<Result<()>>,
+        attempted: Vec<PathBuf>,
+    }
+
+    impl MediaProcessor for StubProcessor {
+        fn process<'a>(
+            &'a mut self,
+            input: &'a ResolvedInput,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
+            self.attempted.push(input.source.clone());
+            let result = self.results.pop_front().expect("missing stub result");
+            Box::pin(async move { result })
+        }
+    }
+
+    fn resolved(name: &str) -> ResolvedInput {
+        ResolvedInput {
+            source: PathBuf::from(name),
+            output: PathBuf::from(format!("{name}.cue")),
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_attempts_every_input_and_reports_failures() {
+        let inputs = [resolved("one.mp4"), resolved("two.mp4")];
+        let mut processor = StubProcessor {
+            results: VecDeque::from([
+                Err(CueError::general("first failed")),
+                Err(CueError::general("second failed")),
+            ]),
+            attempted: Vec::new(),
+        };
+        let mut failures = Vec::new();
+
+        let outcome = process_resolved_inputs(&inputs, true, &mut processor, |input, _| {
+            failures.push(input.source.clone());
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            processor.attempted,
+            [PathBuf::from("one.mp4"), PathBuf::from("two.mp4")]
+        );
+        assert_eq!(failures, processor.attempted);
+        assert_eq!(
+            outcome,
+            BatchOutcome {
+                succeeded: 0,
+                failed: 2
+            }
+        );
+        assert_eq!(outcome.exit_code(), 1);
+    }
+
+    #[tokio::test]
+    async fn successful_batch_returns_zero() {
+        let inputs = [resolved("one.mp4"), resolved("two.mp4")];
+        let mut processor = StubProcessor {
+            results: VecDeque::from([Ok(()), Ok(())]),
+            attempted: Vec::new(),
+        };
+
+        let outcome = process_resolved_inputs(&inputs, true, &mut processor, |_, _| {})
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            BatchOutcome {
+                succeeded: 2,
+                failed: 0
+            }
+        );
+        assert_eq!(outcome.exit_code(), 0);
+    }
 
     #[test]
     fn analysis_cache_identity_includes_canonical_language() {

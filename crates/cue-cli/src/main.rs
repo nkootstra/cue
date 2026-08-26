@@ -39,7 +39,7 @@ async fn dispatch(mut cli: Cue) -> cue_core::Result<i32> {
             let config = load_resolved_config()?;
             Ok(commands::process::run_mode(
                 &cli,
-                &args.files,
+                &args.paths,
                 commands::process::ProcessMode::TranscriptOnly,
                 &config,
             )
