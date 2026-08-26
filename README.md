@@ -75,7 +75,7 @@ Ollama optional, for S1 transcript cleanup. After installing, run
 | `cue correct <file>.cue` | Apply transcript corrections from a manifest deterministically |
 | `cue doctor` | Check required and optional tools; `--fix` provisions the Python worker |
 | `cue models list/check/install s1` | Manage transcription/normalization models in Ollama |
-| `cue skill install` | Install the `transcribe` agent skill via `npx skills add` |
+| `cue skill install [--local]` | Install the `transcribe` agent skill globally, or in the current project |
 | `cue config` | Show resolved configuration and its sources |
 | `cue cache dir/clear` | Inspect or clear the content-addressed cache |
 
@@ -165,9 +165,10 @@ media and correct misheard names and terminology with context using the
 bundled `transcribe` skill. Install it for your agents:
 
 ```bash
-cue skill install          # proxies `npx skills add nkootstra/cue`
+cue skill install          # global; available across projects
+cue skill install --local  # current project only
 # or, without cue installed:
-npx skills add nkootstra/cue
+npx skills add nkootstra/cue --global
 ```
 
 The skill teaches agents to install cue when missing, run the pipeline,

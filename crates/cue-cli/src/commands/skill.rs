@@ -13,12 +13,12 @@ pub const DEFAULT_SKILL_REPO: &str = "nkootstra/cue";
 
 /// Build the exact argv that installs the skill for the given options.
 ///
-/// Pure and unit-tested without executing anything. Always passes `-y` so
-/// the skills CLI never blocks on an interactive prompt; `--agent` targets
-/// a specific harness and auto-detection is the default. Telemetry opt-out
-/// is carried by the `DISABLE_TELEMETRY` env var (the skills CLI has no
-/// flag).
-pub fn install_argv(repo: &str, agent: Option<&str>) -> Vec<String> {
+/// Pure and unit-tested without executing anything. Installs globally unless
+/// `local` is set, and always passes `-y` so the skills CLI never blocks on an
+/// interactive prompt. `--agent` targets a specific harness; auto-detection is
+/// the default. Telemetry opt-out is carried by the `DISABLE_TELEMETRY` env var
+/// (the skills CLI has no flag).
+pub fn install_argv(repo: &str, agent: Option<&str>, local: bool) -> Vec<String> {
     let mut argv = vec![
         "npx".to_string(),
         "skills".to_string(),
@@ -26,6 +26,9 @@ pub fn install_argv(repo: &str, agent: Option<&str>) -> Vec<String> {
         repo.to_string(),
         "-y".to_string(),
     ];
+    if !local {
+        argv.push("--global".to_string());
+    }
     if let Some(agent) = agent {
         argv.push("--agent".to_string());
         argv.push(agent.to_string());
@@ -38,13 +41,15 @@ pub async fn run(args: SkillArgs) -> i32 {
         None => {
             println_line("Manage the transcribe agent skill.");
             println_line("\nUsage:");
-            println_line("    cue skill install    Install the transcribe skill for AI agents");
+            println_line("    cue skill install            Install globally for AI agents");
+            println_line("    cue skill install --local    Install in the current project");
             0
         }
         Some(SkillCommand::Install(install)) => {
             run_install(
                 &install.repo,
                 install.agent.as_deref(),
+                install.local,
                 install.no_telemetry,
             )
             .await
@@ -52,8 +57,8 @@ pub async fn run(args: SkillArgs) -> i32 {
     }
 }
 
-async fn run_install(repo: &str, agent: Option<&str>, no_telemetry: bool) -> i32 {
-    let argv = install_argv(repo, agent);
+async fn run_install(repo: &str, agent: Option<&str>, local: bool, no_telemetry: bool) -> i32 {
+    let argv = install_argv(repo, agent, local);
 
     let mut command = tokio::process::Command::new(&argv[0]);
     command.args(&argv[1..]);
@@ -61,8 +66,9 @@ async fn run_install(repo: &str, agent: Option<&str>, no_telemetry: bool) -> i32
         command.env("DISABLE_TELEMETRY", "1");
     }
 
+    let scope = if local { "in this project" } else { "globally" };
     println_line(&format!(
-        "Installing the transcribe skill (proxying: {})...",
+        "Installing the transcribe skill {scope} (proxying: {})...",
         argv.join(" ")
     ));
 
@@ -93,29 +99,38 @@ mod tests {
     #[test]
     fn builds_default_install_command() {
         assert_eq!(
-            install_argv(DEFAULT_SKILL_REPO, None),
-            vec!["npx", "skills", "add", "nkootstra/cue", "-y"]
+            install_argv(DEFAULT_SKILL_REPO, None, false),
+            vec!["npx", "skills", "add", "nkootstra/cue", "-y", "--global"]
         );
     }
 
     #[test]
     fn custom_repo() {
         assert_eq!(
-            install_argv("someone/fork", None),
-            vec!["npx", "skills", "add", "someone/fork", "-y"]
+            install_argv("someone/fork", None, false),
+            vec!["npx", "skills", "add", "someone/fork", "-y", "--global"]
+        );
+    }
+
+    #[test]
+    fn local_install_omits_global_flag() {
+        assert_eq!(
+            install_argv(DEFAULT_SKILL_REPO, None, true),
+            vec!["npx", "skills", "add", "nkootstra/cue", "-y"]
         );
     }
 
     #[test]
     fn targets_a_specific_agent() {
         assert_eq!(
-            install_argv("nkootstra/cue", Some("opencode")),
+            install_argv("nkootstra/cue", Some("opencode"), false),
             vec![
                 "npx",
                 "skills",
                 "add",
                 "nkootstra/cue",
                 "-y",
+                "--global",
                 "--agent",
                 "opencode"
             ]
