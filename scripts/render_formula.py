@@ -6,6 +6,7 @@ SHA_LINUX_ARM. Prints the formula to stdout.
 """
 import os
 import sys
+from collections.abc import Mapping
 
 TEMPLATE = '''class Cue < Formula
   desc "Turn video and audio files into transcripts, subtitles, and descriptions"
@@ -54,23 +55,41 @@ end
 '''
 
 
-def main() -> int:
-    required = ["VERSION", "SHA_MAC_ARM", "SHA_MAC_X64", "SHA_LINUX_X64", "SHA_LINUX_ARM"]
-    missing = [name for name in required if not os.environ.get(name)]
+REQUIRED_ENVIRONMENT = [
+    "VERSION",
+    "SHA_MAC_ARM",
+    "SHA_MAC_X64",
+    "SHA_LINUX_X64",
+    "SHA_LINUX_ARM",
+]
+
+
+def render_formula(values: Mapping[str, str]) -> str:
+    """Render the formula from a complete set of release values."""
+    missing = [name for name in REQUIRED_ENVIRONMENT if not values.get(name)]
     if missing:
-        print(f"missing environment variables: {', '.join(missing)}", file=sys.stderr)
-        return 1
+        raise ValueError(f"missing environment variables: {', '.join(missing)}")
+
     # Token replacement, not str.format: the Ruby template contains
     # interpolations like #{bin} that format() would misread.
     out = TEMPLATE
     for key, value in [
-        ("{version}", os.environ["VERSION"]),
-        ("{sha_mac_arm}", os.environ["SHA_MAC_ARM"]),
-        ("{sha_mac_x64}", os.environ["SHA_MAC_X64"]),
-        ("{sha_linux_x64}", os.environ["SHA_LINUX_X64"]),
-        ("{sha_linux_arm}", os.environ["SHA_LINUX_ARM"]),
+        ("{version}", values["VERSION"]),
+        ("{sha_mac_arm}", values["SHA_MAC_ARM"]),
+        ("{sha_mac_x64}", values["SHA_MAC_X64"]),
+        ("{sha_linux_x64}", values["SHA_LINUX_X64"]),
+        ("{sha_linux_arm}", values["SHA_LINUX_ARM"]),
     ]:
         out = out.replace(key, value)
+    return out
+
+
+def main() -> int:
+    try:
+        out = render_formula(os.environ)
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return 1
     sys.stdout.write(out)
     return 0
 

@@ -8,8 +8,21 @@ permissions:
   contents: write
 
 jobs:
+  preflight:
+    name: validate release tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require tag to match workspace version
+        run: |
+          python3 scripts/release_contract.py check-version \
+            --tag "${{ github.ref_name }}" \
+            --manifest Cargo.toml
+
   build:
     name: build ${{ matrix.target }}
+    needs: preflight
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -74,6 +87,12 @@ jobs:
       - name: Combined checksums
         run: shasum -a 256 cue-*.tar.gz > sha256sums.txt
 
+      - name: Upload combined checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-checksums
+          path: sha256sums.txt
+
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -93,7 +112,8 @@ jobs:
       - name: Download checksums
         uses: actions/download-artifact@v4
         with:
-          merge-multiple: true
+          name: release-checksums
+          path: release-checksums
 
       - name: Render and push formula
         env:
@@ -104,18 +124,17 @@ jobs:
             echo "HOMEBREW_TAP_TOKEN not set; skipping tap update"
             exit 0
           fi
-          sha() { grep "cue-$1.tar.gz" sha256sums.txt | cut -d' ' -f1; }
-          export SHA_MAC_ARM="$(sha aarch64-apple-darwin)"
-          export SHA_MAC_X64="$(sha x86_64-apple-darwin)"
-          export SHA_LINUX_X64="$(sha x86_64-unknown-linux-gnu)"
-          export SHA_LINUX_ARM="$(sha aarch64-unknown-linux-gnu)"
-          export VERSION="${VERSION#v}"
-          python3 scripts/render_formula.py > Formula/cue.rb
+          formula_path="$(mktemp)"
+          python3 scripts/release_contract.py render-formula \
+            --tag "$VERSION" \
+            --checksums release-checksums/sha256sums.txt \
+            --output "$formula_path"
+          VERSION="${VERSION#v}"
           gh api \
             --method PUT \
             "repos/nkootstra/homebrew-tap/contents/Formula/cue.rb" \
             -f message="cue $VERSION" \
-            -f content="$(base64 -w0 Formula/cue.rb)" \
+            -f content="$(base64 -w0 "$formula_path")" \
             -f sha="$(gh api repos/nkootstra/homebrew-tap/contents/Formula/cue.rb --jq .sha 2>/dev/null || echo '')" \
             --silent
           echo "Tap updated to $VERSION"
