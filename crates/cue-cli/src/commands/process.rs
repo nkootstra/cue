@@ -8,9 +8,7 @@
 //!
 //! Subtitles, normalization, and analysis come online in later phases.
 
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 
 use cue_analysis::Analyzer as _;
 use cue_core::media::Media;
@@ -203,10 +201,7 @@ impl BatchOutcome {
 }
 
 trait MediaProcessor {
-    fn process<'a>(
-        &'a mut self,
-        input: &'a ResolvedInput,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
+    async fn process(&mut self, input: &ResolvedInput) -> Result<()>;
 }
 
 struct PipelineProcessor<'a> {
@@ -218,11 +213,8 @@ struct PipelineProcessor<'a> {
 }
 
 impl MediaProcessor for PipelineProcessor<'_> {
-    fn process<'a>(
-        &'a mut self,
-        input: &'a ResolvedInput,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
-        Box::pin(process_file(
+    async fn process(&mut self, input: &ResolvedInput) -> Result<()> {
+        process_file(
             &input.source,
             &input.output,
             self.cli,
@@ -230,7 +222,8 @@ impl MediaProcessor for PipelineProcessor<'_> {
             self.events,
             self.mode,
             &mut self.s1_readiness,
-        ))
+        )
+        .await
     }
 }
 
@@ -684,13 +677,9 @@ mod tests {
     }
 
     impl MediaProcessor for StubProcessor {
-        fn process<'a>(
-            &'a mut self,
-            input: &'a ResolvedInput,
-        ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
+        async fn process(&mut self, input: &ResolvedInput) -> Result<()> {
             self.attempted.push(input.source.clone());
-            let result = self.results.pop_front().expect("missing stub result");
-            Box::pin(async move { result })
+            self.results.pop_front().expect("missing stub result")
         }
     }
 

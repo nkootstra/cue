@@ -60,16 +60,9 @@ pub(super) fn resolve_inputs(
         } else if file_type.is_file() {
             discovered.push(path.clone());
         } else if file_type.is_symlink() {
-            let target = fs::canonicalize(path).map_err(|err| {
+            let target_metadata = fs::metadata(path).map_err(|err| {
                 CueError::general(format!(
                     "could not resolve input symlink {}",
-                    path.display()
-                ))
-                .because(err.to_string())
-            })?;
-            let target_metadata = fs::metadata(&target).map_err(|err| {
-                CueError::general(format!(
-                    "could not inspect input symlink {}",
                     path.display()
                 ))
                 .because(err.to_string())
@@ -124,11 +117,7 @@ pub(super) fn resolve_inputs(
 fn discover_directory(root: &Path, recursive: bool) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     collect_directory(root, recursive, &mut files)?;
-    files.sort_by(|left, right| {
-        left.strip_prefix(root)
-            .unwrap_or(left)
-            .cmp(right.strip_prefix(root).unwrap_or(right))
-    });
+    files.sort();
     Ok(files)
 }
 
@@ -158,16 +147,9 @@ fn collect_directory(directory: &Path, recursive: bool, files: &mut Vec<PathBuf>
                 files.push(path);
             }
         } else if file_type.is_symlink() && is_media_path(&path) {
-            let target = fs::canonicalize(&path).map_err(|err| {
+            let metadata = fs::metadata(&path).map_err(|err| {
                 CueError::general(format!(
                     "could not resolve media symlink {}",
-                    path.display()
-                ))
-                .because(err.to_string())
-            })?;
-            let metadata = fs::metadata(&target).map_err(|err| {
-                CueError::general(format!(
-                    "could not inspect media symlink {}",
                     path.display()
                 ))
                 .because(err.to_string())
