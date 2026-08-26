@@ -49,7 +49,7 @@ TEMPLATE = '''class Cue < Formula
   end
 
   test do
-    assert_equal "cue #{version}", shell_output("#{bin}/cue --version").strip
+    assert_equal "cue {version}", shell_output("#{bin}/cue --version").strip
   end
 end
 '''

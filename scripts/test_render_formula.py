@@ -25,6 +25,7 @@ formula = out.stdout
 
 # Version and all four checksums are substituted.
 assert 'version "0.1.0"' in formula, formula
+assert 'assert_equal "cue 0.1.0"' in formula, formula
 assert "a" * 64 in formula and "b" * 64 in formula, formula
 assert "c" * 64 in formula and "d" * 64 in formula, formula
 
