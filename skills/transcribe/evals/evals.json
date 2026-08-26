@@ -23,7 +23,7 @@
         {"name": "speaker name uses Doe", "type": "contains", "path": "eval-context-correction/with_skill/outputs/transcript.txt", "value": "John Doe", "case_insensitive": true},
         {"name": "product uses OpenTelemetry", "type": "contains", "path": "eval-context-correction/with_skill/outputs/transcript.txt", "value": "OpenTelemetry", "case_insensitive": false},
         {"name": "split product spelling is absent", "type": "not_contains", "path": "eval-context-correction/with_skill/outputs/transcript.txt", "value": "open telemetry", "case_insensitive": true},
-        {"name": "canonical transcript exists", "type": "file_exists", "path": "eval-context-correction/with_skill/outputs/transcript.json"}
+        {"name": "canonical transcript retains raw product wording", "type": "contains", "path": "eval-context-correction/with_skill/outputs/transcript.json", "value": "open telemetry", "case_insensitive": true}
       ]
     },
     {

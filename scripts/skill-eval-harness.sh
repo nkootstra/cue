@@ -187,7 +187,7 @@ write_synthetic_success() {
   output="$workspace/eval-context-correction/with_skill/outputs"
   mkdir -p "$output"
   printf 'John Doe presents OpenTelemetry.\n' > "$output/transcript.txt"
-  printf '{}\n' > "$output/transcript.json"
+  printf '{"text":"John Doe presents open telemetry."}\n' > "$output/transcript.json"
 
   for clip in clip-01 clip-02; do
     output="$workspace/eval-batch-context/with_skill/outputs/$clip"
@@ -208,7 +208,8 @@ write_synthetic_success() {
 }
 
 self_test() {
-  local temporary success missing nonempty before after canonical_before canonical_after
+  local temporary success missing corrected_canonical nonempty before after canonical_before canonical_after
+  local traversal_rubric other_path_rubric symlink_rubric outside
   temporary="$(mktemp -d "${TMPDIR:-/tmp}/cue-skill-eval-test.XXXXXX")"
   trap "rm -rf '$temporary'" EXIT
   success="$temporary/success"
@@ -241,6 +242,47 @@ self_test() {
     echo "FAIL  grade accepted missing output" >&2
     return 1
   fi
+
+  corrected_canonical="$temporary/corrected-canonical"
+  cp -R "$success" "$corrected_canonical"
+  printf '{"text":"John Doe presents OpenTelemetry."}\n' \
+    > "$corrected_canonical/eval-context-correction/with_skill/outputs/transcript.json"
+  if "$0" --grade "$corrected_canonical" >/dev/null 2>&1; then
+    echo "FAIL  grade accepted a corrected canonical transcript" >&2
+    return 1
+  fi
+
+  traversal_rubric="$temporary/traversal-rubric.json"
+  cat > "$traversal_rubric" <<'EOF'
+{"evals":[{"id":1,"assertions":[{"name":"escape","type":"file_exists","path":"../outside"}]}]}
+EOF
+  if python3 "$GRADER" --rubric "$traversal_rubric" --workspace "$success" >/dev/null 2>&1; then
+    echo "FAIL  grader accepted a path outside the workspace" >&2
+    return 1
+  fi
+
+  other_path_rubric="$temporary/other-path-rubric.json"
+  cat > "$other_path_rubric" <<'EOF'
+{"evals":[{"id":1,"assertions":[{"name":"other escape","type":"files_equal","path":"eval-basic-transcribe/with_skill/outputs/transcript.txt","other_path":"../outside"}]}]}
+EOF
+  if python3 "$GRADER" --rubric "$other_path_rubric" --workspace "$success" >/dev/null 2>&1; then
+    echo "FAIL  grader accepted an other_path outside the workspace" >&2
+    return 1
+  fi
+
+  outside="$temporary/outside"
+  mkdir -p "$outside"
+  printf 'secret\n' > "$outside/secret.txt"
+  ln -s "$outside" "$success/outside-link"
+  symlink_rubric="$temporary/symlink-rubric.json"
+  cat > "$symlink_rubric" <<'EOF'
+{"evals":[{"id":1,"assertions":[{"name":"symlink escape","type":"file_exists","path":"outside-link/secret.txt"}]}]}
+EOF
+  if python3 "$GRADER" --rubric "$symlink_rubric" --workspace "$success" >/dev/null 2>&1; then
+    echo "FAIL  grader followed a symlink outside the workspace" >&2
+    return 1
+  fi
+
   canonical_after="$(find "$ROOT/skills/transcribe/evals/files" -type f -exec cksum {} \; 2>/dev/null | sort | cksum)"
   [ "$canonical_before" = "$canonical_after" ] || {
     echo "FAIL  self-test wrote canonical eval fixtures" >&2

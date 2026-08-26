@@ -141,8 +141,10 @@ The skill lives in `skills/transcribe/` and ships with an eval suite
 fixtures and re-run the correction cases:
 
 ```bash
-scripts/skill-eval-harness.sh      # fixtures + cue runs + agent prompts
-scripts/skill-eval-harness.sh --grade
+eval_workspace="$(mktemp -d "${TMPDIR:-/tmp}/cue-transcribe-eval.XXXXXX")"
+scripts/skill-eval-harness.sh --seed "$eval_workspace"
+# Run the printed agent prompts against this workspace, then grade the results.
+scripts/skill-eval-harness.sh --grade "$eval_workspace"
 ```
 
 ## Status

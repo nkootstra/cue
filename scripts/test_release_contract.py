@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,11 @@ TARGETS = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
 ]
+
+
+def workspace_version() -> str:
+    with (ROOT / "Cargo.toml").open("rb") as manifest:
+        return tomllib.load(manifest)["workspace"]["package"]["version"]
 
 
 def run(*args: object) -> subprocess.CompletedProcess[str]:
@@ -35,6 +41,9 @@ def checksum_lines() -> list[str]:
 
 with tempfile.TemporaryDirectory() as directory:
     workspace = Path(directory)
+    version = workspace_version()
+    matching_tag = f"v{version}"
+    mismatched_tag = f"v{version}.mismatch"
     checksums = workspace / "sha256sums.txt"
     formula = workspace / "cue.rb"
     checksums.write_text("\n".join(checksum_lines()) + "\n", encoding="utf-8")
@@ -43,7 +52,7 @@ with tempfile.TemporaryDirectory() as directory:
     matching = run(
         "check-version",
         "--tag",
-        "v0.3.1",
+        matching_tag,
         "--manifest",
         ROOT / "Cargo.toml",
     )
@@ -51,7 +60,7 @@ with tempfile.TemporaryDirectory() as directory:
     mismatched = run(
         "check-version",
         "--tag",
-        "v9.9.9",
+        mismatched_tag,
         "--manifest",
         ROOT / "Cargo.toml",
     )
@@ -63,7 +72,7 @@ with tempfile.TemporaryDirectory() as directory:
     rendered = run(
         "render-formula",
         "--tag",
-        "v0.3.1",
+        matching_tag,
         "--checksums",
         checksums,
         "--output",
@@ -71,7 +80,7 @@ with tempfile.TemporaryDirectory() as directory:
     )
     assert rendered.returncode == 0, rendered.stderr
     text = formula.read_text(encoding="utf-8")
-    assert 'version "0.3.1"' in text
+    assert f'version "{version}"' in text
     for index, target in enumerate(TARGETS):
         assert f"cue-{target}.tar.gz" in text
         assert str(index + 1) * 64 in text
@@ -86,7 +95,7 @@ with tempfile.TemporaryDirectory() as directory:
         invalid = run(
             "render-formula",
             "--tag",
-            "v0.3.1",
+            matching_tag,
             "--checksums",
             checksums,
             "--output",
