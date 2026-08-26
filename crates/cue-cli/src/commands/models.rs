@@ -23,14 +23,20 @@ pub async fn run(args: ModelsArgs) -> i32 {
     }
 }
 
-fn ollama_url() -> String {
-    let user = load_user_config().unwrap_or_default();
-    let config = resolve(&[&PartialConfig::default(), &user]);
-    config.normalization.ollama_url
+fn configured_admin() -> cue_core::Result<OllamaAdmin> {
+    let user = load_user_config()?;
+    let config = resolve(&[&PartialConfig::default(), &user])?;
+    Ok(OllamaAdmin::new(config.normalization.ollama_url))
 }
 
 async fn list() -> i32 {
-    let admin = OllamaAdmin::new(ollama_url());
+    let admin = match configured_admin() {
+        Ok(admin) => admin,
+        Err(err) => {
+            eprintln!("{err}");
+            return 1;
+        }
+    };
     match admin.list_models().await {
         Ok(models) => {
             if models.is_empty() {
@@ -58,7 +64,13 @@ async fn list() -> i32 {
 }
 
 async fn check() -> i32 {
-    let admin = OllamaAdmin::new(ollama_url());
+    let admin = match configured_admin() {
+        Ok(admin) => admin,
+        Err(err) => {
+            eprintln!("{err}");
+            return 1;
+        }
+    };
     match cue_normalization::s1_ready(&admin).await {
         Ok(true) => {
             println_line(&format!(
@@ -87,7 +99,13 @@ async fn install_model(model: &str) -> i32 {
         return 2;
     }
 
-    let admin = OllamaAdmin::new(ollama_url());
+    let admin = match configured_admin() {
+        Ok(admin) => admin,
+        Err(err) => {
+            eprintln!("{err}");
+            return 1;
+        }
+    };
     println_line(&format!(
         "Installing {} (pulls {} on first use; this can take a while)...",
         cue_normalization::S1_MODEL_NAME,

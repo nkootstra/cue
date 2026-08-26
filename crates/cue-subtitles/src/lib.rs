@@ -10,14 +10,10 @@ pub use segment::{Cue, SubtitlePolicy, segment};
 
 use cue_core::Transcript;
 
-/// Build finished subtitle cues: segment the transcript, then apply line
-/// breaking per the policy.
+/// Build finished subtitle cues. Segmentation owns the physical line layout
+/// so admission and rendering always use the same constraints.
 pub fn build_cues(transcript: &Transcript, policy: &SubtitlePolicy) -> Vec<Cue> {
-    let mut cues = segment(transcript, policy);
-    for cue in &mut cues {
-        cue.text = break_lines(&cue.text, policy);
-    }
-    cues
+    segment(transcript, policy)
 }
 
 #[cfg(test)]
@@ -115,10 +111,9 @@ mod tests {
         assert!(cues.len() > 1, "expected multiple cues");
         for cue in &cues {
             assert!(
-                cue.text.chars().count() <= policy.char_budget(),
-                "cue exceeds budget: {:?} ({} chars)",
-                cue.text,
-                cue.text.chars().count()
+                cue.text.lines().count() <= policy.max_lines,
+                "cue exceeds line budget: {:?}",
+                cue.text
             );
         }
         // Cues remain ordered and non-overlapping.
@@ -153,7 +148,6 @@ mod tests {
             max_lines: 1,
             max_chars_per_line: 5,
             max_duration_ms: 60_000,
-            max_chars_per_second: None,
         };
         // Each emoji is one char but four bytes.
         let t = transcript(vec![word("😀😀😀", 0, 100), word("😀😀😀", 110, 200)]);
@@ -185,16 +179,6 @@ mod tests {
         assert_eq!(cues.len(), 1);
         assert_eq!(cues[0].text, "a i o");
         assert!(cues[0].end_ms >= cues[0].start_ms);
-    }
-
-    #[test]
-    fn reading_speed_policy_is_represented() {
-        let policy = SubtitlePolicy {
-            max_chars_per_second: Some(17.0),
-            ..SubtitlePolicy::default()
-        };
-        assert_eq!(policy.max_chars_per_second, Some(17.0));
-        assert_eq!(policy.char_budget(), 85);
     }
 
     #[test]
@@ -233,5 +217,108 @@ mod tests {
                 assert!(line.chars().count() <= 20, "{:?}", cue.text);
             }
         }
+    }
+
+    #[test]
+    fn layout_capacity_not_aggregate_characters_controls_cue_boundaries() {
+        use super::build_cues;
+
+        // The aggregate text fits the old 2 * 5 + newline scalar budget,
+        // but the words require three physical lines at width five.
+        let t = transcript(vec![
+            word("aaaa", 0, 100),
+            word("bbbb", 110, 200),
+            word("c", 210, 300),
+        ]);
+        let policy = SubtitlePolicy {
+            max_lines: 2,
+            max_chars_per_line: 5,
+            max_duration_ms: 60_000,
+        };
+
+        let cues = build_cues(&t, &policy);
+
+        assert_eq!(cues.len(), 2, "{cues:?}");
+        assert!(cues.iter().all(|cue| cue.text.lines().count() <= 2));
+        assert_eq!(
+            cues.iter()
+                .flat_map(|cue| cue.text.split_whitespace())
+                .collect::<Vec<_>>(),
+            ["aaaa", "bbbb", "c"]
+        );
+    }
+
+    #[test]
+    fn duration_admission_uses_candidate_word_end() {
+        let t = transcript(vec![word("first", 0, 900), word("second", 900, 1_100)]);
+        let policy = SubtitlePolicy {
+            max_duration_ms: 1_000,
+            ..SubtitlePolicy::default()
+        };
+
+        let cues = segment(&t, &policy);
+
+        assert_eq!(cues.len(), 2, "{cues:?}");
+        assert!(cues.iter().all(|cue| cue.end_ms - cue.start_ms <= 1_000));
+    }
+
+    #[test]
+    fn unicode_width_is_used_during_admission() {
+        let t = transcript(vec![word("é", 0, 100), word("é", 110, 200)]);
+        let policy = SubtitlePolicy {
+            max_lines: 1,
+            max_chars_per_line: 3,
+            max_duration_ms: 60_000,
+        };
+
+        let cues = segment(&t, &policy);
+
+        assert_eq!(cues.len(), 1, "{cues:?}");
+        assert_eq!(cues[0].text, "é é");
+    }
+
+    #[test]
+    fn exact_line_width_is_admitted_and_one_character_overflow_splits() {
+        let policy = SubtitlePolicy {
+            max_lines: 1,
+            max_chars_per_line: 5,
+            max_duration_ms: 60_000,
+        };
+
+        let exact = segment(
+            &transcript(vec![word("aa", 0, 100), word("bb", 110, 200)]),
+            &policy,
+        );
+        let overflow = segment(
+            &transcript(vec![word("aa", 0, 100), word("bbb", 110, 200)]),
+            &policy,
+        );
+
+        assert_eq!(exact.len(), 1, "{exact:?}");
+        assert_eq!(exact[0].text, "aa bb");
+        assert_eq!(overflow.len(), 2, "{overflow:?}");
+    }
+
+    #[test]
+    fn an_indivisible_overlong_word_is_preserved() {
+        use super::build_cues;
+
+        let long = "supercalifragilisticexpialidocious";
+        let t = transcript(vec![word(long, 0, 500), word("next", 510, 700)]);
+        let policy = SubtitlePolicy {
+            max_lines: 2,
+            max_chars_per_line: 8,
+            ..SubtitlePolicy::default()
+        };
+
+        let cues = build_cues(&t, &policy);
+
+        assert_eq!(cues[0].text, long);
+        assert_eq!(
+            cues.iter()
+                .flat_map(|cue| cue.text.split_whitespace())
+                .collect::<Vec<_>>(),
+            [long, "next"]
+        );
     }
 }

@@ -115,7 +115,6 @@ pub struct SubtitlesConfig {
     pub max_chars_per_line: usize,
     #[serde(default = "default_max_duration_ms")]
     pub max_duration_ms: u64,
-    pub max_chars_per_second: Option<f32>,
 }
 
 fn default_subtitle_formats() -> Vec<SubtitleFormat> {
@@ -141,7 +140,6 @@ impl Default for SubtitlesConfig {
             max_lines: default_max_lines(),
             max_chars_per_line: default_max_chars_per_line(),
             max_duration_ms: default_max_duration_ms(),
-            max_chars_per_second: None,
         }
     }
 }
@@ -283,7 +281,6 @@ partial_section!(
     max_lines: usize,
     max_chars_per_line: usize,
     max_duration_ms: u64,
-    max_chars_per_second: Option<f32>,
 );
 
 partial_section!(
@@ -295,7 +292,7 @@ partial_section!(
 );
 
 /// Merge layers into a total config. Earlier layers win.
-pub fn resolve(layers: &[&PartialConfig]) -> Config {
+pub fn resolve(layers: &[&PartialConfig]) -> Result<Config, CueError> {
     let mut config = Config::default();
     for layer in layers.iter().rev() {
         layer
@@ -312,7 +309,25 @@ pub fn resolve(layers: &[&PartialConfig]) -> Config {
         }
         layer.analysis.clone().apply_to(&mut config.analysis);
     }
-    config
+    validate_subtitles(&config.subtitles)?;
+    Ok(config)
+}
+
+fn validate_subtitles(config: &SubtitlesConfig) -> Result<(), CueError> {
+    for (field, value) in [
+        ("max_lines", config.max_lines as u64),
+        ("max_chars_per_line", config.max_chars_per_line as u64),
+        ("max_duration_ms", config.max_duration_ms),
+    ] {
+        if value == 0 {
+            return Err(
+                CueError::general(format!("subtitles.{field} must be greater than zero")).remedy(
+                    format!("set subtitles.{field} to a positive value in cue.toml"),
+                ),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Parse user configuration from TOML text.
@@ -385,12 +400,21 @@ struct RawToml {
 struct PartialSubtitlesRaw {
     #[serde(default)]
     formats: Option<Vec<String>>,
+    /// One-release compatibility input. Reading speed was never enforced,
+    /// so retaining it in resolved state implied behavior that did not exist.
+    #[serde(default)]
+    max_chars_per_second: Option<f32>,
     #[serde(flatten)]
     rest: PartialSubtitles,
 }
 
 impl RawToml {
     fn finish(self) -> Result<PartialConfig, CueError> {
+        if self.subtitles.max_chars_per_second.is_some() {
+            tracing::warn!(
+                "subtitles.max_chars_per_second is deprecated and ignored; remove it from cue.toml"
+            );
+        }
         let formats = match self.subtitles.formats {
             Some(names) => Some(
                 names
@@ -438,7 +462,7 @@ mod tests {
 
     #[test]
     fn resolve_empty_layers_yields_defaults() {
-        let config = resolve(&[&PartialConfig::default(), &PartialConfig::default()]);
+        let config = resolve(&[&PartialConfig::default(), &PartialConfig::default()]).unwrap();
         assert_eq!(config, Config::default());
     }
 
@@ -464,7 +488,7 @@ mod tests {
             ..Default::default()
         };
 
-        let config = resolve(&[&cli_layer, &file_layer]);
+        let config = resolve(&[&cli_layer, &file_layer]).unwrap();
         // CLI wins over file...
         assert_eq!(config.transcription.model, "tiny");
         // ...but untouched CLI fields fall through to the file layer.
@@ -486,7 +510,7 @@ mod tests {
             })),
             ..Default::default()
         };
-        let config = resolve(&[&no_llm, &with_llm]);
+        let config = resolve(&[&no_llm, &with_llm]).unwrap();
         assert_eq!(config.llm, None);
     }
 
@@ -496,7 +520,7 @@ mod tests {
             "[normalization]\nstyling = \"formal\"\nstructure = \"bullets\"\ncontext = \"technical\"\n",
         )
         .unwrap();
-        let config = resolve(&[&partial]);
+        let config = resolve(&[&partial]).unwrap();
         assert_eq!(config.normalization.styling, "formal");
         assert_eq!(config.normalization.structure, "bullets");
         assert_eq!(config.normalization.context, "technical");
@@ -529,7 +553,7 @@ description = true
 chapters = true
 "#;
         let partial = parse_toml(text).unwrap();
-        let config = resolve(&[&partial]);
+        let config = resolve(&[&partial]).unwrap();
 
         assert_eq!(config.transcription.model, "large-v3-turbo");
         assert_eq!(config.normalization.ollama_url, "http://localhost:11434");
@@ -563,6 +587,57 @@ chapters = true
         assert!(
             err.to_string().contains("unknown subtitle format \"ass\""),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn zero_subtitle_limits_are_rejected_during_resolution() {
+        for (partial, field) in [
+            (
+                PartialSubtitles {
+                    max_lines: Some(0),
+                    ..Default::default()
+                },
+                "max_lines",
+            ),
+            (
+                PartialSubtitles {
+                    max_chars_per_line: Some(0),
+                    ..Default::default()
+                },
+                "max_chars_per_line",
+            ),
+            (
+                PartialSubtitles {
+                    max_duration_ms: Some(0),
+                    ..Default::default()
+                },
+                "max_duration_ms",
+            ),
+        ] {
+            let err = resolve(&[&PartialConfig {
+                subtitles: partial,
+                ..Default::default()
+            }])
+            .unwrap_err();
+            let rendered = err.to_string();
+            assert!(rendered.contains(field), "{rendered}");
+            assert!(rendered.contains("greater than zero"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn legacy_reading_speed_key_is_accepted_but_ignored() {
+        let partial =
+            parse_toml("[subtitles]\nmax_chars_per_second = 17.0\nmax_chars_per_line = 21\n")
+                .unwrap();
+        let config = resolve(&[&partial]).unwrap();
+
+        assert_eq!(config.subtitles.max_chars_per_line, 21);
+        assert!(
+            !serde_json::to_string(&config)
+                .unwrap()
+                .contains("max_chars_per_second")
         );
     }
 

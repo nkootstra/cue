@@ -81,7 +81,7 @@ async fn run_inner(
     }
 
     let user = load_user_config()?;
-    let config = resolve(&[&PartialConfig::default(), &user]);
+    let config = resolve(&[&PartialConfig::default(), &user])?;
     tracing::debug!(?config, "resolved configuration");
 
     // Stage logic emits events; the renderer decides presentation. Core
@@ -392,7 +392,6 @@ async fn process_file(
         max_lines: config.subtitles.max_lines,
         max_chars_per_line: config.subtitles.max_chars_per_line,
         max_duration_ms: config.subtitles.max_duration_ms,
-        max_chars_per_second: config.subtitles.max_chars_per_second,
     };
     let cues = cue_subtitles::build_cues(&transcript, &policy);
     for format in &config.subtitles.formats {

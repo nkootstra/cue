@@ -21,8 +21,20 @@ pub async fn run(args: DoctorArgs) -> i32 {
     }
 
     println_line("\nOptional (not required for local transcription):");
-    let user = load_user_config().unwrap_or_default();
-    let config = resolve(&[&PartialConfig::default(), &user]);
+    let user = match load_user_config() {
+        Ok(user) => user,
+        Err(err) => {
+            eprintln!("{err}");
+            return 1;
+        }
+    };
+    let config = match resolve(&[&PartialConfig::default(), &user]) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("{err}");
+            return 1;
+        }
+    };
     for line in integration_lines(&config).await {
         println_line(&line);
     }
