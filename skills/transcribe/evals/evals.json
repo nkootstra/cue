@@ -28,25 +28,28 @@
     },
     {
       "id": 3,
-      "prompt": "There are two conference welcome clips and one shared context file in the current directory. Transcribe both clips and apply the shared speaker context to both transcripts.",
-      "expected_output": "Two output directories (one per clip), each with a transcript.txt corrected to match the shared context spelling.",
+      "prompt": "A course directory in the current directory contains conference welcome clips at the top level and in a nested module. Transcribe the whole directory recursively and apply the shared context file to every transcript.",
+      "expected_output": "One .cue output directory beside each source clip, including the nested clip, with both transcripts corrected from one explicitly supplied shared corrections manifest.",
       "files": [
         "evals/files/clip-01.mp3",
         "evals/files/clip-02.mp3",
         "evals/files/context.md"
       ],
       "assertions": [
-        {"name": "clip 1 transcript is non-empty", "type": "file_nonempty", "path": "eval-batch-context/with_skill/outputs/clip-01/transcript.txt"},
-        {"name": "clip 2 transcript is non-empty", "type": "file_nonempty", "path": "eval-batch-context/with_skill/outputs/clip-02/transcript.txt"},
-        {"name": "clip 1 speaker uses Doe", "type": "contains", "path": "eval-batch-context/with_skill/outputs/clip-01/transcript.txt", "value": "John Doe", "case_insensitive": true},
-        {"name": "clip 2 speaker uses Doe", "type": "contains", "path": "eval-batch-context/with_skill/outputs/clip-02/transcript.txt", "value": "John Doe", "case_insensitive": true},
-        {"name": "clip 2 product uses OpenTelemetry", "type": "contains", "path": "eval-batch-context/with_skill/outputs/clip-02/transcript.txt", "value": "OpenTelemetry", "case_insensitive": false}
+        {"name": "shared manifest maps the product term", "type": "contains", "path": "eval-recursive-context/with_skill/outputs/corrections.md", "value": "open telemetry -> OpenTelemetry", "case_insensitive": true},
+        {"name": "top-level transcript is non-empty", "type": "file_nonempty", "path": "eval-recursive-context/with_skill/outputs/course/clip-01.cue/transcript.txt"},
+        {"name": "nested transcript is non-empty", "type": "file_nonempty", "path": "eval-recursive-context/with_skill/outputs/course/module-02/clip-02.cue/transcript.txt"},
+        {"name": "top-level speaker uses Doe", "type": "contains", "path": "eval-recursive-context/with_skill/outputs/course/clip-01.cue/transcript.txt", "value": "John Doe", "case_insensitive": true},
+        {"name": "nested speaker uses Doe", "type": "contains", "path": "eval-recursive-context/with_skill/outputs/course/module-02/clip-02.cue/transcript.txt", "value": "John Doe", "case_insensitive": true},
+        {"name": "nested product uses OpenTelemetry", "type": "contains", "path": "eval-recursive-context/with_skill/outputs/course/module-02/clip-02.cue/transcript.txt", "value": "OpenTelemetry", "case_insensitive": false},
+        {"name": "nested split product spelling is absent", "type": "not_contains", "path": "eval-recursive-context/with_skill/outputs/course/module-02/clip-02.cue/transcript.txt", "value": "open telemetry", "case_insensitive": true},
+        {"name": "nested canonical transcript retains raw wording", "type": "contains", "path": "eval-recursive-context/with_skill/outputs/course/module-02/clip-02.cue/transcript.json", "value": "open telemetry", "case_insensitive": true}
       ]
     },
     {
       "id": 4,
-      "prompt": "There is a media file and an already-transcribed output folder in this directory, plus a shared context file. Transcribe the new clip, then write a corrections.md manifest for the misheard terms and apply it with cue correct.",
-      "expected_output": "A new transcription for the clip, a corrections.md manifest mapping the misheard term to its context spelling, and the pre-existing transcript.txt corrected via cue correct with its transcript.json left untouched.",
+      "prompt": "There are two media files in this directory, but one already has a corrected .cue output folder. Transcribe only the new clip, then write a corrections.md manifest for the misheard terms and apply it with cue correct without rerendering the existing output.",
+      "expected_output": "Only the new clip is transcribed; a corrections.md manifest maps the misheard term to its context spelling, and the pre-existing transcript.txt is corrected via cue correct with its sentinel and transcript.json left untouched.",
       "files": [
         "evals/files/clip-01.mp3",
         "evals/files/context.md"
@@ -56,9 +59,23 @@
         {"name": "existing transcript is non-empty", "type": "file_nonempty", "path": "eval-existing-correction/with_skill/outputs/1. welcome.cue/transcript.txt"},
         {"name": "existing transcript is corrected", "type": "contains", "path": "eval-existing-correction/with_skill/outputs/1. welcome.cue/transcript.txt", "value": "OpenTelemetry", "case_insensitive": false},
         {"name": "existing transcript has no garble", "type": "not_contains", "path": "eval-existing-correction/with_skill/outputs/1. welcome.cue/transcript.txt", "value": "open telemetry", "case_insensitive": true},
+        {"name": "existing transcript sentinel survives", "type": "contains", "path": "eval-existing-correction/with_skill/outputs/1. welcome.cue/transcript.txt", "value": "PRE-EXISTING OUTPUT SENTINEL", "case_insensitive": false},
         {"name": "existing subtitles are corrected", "type": "contains", "path": "eval-existing-correction/with_skill/outputs/1. welcome.cue/subtitles.srt", "value": "OpenTelemetry", "case_insensitive": false},
         {"name": "canonical transcript is unchanged", "type": "files_equal", "path": "eval-existing-correction/with_skill/outputs/1. welcome.cue/transcript.json", "other_path": ".baselines/with_skill-transcript.json"},
         {"name": "new clip transcript is non-empty", "type": "file_nonempty", "path": "eval-existing-correction/with_skill/outputs/2. what we cover.cue/transcript.txt"}
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Transcribe the two explicitly named conference clips in the current directory in one cue command.",
+      "expected_output": "Two sibling .cue output directories, one per explicitly supplied media file.",
+      "files": [
+        "evals/files/clip-01.mp3",
+        "evals/files/clip-02.mp3"
+      ],
+      "assertions": [
+        {"name": "first explicit-file transcript is non-empty", "type": "file_nonempty", "path": "eval-explicit-multi/with_skill/outputs/clip-01.cue/transcript.txt"},
+        {"name": "second explicit-file transcript is non-empty", "type": "file_nonempty", "path": "eval-explicit-multi/with_skill/outputs/clip-02.cue/transcript.txt"}
       ]
     }
   ]
