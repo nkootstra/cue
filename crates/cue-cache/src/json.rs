@@ -124,14 +124,13 @@ impl JsonCache {
     }
 
     fn path_for(&self, key: &impl Serialize) -> Result<PathBuf> {
-        let mut key_json = serde_json::to_value(key).map_err(|error| {
+        let key_json = serde_json::to_value(key).map_err(|error| {
             CueError::general("could not serialize cache key").because(error.to_string())
         })?;
-        canonicalize_json(&mut key_json);
         let key_json = serde_json::to_vec(&key_json).map_err(|error| {
             CueError::general("could not serialize canonical cache key").because(error.to_string())
         })?;
-        let digest = blake3::hash(&key_json).to_hex();
+        let digest = crate::bytes_hash(&key_json);
         Ok(self.dir.join(format!("{digest}.json")))
     }
 
@@ -161,25 +160,6 @@ impl JsonCache {
                 }
             }
         }
-    }
-}
-
-fn canonicalize_json(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Array(values) => {
-            for value in values {
-                canonicalize_json(value);
-            }
-        }
-        serde_json::Value::Object(object) => {
-            let mut entries = std::mem::take(object).into_iter().collect::<Vec<_>>();
-            entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
-            for (key, mut value) in entries {
-                canonicalize_json(&mut value);
-                object.insert(key, value);
-            }
-        }
-        _ => {}
     }
 }
 

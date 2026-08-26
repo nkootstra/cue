@@ -269,9 +269,9 @@ async fn process_file(
         version: 1,
         transcript_hash: &transcript_hash,
         provider: &config.normalization.provider,
-        styling: &config.normalization.styling,
-        structure: &config.normalization.structure,
-        context: &config.normalization.context,
+        styling: &s1_settings.styling,
+        structure: &s1_settings.structure,
+        context: &s1_settings.context,
     };
 
     let normalized = match load_cached(&normalized_cache, &normalization_key) {
@@ -291,7 +291,7 @@ async fn process_file(
             let outcome = match s1_readiness.as_ref().expect("readiness set above") {
                 Ok(true) => match cue_normalization::normalize_s1(
                     &config.normalization.ollama_url,
-                    s1_settings,
+                    s1_settings.clone(),
                     &transcript,
                 )
                 .await

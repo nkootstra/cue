@@ -12,7 +12,7 @@ use crate::render::{println_line, tool_line};
 /// Run environment checks and render them. Returns the process exit code.
 pub async fn run(args: DoctorArgs, config: &cue_core::Config) -> i32 {
     println_line("Checking local environment...\n");
-    let env = check_environment().await;
+    let (env, integrations) = tokio::join!(check_environment(), integration_lines(config));
 
     println_line("Required:");
     for report in &env.reports {
@@ -20,7 +20,7 @@ pub async fn run(args: DoctorArgs, config: &cue_core::Config) -> i32 {
     }
 
     println_line("\nOptional (not required for local transcription):");
-    for line in integration_lines(config).await {
+    for line in integrations {
         println_line(&line);
     }
     println_line("\nLocal transcription and subtitles work without any of these.");

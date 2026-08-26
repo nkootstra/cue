@@ -93,7 +93,7 @@ pub async fn install_s1(admin: &cue_llm::OllamaAdmin) -> Result<String> {
 
 /// Check whether Ollama has the S1 model ready without hiding probe errors.
 pub async fn s1_ready(admin: &cue_llm::OllamaAdmin) -> Result<bool> {
-    Ok(s1_ready_in(&admin.list_models().await?))
+    admin.has_model(S1_MODEL_NAME).await
 }
 
 /// Derive S1 readiness from an existing model snapshot.
