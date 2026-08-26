@@ -26,7 +26,7 @@ pub struct Cue {
     pub output: Option<String>,
 
     /// Search directory inputs recursively
-    #[usage(long, global)]
+    #[usage(short = 'r', long, global)]
     pub recursive: bool,
 
     /// Media files or directories to process
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn recursive_is_global_before_or_after_transcribe() {
-        let before = parse_args(&["cue", "--recursive", "transcribe", "media"]);
+        let before = parse_args(&["cue", "-r", "transcribe", "media"]);
         assert!(before.recursive);
         match before.command.unwrap() {
             Command::Transcribe(args) => assert_eq!(args.paths, [PathBuf::from("media")]),
@@ -286,7 +286,7 @@ mod tests {
     fn emitted_spec_names_paths_and_recursive() {
         let kdl = Cue::to_kdl();
         assert!(kdl.contains("[PATHS]"), "{kdl}");
-        assert!(kdl.contains("--recursive"), "{kdl}");
+        assert!(kdl.contains("flag \"-r --recursive\""), "{kdl}");
     }
 
     #[test]
