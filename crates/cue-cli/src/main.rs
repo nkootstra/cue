@@ -37,10 +37,10 @@ async fn dispatch(mut cli: Cue) -> cue_core::Result<i32> {
         }
         Some(Command::Transcribe(args)) => {
             let config = load_resolved_config()?;
-            Ok(commands::process::run_stopped(
+            Ok(commands::process::run_mode(
                 &cli,
                 &args.files,
-                Some(cue_core::PipelineStage::Transcribe),
+                commands::process::ProcessMode::TranscriptOnly,
                 &config,
             )
             .await)

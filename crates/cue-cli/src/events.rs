@@ -27,18 +27,20 @@ pub fn stage_label(stage: PipelineStage) -> &'static str {
         PipelineStage::Inspect => "inspecting",
         PipelineStage::Extract => "extracting audio",
         PipelineStage::Transcribe => "transcribing",
-        PipelineStage::Caption => "building subtitles",
         PipelineStage::Normalize => "normalizing",
         PipelineStage::Analyze => "analyzing",
         PipelineStage::Render => "writing outputs",
     }
 }
 
+fn progress_label(stage: PipelineStage, percent: u8) -> String {
+    format!("{} — {percent}%", stage_label(stage))
+}
+
 /// Consume events and print them appropriately for the output medium.
 pub async fn run_renderer(mut rx: tokio::sync::mpsc::UnboundedReceiver<PipelineEvent>) {
     let interactive = std::io::stdout().is_terminal();
     let mut open_spinner: Option<indicatif::ProgressBar> = None;
-    let mut current_stage: Option<PipelineStage> = None;
 
     while let Some(event) = rx.recv().await {
         match (&event, interactive) {
@@ -56,11 +58,10 @@ pub async fn run_renderer(mut rx: tokio::sync::mpsc::UnboundedReceiver<PipelineE
                 spinner.set_message(stage_label(*stage).to_string());
                 spinner.enable_steady_tick(std::time::Duration::from_millis(120));
                 open_spinner = Some(spinner);
-                current_stage = Some(*stage);
             }
-            (PipelineEvent::Progress { current, .. }, true) => {
-                if let (Some(spinner), Some(stage)) = (&open_spinner, current_stage) {
-                    spinner.set_message(format!("{} — {current}%", stage_label(stage)));
+            (PipelineEvent::Progress { stage, percent }, true) => {
+                if let Some(spinner) = &open_spinner {
+                    spinner.set_message(progress_label(*stage, *percent));
                 }
             }
             (PipelineEvent::Cached(_), true)
@@ -142,10 +143,21 @@ mod tests {
         assert_eq!(
             render_event(&PipelineEvent::Progress {
                 stage: PipelineStage::Transcribe,
-                current: 1,
-                total: None,
+                percent: 1,
             }),
             ""
+        );
+    }
+
+    #[test]
+    fn progress_label_uses_the_stage_carried_by_the_event() {
+        assert_eq!(
+            progress_label(PipelineStage::Analyze, 40),
+            "analyzing — 40%"
+        );
+        assert_eq!(
+            progress_label(PipelineStage::Transcribe, 40),
+            "transcribing — 40%"
         );
     }
 }

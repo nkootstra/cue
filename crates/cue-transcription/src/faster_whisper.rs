@@ -197,11 +197,10 @@ fn process_stderr_line(
         && let Ok(fraction) = rest.trim().parse::<f32>()
         && let Some(sender) = progress
     {
-        let percent = (fraction.clamp(0.0, 1.0) * 100.0).round() as u64;
+        let percent = (fraction.clamp(0.0, 1.0) * 100.0).round() as u8;
         let _ = sender.send(cue_core::PipelineEvent::Progress {
             stage: PipelineStage::Transcribe,
-            current: percent,
-            total: Some(100),
+            percent,
         });
     } else if !line.trim().is_empty() {
         debug!(target: "cue_worker", "{line}");
@@ -484,12 +483,28 @@ sys.stdout.write(json.dumps({
 
         let mut percents = Vec::new();
         while let Ok(event) = rx.try_recv() {
-            if let cue_core::PipelineEvent::Progress { current, total, .. } = event {
-                assert_eq!(total, Some(100));
-                percents.push(current);
+            if let cue_core::PipelineEvent::Progress { percent, .. } = event {
+                percents.push(percent);
             }
         }
         assert_eq!(percents, vec![25, 50, 75]);
+    }
+
+    #[test]
+    fn progress_markers_are_clamped_to_valid_percentages() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        process_stderr_line(b"PROGRESS -0.5", false, Some(&tx));
+        process_stderr_line(b"PROGRESS 1.5", false, Some(&tx));
+
+        let percents = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|event| match event {
+                cue_core::PipelineEvent::Progress { percent, .. } => percent,
+                other => panic!("unexpected event: {other:?}"),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(percents, [0, 100]);
     }
 
     #[tokio::test]

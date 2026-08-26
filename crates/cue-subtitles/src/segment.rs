@@ -4,7 +4,7 @@
 //! in order: sentence punctuation, pauses between words, then the configured
 //! character and duration budgets.
 
-use cue_core::Transcript;
+use cue_core::{Result, Transcript};
 
 use crate::lines::LineLayout;
 
@@ -45,14 +45,14 @@ fn ends_sentence(text: &str) -> bool {
 }
 
 /// Segment transcript words into cues under the policy.
-pub fn segment(transcript: &Transcript, policy: &SubtitlePolicy) -> Vec<Cue> {
+pub fn segment(transcript: &Transcript, policy: &SubtitlePolicy) -> Result<Vec<Cue>> {
+    transcript.validate()?;
     let mut cues = Vec::new();
     for spoken in &transcript.segments {
-        let words = transcript.words.get(spoken.word_start..spoken.word_end);
-        let Some(words) = words else { continue };
+        let words = transcript.words_for_segment(spoken)?;
         segment_range(words, policy, &mut cues);
     }
-    enforce_monotonic(cues)
+    Ok(enforce_monotonic(cues))
 }
 
 fn segment_range(words: &[cue_core::Word], policy: &SubtitlePolicy, out: &mut Vec<Cue>) {

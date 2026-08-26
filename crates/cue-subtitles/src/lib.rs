@@ -12,13 +12,13 @@ use cue_core::Transcript;
 
 /// Build finished subtitle cues. Segmentation owns the physical line layout
 /// so admission and rendering always use the same constraints.
-pub fn build_cues(transcript: &Transcript, policy: &SubtitlePolicy) -> Vec<Cue> {
+pub fn build_cues(transcript: &Transcript, policy: &SubtitlePolicy) -> cue_core::Result<Vec<Cue>> {
     segment(transcript, policy)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::segment::{Cue, SubtitlePolicy, segment};
+    use super::segment::{Cue, SubtitlePolicy, segment as try_segment};
     use cue_core::{Segment, TRANSCRIPT_SCHEMA_VERSION, Transcript, Word};
     fn word(text: &str, start_ms: u64, end_ms: u64) -> Word {
         Word {
@@ -50,6 +50,10 @@ mod tests {
                 word_end,
             }],
         }
+    }
+
+    fn segment(transcript: &Transcript, policy: &SubtitlePolicy) -> Vec<Cue> {
+        try_segment(transcript, policy).unwrap()
     }
 
     #[test]
@@ -210,7 +214,7 @@ mod tests {
             max_chars_per_line: 20,
             ..SubtitlePolicy::default()
         };
-        let cues = build_cues(&t, &policy);
+        let cues = build_cues(&t, &policy).unwrap();
         assert!(!cues.is_empty());
         for cue in &cues {
             for line in cue.text.lines() {
@@ -236,7 +240,7 @@ mod tests {
             max_duration_ms: 60_000,
         };
 
-        let cues = build_cues(&t, &policy);
+        let cues = build_cues(&t, &policy).unwrap();
 
         assert_eq!(cues.len(), 2, "{cues:?}");
         assert!(cues.iter().all(|cue| cue.text.lines().count() <= 2));
@@ -311,7 +315,7 @@ mod tests {
             ..SubtitlePolicy::default()
         };
 
-        let cues = build_cues(&t, &policy);
+        let cues = build_cues(&t, &policy).unwrap();
 
         assert_eq!(cues[0].text, long);
         assert_eq!(
@@ -320,5 +324,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             [long, "next"]
         );
+    }
+
+    #[test]
+    fn malformed_segment_range_is_returned_as_an_error() {
+        let mut transcript = transcript(vec![word("hello", 0, 100)]);
+        transcript.segments[0].word_end = 2;
+
+        let error = super::build_cues(&transcript, &SubtitlePolicy::default())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("invalid word range"), "{error}");
+        assert!(error.contains("0..2"), "{error}");
     }
 }

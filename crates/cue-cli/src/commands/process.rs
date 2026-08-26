@@ -47,21 +47,45 @@ struct AnalysisCacheKey<'a> {
     prompt_version: u32,
 }
 
-pub async fn run(cli: &Cue, config: &cue_core::Config) -> i32 {
-    run_stopped(cli, &cli.files, None, config).await
+/// The two supported processing contracts.
+///
+/// Keeping this as an enum makes unsupported intermediate stopping points
+/// unrepresentable while preserving the dedicated `cue transcribe` output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessMode {
+    Full,
+    TranscriptOnly,
 }
 
-/// Process files, optionally stopping after a given stage.
-///
-/// `cue transcribe` uses this to produce transcripts without subtitles,
-/// normalization, or analysis.
-pub async fn run_stopped(
+impl ProcessMode {
+    fn includes(self, stage: cue_core::PipelineStage) -> bool {
+        use cue_core::PipelineStage;
+
+        match self {
+            Self::Full => true,
+            Self::TranscriptOnly => matches!(
+                stage,
+                PipelineStage::Inspect
+                    | PipelineStage::Extract
+                    | PipelineStage::Transcribe
+                    | PipelineStage::Render
+            ),
+        }
+    }
+}
+
+pub async fn run(cli: &Cue, config: &cue_core::Config) -> i32 {
+    run_mode(cli, &cli.files, ProcessMode::Full, config).await
+}
+
+/// Process files under one of the supported artifact contracts.
+pub async fn run_mode(
     cli: &Cue,
     files: &[String],
-    stop_after: Option<cue_core::PipelineStage>,
+    mode: ProcessMode,
     config: &cue_core::Config,
 ) -> i32 {
-    match run_inner(files, stop_after, cli, config).await {
+    match run_inner(files, mode, cli, config).await {
         Ok(code) => code,
         Err(err) => {
             eprintln!("{err}");
@@ -72,7 +96,7 @@ pub async fn run_stopped(
 
 async fn run_inner(
     files: &[String],
-    stop_after: Option<cue_core::PipelineStage>,
+    mode: ProcessMode,
     cli: &Cue,
     config: &cue_core::Config,
 ) -> Result<i32> {
@@ -89,7 +113,7 @@ async fn run_inner(
     let result: Result<()> = async {
         let mut s1_readiness: Option<std::result::Result<bool, String>> = None;
         for file in files {
-            process_file(file, cli, config, &tx, stop_after, &mut s1_readiness).await?;
+            process_file(file, cli, config, &tx, mode, &mut s1_readiness).await?;
         }
         Ok(())
     }
@@ -108,7 +132,7 @@ async fn process_file(
     cli: &Cue,
     config: &cue_core::Config,
     events: &tokio::sync::mpsc::UnboundedSender<cue_core::PipelineEvent>,
-    stop_after: Option<cue_core::PipelineStage>,
+    mode: ProcessMode,
     s1_readiness: &mut Option<std::result::Result<bool, String>>,
 ) -> Result<()> {
     use cue_core::{PipelineEvent, PipelineStage};
@@ -174,7 +198,18 @@ async fn process_file(
         audio_hash: &audio_hash,
     };
     let transcript_cache = cue_cache::JsonCache::new(stage_dir.join("transcription"));
-    let transcript = match load_cached(&transcript_cache, &transcript_cache_key) {
+    let cached_transcript: Option<cue_core::Transcript> =
+        load_cached::<cue_core::Transcript>(&transcript_cache, &transcript_cache_key).and_then(
+            |cached| {
+                if let Err(err) = cached.validate() {
+                    tracing::warn!(error = %err, "ignoring invalid cached transcript");
+                    None
+                } else {
+                    Some(cached)
+                }
+            },
+        );
+    let transcript = match cached_transcript {
         Some(cached) => {
             let _ = events.send(PipelineEvent::Cached(PipelineStage::Transcribe));
             cached
@@ -185,6 +220,7 @@ async fn process_file(
             let fresh = transcriber
                 .transcribe_with_progress(&wav_path, &options, Some(events.clone()))
                 .await?;
+            fresh.validate()?;
             store_cached(&transcript_cache, &transcript_cache_key, &fresh);
             let _ = events.send(PipelineEvent::Completed(PipelineStage::Transcribe));
             fresh
@@ -192,7 +228,7 @@ async fn process_file(
     };
 
     // `cue transcribe` stops here: canonical transcript only.
-    if stop_after == Some(PipelineStage::Transcribe) {
+    if !mode.includes(PipelineStage::Normalize) {
         let _ = events.send(PipelineEvent::Started(PipelineStage::Render));
         let out_dir = output_directory(&path, cli)?;
         std::fs::create_dir_all(&out_dir).map_err(|e| {
@@ -390,7 +426,7 @@ async fn process_file(
         max_chars_per_line: config.subtitles.max_chars_per_line,
         max_duration_ms: config.subtitles.max_duration_ms,
     };
-    let cues = cue_subtitles::build_cues(&transcript, &policy);
+    let cues = cue_subtitles::build_cues(&transcript, &policy)?;
     for format in &config.subtitles.formats {
         let path = out_dir.join(format!("subtitles.{}", format.extension()));
         let content = match format {
@@ -535,5 +571,22 @@ mod tests {
             serde_json::to_vec(&english).unwrap(),
             serde_json::to_vec(&dutch).unwrap()
         );
+    }
+
+    #[test]
+    fn process_modes_define_complete_or_transcript_only_stage_contracts() {
+        use cue_core::PipelineStage;
+
+        assert!(
+            PipelineStage::ALL
+                .into_iter()
+                .all(|stage| ProcessMode::Full.includes(stage))
+        );
+        assert!(ProcessMode::TranscriptOnly.includes(PipelineStage::Inspect));
+        assert!(ProcessMode::TranscriptOnly.includes(PipelineStage::Extract));
+        assert!(ProcessMode::TranscriptOnly.includes(PipelineStage::Transcribe));
+        assert!(ProcessMode::TranscriptOnly.includes(PipelineStage::Render));
+        assert!(!ProcessMode::TranscriptOnly.includes(PipelineStage::Normalize));
+        assert!(!ProcessMode::TranscriptOnly.includes(PipelineStage::Analyze));
     }
 }

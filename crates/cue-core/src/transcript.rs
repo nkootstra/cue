@@ -47,6 +47,55 @@ pub struct Segment {
 }
 
 impl Transcript {
+    /// Validate references from spoken segments into the canonical word list.
+    ///
+    /// Transcript schema v1 stores segment word ranges as half-open indices.
+    /// Centralizing this check prevents consumers from disagreeing about how
+    /// malformed ranges should be handled.
+    pub fn validate(&self) -> crate::Result<()> {
+        for (index, segment) in self.segments.iter().enumerate() {
+            self.words_for_segment(segment).map_err(|err| {
+                crate::CueError::new(
+                    crate::PipelineStage::Transcribe,
+                    format!("transcript segment {index} has an invalid word range"),
+                )
+                .because(err.to_string())
+                .remedy("regenerate the transcript or remove the corrupt cache entry")
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Return the words referenced by a segment, rejecting reversed or
+    /// out-of-bounds half-open ranges.
+    pub fn words_for_segment(&self, segment: &Segment) -> crate::Result<&[Word]> {
+        if segment.word_start > segment.word_end {
+            return Err(crate::CueError::new(
+                crate::PipelineStage::Transcribe,
+                "transcript segment word range is reversed",
+            )
+            .because(format!(
+                "range {}..{} starts after it ends",
+                segment.word_start, segment.word_end
+            )));
+        }
+
+        self.words
+            .get(segment.word_start..segment.word_end)
+            .ok_or_else(|| {
+                crate::CueError::new(
+                    crate::PipelineStage::Transcribe,
+                    "transcript segment word range is out of bounds",
+                )
+                .because(format!(
+                    "range {}..{} references a transcript with {} words",
+                    segment.word_start,
+                    segment.word_end,
+                    self.words.len()
+                ))
+            })
+    }
+
     /// Render the plain-text form used for `transcript.txt`: one line per
     /// segment, preserving segment order.
     ///
@@ -173,5 +222,42 @@ mod tests {
         let transcript: Transcript = serde_json::from_str(minimal).unwrap();
         assert_eq!(transcript.schema_version, TRANSCRIPT_SCHEMA_VERSION);
         assert!(transcript.words.is_empty());
+    }
+
+    #[test]
+    fn schema_v1_transcript_validates_and_exposes_segment_words() {
+        let transcript = sample();
+        transcript.validate().unwrap();
+        assert_eq!(
+            transcript
+                .words_for_segment(&transcript.segments[1])
+                .unwrap()
+                .iter()
+                .map(|word| word.text.as_str())
+                .collect::<Vec<_>>(),
+            ["this", "is", "cue."]
+        );
+    }
+
+    #[test]
+    fn reversed_segment_range_is_rejected() {
+        let mut transcript = sample();
+        transcript.segments[0].word_start = 2;
+        transcript.segments[0].word_end = 1;
+
+        let error = transcript.validate().unwrap_err().to_string();
+        assert!(error.contains("segment 0"), "{error}");
+        assert!(error.contains("2..1"), "{error}");
+    }
+
+    #[test]
+    fn out_of_bounds_segment_range_is_rejected() {
+        let mut transcript = sample();
+        transcript.segments[1].word_end = transcript.words.len() + 1;
+
+        let error = transcript.validate().unwrap_err().to_string();
+        assert!(error.contains("segment 1"), "{error}");
+        assert!(error.contains("6"), "{error}");
+        assert!(error.contains("5 words"), "{error}");
     }
 }
