@@ -168,7 +168,7 @@ bundled `transcribe` skill. Install it for your agents:
 cue skill install          # global; available across projects
 cue skill install --local  # current project only
 # or, without cue installed:
-npx skills add nkootstra/cue --global
+npx --yes skills@1.5.9 add nkootstra/cue --global -y
 ```
 
 The skill teaches agents to install cue when missing, run the pipeline,

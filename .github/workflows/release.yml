@@ -58,6 +58,10 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
 
+      - name: Test clean-home global skill install
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: bash scripts/test_skill_install.sh "target/${{ matrix.target }}/release/cue"
+
       - name: Ad-hoc codesign (macOS)
         if: runner.os == 'macOS'
         run: codesign --force --sign - "target/${{ matrix.target }}/release/cue"

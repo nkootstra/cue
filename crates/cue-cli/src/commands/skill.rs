@@ -1,7 +1,7 @@
 //! `cue skill` — install the transcribe agent skill for AI agents.
 //!
 //! The skill is distributed through the skills.sh ecosystem; this command
-//! proxies `npx skills add <owner/repo>` so any agent harness (Claude Code,
+//! proxies the pinned `skills` CLI so any agent harness (Claude Code,
 //! opencode, Codex, Cursor, ...) picks it up.
 
 use crate::cli::{SkillArgs, SkillCommand};
@@ -10,6 +10,10 @@ use crate::render::println_line;
 /// The repository the skill ships in; also the CLI's `--repo` default.
 #[cfg_attr(not(test), allow(dead_code))]
 pub const DEFAULT_SKILL_REPO: &str = "nkootstra/cue";
+
+/// Pin the upstream installer until global installs stop selecting PromptScript,
+/// which has no global skill directory (vercel-labs/skills#1352).
+const SKILLS_CLI_PACKAGE: &str = "skills@1.5.9";
 
 /// Build the exact argv that installs the skill for the given options.
 ///
@@ -21,7 +25,8 @@ pub const DEFAULT_SKILL_REPO: &str = "nkootstra/cue";
 pub fn install_argv(repo: &str, agent: Option<&str>, local: bool) -> Vec<String> {
     let mut argv = vec![
         "npx".to_string(),
-        "skills".to_string(),
+        "--yes".to_string(),
+        SKILLS_CLI_PACKAGE.to_string(),
         "add".to_string(),
         repo.to_string(),
         "-y".to_string(),
@@ -79,7 +84,7 @@ async fn run_install(repo: &str, agent: Option<&str>, local: bool, no_telemetry:
         }
         Ok(status) => {
             eprintln!(
-                "`npx skills add` exited with {} — see output above.",
+                "the skills installer exited with {} — see output above.",
                 status.code().unwrap_or(-1)
             );
             1
@@ -100,7 +105,15 @@ mod tests {
     fn builds_default_install_command() {
         assert_eq!(
             install_argv(DEFAULT_SKILL_REPO, None, false),
-            vec!["npx", "skills", "add", "nkootstra/cue", "-y", "--global"]
+            vec![
+                "npx",
+                "--yes",
+                "skills@1.5.9",
+                "add",
+                "nkootstra/cue",
+                "-y",
+                "--global"
+            ]
         );
     }
 
@@ -108,7 +121,15 @@ mod tests {
     fn custom_repo() {
         assert_eq!(
             install_argv("someone/fork", None, false),
-            vec!["npx", "skills", "add", "someone/fork", "-y", "--global"]
+            vec![
+                "npx",
+                "--yes",
+                SKILLS_CLI_PACKAGE,
+                "add",
+                "someone/fork",
+                "-y",
+                "--global"
+            ]
         );
     }
 
@@ -116,7 +137,14 @@ mod tests {
     fn local_install_omits_global_flag() {
         assert_eq!(
             install_argv(DEFAULT_SKILL_REPO, None, true),
-            vec!["npx", "skills", "add", "nkootstra/cue", "-y"]
+            vec![
+                "npx",
+                "--yes",
+                SKILLS_CLI_PACKAGE,
+                "add",
+                "nkootstra/cue",
+                "-y"
+            ]
         );
     }
 
@@ -126,7 +154,8 @@ mod tests {
             install_argv("nkootstra/cue", Some("opencode"), false),
             vec![
                 "npx",
-                "skills",
+                "--yes",
+                SKILLS_CLI_PACKAGE,
                 "add",
                 "nkootstra/cue",
                 "-y",
