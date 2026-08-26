@@ -1,11 +1,87 @@
-//! Ollama administration: list, pull, and create models.
+//! Ollama-native chat and model administration.
 //!
-//! These operations are Ollama-specific (no OpenRouter equivalent) and back
+//! The chat client provides non-streaming inference with thinking disabled.
+//! The administrative operations list, pull, and create models for
 //! `cue models list/check/install`.
 
 use serde::{Deserialize, Serialize};
 
 use cue_core::{CueError, Result};
+
+use crate::{ChatMessage, ChatResponse};
+
+/// Client for Ollama's native non-streaming chat API.
+///
+/// Ollama's OpenAI-compatible endpoint may move text produced by thinking
+/// models into a non-standard `reasoning` field. The native endpoint lets
+/// callers disable thinking explicitly and keeps the final text in
+/// `message.content`.
+#[derive(Debug, Clone)]
+pub struct OllamaChatClient {
+    http: reqwest::Client,
+    base_url: String,
+}
+
+impl OllamaChatClient {
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+        }
+    }
+
+    pub async fn chat(
+        &self,
+        model: &str,
+        messages: &[ChatMessage],
+        temperature: Option<f32>,
+    ) -> Result<ChatResponse> {
+        #[derive(Serialize)]
+        struct ChatOptions {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            temperature: Option<f32>,
+        }
+
+        #[derive(Serialize)]
+        struct ChatRequest<'a> {
+            model: &'a str,
+            messages: &'a [ChatMessage],
+            stream: bool,
+            think: bool,
+            options: ChatOptions,
+        }
+
+        let response = self
+            .http
+            .post(format!("{}/api/chat", self.base_url))
+            .json(&ChatRequest {
+                model,
+                messages,
+                stream: false,
+                think: false,
+                options: ChatOptions { temperature },
+            })
+            .timeout(std::time::Duration::from_secs(300))
+            .send()
+            .await
+            .map_err(|e| ollama_unreachable(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(http_error("running", model, response.status()));
+        }
+
+        let response: NativeChatResponse = response
+            .json()
+            .await
+            .map_err(|e| ollama_error("Ollama returned unreadable chat output", e.to_string()))?;
+
+        Ok(ChatResponse {
+            content: response.message.content,
+            prompt_tokens: response.prompt_eval_count,
+            completion_tokens: response.eval_count,
+        })
+    }
+}
 
 /// Client for Ollama's native API (port 11434 root, no `/v1`).
 #[derive(Debug, Clone)]
@@ -159,6 +235,15 @@ struct TagsResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct NativeChatResponse {
+    message: ChatMessage,
+    #[serde(default)]
+    prompt_eval_count: Option<u64>,
+    #[serde(default)]
+    eval_count: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 struct TagsModel {
     name: String,
 }
@@ -171,7 +256,7 @@ fn model_name_matches(name: &str, target: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
@@ -180,6 +265,70 @@ mod tests {
         assert!(model_name_matches("cue-s1-mini", "cue-s1-mini"));
         assert!(!model_name_matches("cue-s1-mini:other", "cue-s1-mini"));
         assert!(!model_name_matches("qwen3:8b", "cue-s1-mini"));
+    }
+
+    #[tokio::test]
+    async fn native_chat_disables_thinking_and_returns_content() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .and(body_partial_json(serde_json::json!({
+                "model": "cue-s1-mini",
+                "stream": false,
+                "think": false,
+                "options": {"temperature": 0.0}
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"message":{"role":"assistant","content":"Clean text."},"prompt_eval_count":10,"eval_count":3}"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let response = OllamaChatClient::new(server.uri())
+            .chat("cue-s1-mini", &[ChatMessage::user("raw text")], Some(0.0))
+            .await
+            .unwrap();
+
+        assert_eq!(response.content, "Clean text.");
+        assert_eq!(response.prompt_tokens, Some(10));
+        assert_eq!(response.completion_tokens, Some(3));
+    }
+
+    #[tokio::test]
+    async fn native_chat_http_error_reports_status_without_response_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("private-transcript-sentinel"))
+            .mount(&server)
+            .await;
+
+        let err = OllamaChatClient::new(server.uri())
+            .chat("cue-s1-mini", &[ChatMessage::user("raw text")], Some(0.0))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("500"), "{err}");
+        assert!(!err.contains("private-transcript-sentinel"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn native_chat_rejects_malformed_json() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not-json"))
+            .mount(&server)
+            .await;
+
+        let err = OllamaChatClient::new(server.uri())
+            .chat("cue-s1-mini", &[ChatMessage::user("raw text")], Some(0.0))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("unreadable chat output"), "{err}");
     }
 
     #[tokio::test]

@@ -20,6 +20,15 @@ jobs:
             --tag "${{ github.ref_name }}" \
             --manifest Cargo.toml
 
+      - name: Require Homebrew tap credentials
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::HOMEBREW_TAP_TOKEN must be configured in nkootstra/cue; repository secrets are not shared with nkootstra/homebrew-tap"
+            exit 1
+          fi
+
   build:
     name: build ${{ matrix.target }}
     needs: preflight
@@ -121,8 +130,8 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "HOMEBREW_TAP_TOKEN not set; skipping tap update"
-            exit 0
+            echo "::error::HOMEBREW_TAP_TOKEN must be configured in nkootstra/cue; repository secrets are not shared with nkootstra/homebrew-tap"
+            exit 1
           fi
           formula_path="$(mktemp)"
           python3 scripts/release_contract.py render-formula \

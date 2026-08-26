@@ -38,22 +38,19 @@ impl S1Settings {
     }
 }
 
-/// Normalizes via an OpenAI-compatible chat endpoint backed by Ollama.
+/// Normalizes via Ollama's native non-streaming chat endpoint.
 pub struct S1Normalizer {
-    client: cue_llm::ChatClient,
+    client: cue_llm::OllamaChatClient,
     model: String,
     settings: S1Settings,
     max_chunk_chars: usize,
 }
 
 impl S1Normalizer {
-    /// Point at Ollama's OpenAI-compatible endpoint (`<ollama_url>/v1`).
+    /// Point at Ollama's native API.
     pub fn new(ollama_url: &str) -> Self {
         Self {
-            client: cue_llm::ChatClient::new(
-                format!("{}/v1", ollama_url.trim_end_matches('/')),
-                None,
-            ),
+            client: cue_llm::OllamaChatClient::new(ollama_url),
             model: crate::S1_MODEL_NAME.to_string(),
             settings: S1Settings::default(),
             max_chunk_chars: 2_000,
@@ -97,10 +94,19 @@ impl TranscriptNormalizer for S1Normalizer {
                 )
                 .await?;
 
+            let text = response.content.trim();
+            if text.is_empty() {
+                return Err(cue_core::CueError::new(
+                    cue_core::PipelineStage::Normalize,
+                    "S1 returned an empty response",
+                )
+                .remedy("reinstall the S1 model with `cue models install s1`"));
+            }
+
             normalized.push(NormalizedChunk {
                 start_ms: chunk.start_ms,
                 end_ms: chunk.end_ms,
-                text: response.content.trim().to_string(),
+                text: text.to_string(),
             });
         }
 
@@ -115,7 +121,7 @@ impl TranscriptNormalizer for S1Normalizer {
 mod tests {
     use super::*;
     use cue_core::{Segment, Word};
-    use wiremock::matchers::{body_partial_json, method};
+    use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn transcript_with_segments(texts: &[&str]) -> Transcript {
@@ -158,20 +164,30 @@ mod tests {
 
         // Respond with a recognizable transformation.
         Mock::given(method("POST"))
+            .and(path("/api/chat"))
             .and(body_partial_json(serde_json::json!({
                 "model": "cue-s1-mini",
                 "messages": [{"role": "user",
-                              "content": "[Styling: semi-formal] [Structure: prose] [Context: general]\nfirst bit."}]
+                              "content": "[Styling: semi-formal] [Structure: prose] [Context: general]\nfirst bit."}],
+                "stream": false,
+                "think": false
             })))
             .respond_with(ResponseTemplate::new(200).set_body_string(
-                r#"{"choices":[{"message":{"role":"assistant","content":"First bit."}}]}"#,
+                r#"{"message":{"role":"assistant","content":"First bit."},"done":true}"#,
             ))
+            .expect(1)
             .mount(&server)
             .await;
         Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .and(body_partial_json(serde_json::json!({
+                "messages": [{"role": "user",
+                              "content": "[Styling: semi-formal] [Structure: prose] [Context: general]\nsecond bit."}]
+            })))
             .respond_with(ResponseTemplate::new(200).set_body_string(
-                r#"{"choices":[{"message":{"role":"assistant","content":"Second bit."}}]}"#,
+                r#"{"message":{"role":"assistant","content":"Second bit."},"done":true}"#,
             ))
+            .expect(1)
             .mount(&server)
             .await;
 
@@ -183,7 +199,31 @@ mod tests {
 
         assert_eq!(result.chunks.len(), 2);
         assert_eq!(result.chunks[0].text, "First bit.");
+        assert_eq!(result.chunks[1].text, "Second bit.");
         assert!(result.chunks[0].end_ms <= result.chunks[1].start_ms);
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_model_output() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(
+                    r#"{"message":{"role":"assistant","content":""},"done":true}"#,
+                ),
+            )
+            .mount(&server)
+            .await;
+
+        let transcript = transcript_with_segments(&["hello, um, this is a test."]);
+        let error = S1Normalizer::new(&server.uri())
+            .normalize(&transcript)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("empty response"), "{error}");
     }
 
     #[tokio::test]
