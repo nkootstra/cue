@@ -39,6 +39,8 @@ struct NormalizationCacheKey<'a> {
     context: &'a str,
 }
 
+const NORMALIZATION_CACHE_VERSION: u8 = 3;
+
 #[derive(serde::Serialize)]
 struct AnalysisCacheKey<'a> {
     version: u8,
@@ -51,6 +53,24 @@ struct AnalysisCacheKey<'a> {
 
 fn normalized_endpoint(endpoint: &str) -> &str {
     endpoint.trim_end_matches('/')
+}
+
+fn remove_stale_artifacts(out_dir: &Path, names: &[&str]) -> Result<()> {
+    for name in names {
+        let path = out_dir.join(name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(CueError::general(format!(
+                    "could not remove stale output {}",
+                    path.display()
+                ))
+                .because(err.to_string()));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn remember_successful_readiness(
@@ -285,7 +305,7 @@ async fn process_file(
     };
     let normalized_cache = cue_cache::JsonCache::new(stage_dir.join("normalization"));
     let normalization_key = NormalizationCacheKey {
-        version: 2,
+        version: NORMALIZATION_CACHE_VERSION,
         transcript_hash: &transcript_hash,
         provider: &config.normalization.provider,
         endpoint: normalized_endpoint(&config.normalization.ollama_url),
@@ -428,6 +448,8 @@ async fn process_file(
         std::fs::write(out_dir.join("transcript.clean.txt"), clean.plain_text()).map_err(|e| {
             CueError::general("could not write transcript.clean.txt").because(e.to_string())
         })?;
+    } else {
+        remove_stale_artifacts(&out_dir, &["normalized.json", "transcript.clean.txt"])?;
     }
 
     if let Some(analysis) = &analysis {
@@ -442,6 +464,8 @@ async fn process_file(
             cue_analysis::render_description(analysis),
         )
         .map_err(|e| CueError::general("could not write description.md").because(e.to_string()))?;
+    } else {
+        remove_stale_artifacts(&out_dir, &["analysis.json", "summary.md", "description.md"])?;
     }
 
     // Subtitles derive from the canonical transcript, never from cleaned
@@ -602,7 +626,7 @@ mod tests {
     #[test]
     fn provider_endpoints_participate_in_cache_identity() {
         let normalization_a = NormalizationCacheKey {
-            version: 2,
+            version: NORMALIZATION_CACHE_VERSION,
             transcript_hash: "transcript",
             provider: "ollama",
             endpoint: normalized_endpoint("http://ollama-a:11434/"),
@@ -644,6 +668,48 @@ mod tests {
             serde_json::to_vec(&analysis_a).unwrap(),
             serde_json::to_vec(&analysis_a_with_slash).unwrap()
         );
+    }
+
+    #[test]
+    fn normalization_cache_version_invalidates_v2_entries() {
+        let current = NormalizationCacheKey {
+            version: NORMALIZATION_CACHE_VERSION,
+            transcript_hash: "transcript",
+            provider: "ollama",
+            endpoint: "http://localhost:11434",
+            styling: "style",
+            structure: "structure",
+            context: "context",
+        };
+        let legacy = NormalizationCacheKey {
+            version: 2,
+            ..current
+        };
+
+        assert_eq!(NORMALIZATION_CACHE_VERSION, 3);
+        assert_ne!(
+            serde_json::to_vec(&current).unwrap(),
+            serde_json::to_vec(&legacy).unwrap()
+        );
+    }
+
+    #[test]
+    fn removes_stale_optional_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["normalized.json", "transcript.clean.txt", "analysis.json"] {
+            std::fs::write(dir.path().join(name), "stale").unwrap();
+        }
+
+        remove_stale_artifacts(
+            dir.path(),
+            &["normalized.json", "transcript.clean.txt", "analysis.json"],
+        )
+        .unwrap();
+
+        assert!(!dir.path().join("normalized.json").exists());
+        assert!(!dir.path().join("transcript.clean.txt").exists());
+        assert!(!dir.path().join("analysis.json").exists());
+        remove_stale_artifacts(dir.path(), &["normalized.json"]).unwrap();
     }
 
     #[test]

@@ -2,7 +2,8 @@
 """Mock gateway for cue's end-to-end verification.
 
 Serves both surfaces cue talks to:
-- Ollama native API: GET /api/tags, POST /api/pull, POST /api/create
+- Ollama native API: GET /api/tags, POST /api/chat, POST /api/pull,
+  POST /api/create
 - OpenAI-compatible: POST /v1/chat/completions
 
 Normalization prompts (containing the S1 control line) get cleaned text;
@@ -49,13 +50,34 @@ class Handler(BaseHTTPRequestHandler):
         if "/api/pull" in self.path or "/api/create" in self.path:
             self._json({"status": "success"})
             return
+        if self.path == "/api/chat":
+            request = json.loads(raw)
+            messages = request.get("messages", [])
+            valid_prompt = (
+                len(messages) == 1
+                and messages[0].get("role") == "user"
+                and messages[0].get("content", "").startswith("[Styling:")
+            )
+            if (
+                request.get("model") != "cue-s1-mini"
+                or request.get("stream") is not False
+                or request.get("think") is not False
+                or not valid_prompt
+            ):
+                self.send_error(400, "invalid S1 normalization request")
+                return
+            self._json({
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello, this is a test of the Q transcription pipeline.",
+                },
+                "done": True,
+            })
+            return
         if "/v1/chat/completions" not in self.path:
             self.send_error(404)
             return
-        if "[Styling:" in raw:
-            content = "Hello, this is a test of the Q transcription pipeline."
-        else:
-            content = json.dumps(ANALYSIS)
+        content = json.dumps(ANALYSIS)
         self._json({
             "choices": [{"message": {"role": "assistant", "content": content}}]
         })
