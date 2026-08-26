@@ -83,7 +83,7 @@ seed_workspace() {
 EOF
 
   local case variant output
-  for case in eval-basic-transcribe eval-context-correction eval-batch-context eval-existing-correction; do
+  for case in eval-basic-transcribe eval-context-correction eval-recursive-context eval-existing-correction eval-explicit-multi; do
     for variant in with_skill without_skill; do
       mkdir -p "$workspace/$case/$variant/outputs"
     done
@@ -97,19 +97,30 @@ EOF
     output="$workspace/eval-context-correction/$variant/outputs"
     cp "$fixtures/clip-02.mp3" "$fixtures/context.md" "$output/"
 
-    output="$workspace/eval-batch-context/$variant/outputs"
-    cp "$fixtures/clip-01.mp3" "$fixtures/clip-02.mp3" "$fixtures/context.md" "$output/"
+    output="$workspace/eval-recursive-context/$variant/outputs"
+    mkdir -p "$output/course/module-02"
+    cp "$fixtures/clip-01.mp3" "$output/course/"
+    cp "$fixtures/clip-02.mp3" "$output/course/module-02/"
+    cp "$fixtures/context.md" "$output/"
 
     # This case intentionally starts with one canonical output to correct.
     output="$workspace/eval-existing-correction/$variant/outputs"
     mkdir -p "$output/1. welcome.cue"
     "$ROOT/target/debug/cue" "$fixtures/clip-02.mp3" \
       --output "$output/1. welcome.cue" >/dev/null 2>&1
+    printf '\nPRE-EXISTING OUTPUT SENTINEL open telemetry\n' \
+      >> "$output/1. welcome.cue/transcript.txt"
+    printf '\nPRE-EXISTING OUTPUT SENTINEL open telemetry\n' \
+      >> "$output/1. welcome.cue/subtitles.srt"
     mkdir -p "$workspace/.baselines"
     cp "$output/1. welcome.cue/transcript.json" \
       "$workspace/.baselines/$variant-transcript.json"
+    cp "$fixtures/clip-02.mp3" "$output/1. welcome.mp3"
     cp "$fixtures/clip-01.mp3" "$output/2. what we cover.mp3"
     cp "$fixtures/context.md" "$output/"
+
+    output="$workspace/eval-explicit-multi/$variant/outputs"
+    cp "$fixtures/clip-01.mp3" "$fixtures/clip-02.mp3" "$output/"
   done
 
   echo "workspace ready: $workspace"
@@ -144,39 +155,49 @@ print_prompts() {
   Input:  $workspace/eval-context-correction/without_skill/outputs/
   Save outputs to: $workspace/eval-context-correction/without_skill/outputs
 
-[batch-context] with_skill
-  Prompt: There are two welcome clips and one shared context file in the
-  current directory. Transcribe both and apply the shared speaker context
-  to both transcripts.
-  Input:  $workspace/eval-batch-context/with_skill/outputs/
-  Save outputs to: $workspace/eval-batch-context/with_skill/outputs
+[recursive-context] with_skill
+  Prompt: A course directory contains a welcome clip at its top level and
+  another in a nested module. Transcribe the whole directory recursively,
+  then apply the shared context file to both transcripts.
+  Input:  $workspace/eval-recursive-context/with_skill/outputs/
+  Save outputs to: $workspace/eval-recursive-context/with_skill/outputs
 
-[batch-context] without_skill
-  Prompt: Transcribe the two welcome clips in the current directory.
-  Input:  $workspace/eval-batch-context/without_skill/outputs/
-  Save outputs to: $workspace/eval-batch-context/without_skill/outputs
+[recursive-context] without_skill
+  Prompt: Transcribe every welcome clip under the course directory.
+  Input:  $workspace/eval-recursive-context/without_skill/outputs/
+  Save outputs to: $workspace/eval-recursive-context/without_skill/outputs
 
 [existing-correction] with_skill
-  Prompt: There is a media file ("2. what we cover.mp3") and an
-  already-transcribed folder ("1. welcome.cue") in the current directory,
-  plus a shared context file. Transcribe the new clip, then write a
+  Prompt: There are two media files, but "1. welcome.mp3" already has a
+  corrected output folder ("1. welcome.cue") in the current directory.
+  Transcribe only the new clip, "2. what we cover.mp3", then write a
   corrections.md manifest for the misheard term and apply it with
   cue correct to the existing folder.
   Input:  $workspace/eval-existing-correction/with_skill/outputs/
   Save outputs to: $workspace/eval-existing-correction/with_skill/outputs
 
 [existing-correction] without_skill
-  Prompt: There is a media file and an already-transcribed folder in the
-  current directory. Transcribe the new clip.
+  Prompt: There are two media files and one already-transcribed folder in the
+  current directory. Transcribe only the new clip.
   Input:  $workspace/eval-existing-correction/without_skill/outputs/
   Save outputs to: $workspace/eval-existing-correction/without_skill/outputs
+
+[explicit-multi] with_skill
+  Prompt: Transcribe clip-01.mp3 and clip-02.mp3 together in one cue command.
+  Input:  $workspace/eval-explicit-multi/with_skill/outputs/
+  Save outputs to: $workspace/eval-explicit-multi/with_skill/outputs
+
+[explicit-multi] without_skill
+  Prompt: Transcribe clip-01.mp3 and clip-02.mp3.
+  Input:  $workspace/eval-explicit-multi/without_skill/outputs/
+  Save outputs to: $workspace/eval-explicit-multi/without_skill/outputs
 
 === Then run: scripts/skill-eval-harness.sh --grade $workspace ===
 EOF
 }
 
 write_synthetic_success() {
-  local workspace="$1" output clip
+  local workspace="$1" output
 
   output="$workspace/eval-basic-transcribe/with_skill/outputs"
   mkdir -p "$output"
@@ -189,26 +210,42 @@ write_synthetic_success() {
   printf 'John Doe presents OpenTelemetry.\n' > "$output/transcript.txt"
   printf '{"text":"John Doe presents open telemetry."}\n' > "$output/transcript.json"
 
-  for clip in clip-01 clip-02; do
-    output="$workspace/eval-batch-context/with_skill/outputs/$clip"
-    mkdir -p "$output"
-    printf 'John Doe presents OpenTelemetry.\n' > "$output/transcript.txt"
-  done
+  output="$workspace/eval-recursive-context/with_skill/outputs"
+  mkdir -p "$output"
+  printf 'open telemetry -> OpenTelemetry\n' > "$output/corrections.md"
+  mkdir -p "$output/course/clip-01.cue" \
+    "$output/course/module-02/clip-02.cue"
+  printf 'John Doe presents OpenTelemetry.\n' \
+    > "$output/course/clip-01.cue/transcript.txt"
+  printf '{"text":"John Doe presents open telemetry."}\n' \
+    > "$output/course/clip-01.cue/transcript.json"
+  printf 'John Doe presents OpenTelemetry.\n' \
+    > "$output/course/module-02/clip-02.cue/transcript.txt"
+  printf '{"text":"John Doe presents open telemetry."}\n' \
+    > "$output/course/module-02/clip-02.cue/transcript.json"
 
   output="$workspace/eval-existing-correction/with_skill/outputs"
   mkdir -p "$output/1. welcome.cue" "$output/2. what we cover.cue"
   printf 'open telemetry -> OpenTelemetry\n' > "$output/corrections.md"
-  printf 'OpenTelemetry\n' > "$output/1. welcome.cue/transcript.txt"
+  printf 'OpenTelemetry\nPRE-EXISTING OUTPUT SENTINEL\n' \
+    > "$output/1. welcome.cue/transcript.txt"
   printf 'OpenTelemetry\n' > "$output/1. welcome.cue/subtitles.srt"
   printf '{"schema_version":1}\n' > "$output/1. welcome.cue/transcript.json"
   mkdir -p "$workspace/.baselines"
   cp "$output/1. welcome.cue/transcript.json" \
     "$workspace/.baselines/with_skill-transcript.json"
   printf 'new transcript\n' > "$output/2. what we cover.cue/transcript.txt"
+
+  output="$workspace/eval-explicit-multi/with_skill/outputs"
+  mkdir -p "$output/clip-01.cue" "$output/clip-02.cue"
+  printf 'first transcript\n' > "$output/clip-01.cue/transcript.txt"
+  printf 'second transcript\n' > "$output/clip-02.cue/transcript.txt"
 }
 
 self_test() {
-  local temporary success missing corrected_canonical nonempty before after canonical_before canonical_after
+  local temporary success missing corrected_canonical missing_recursive_canonical
+  local rerendered_existing nonempty
+  local before after canonical_before canonical_after
   local traversal_rubric other_path_rubric symlink_rubric outside
   local non_object_rubric non_object_eval_rubric grade_output grade_status
   temporary="$(mktemp -d "${TMPDIR:-/tmp}/cue-skill-eval-test.XXXXXX")"
@@ -250,6 +287,23 @@ self_test() {
     > "$corrected_canonical/eval-context-correction/with_skill/outputs/transcript.json"
   if "$0" --grade "$corrected_canonical" >/dev/null 2>&1; then
     echo "FAIL  grade accepted a corrected canonical transcript" >&2
+    return 1
+  fi
+
+  missing_recursive_canonical="$temporary/missing-recursive-canonical"
+  cp -R "$success" "$missing_recursive_canonical"
+  rm "$missing_recursive_canonical/eval-recursive-context/with_skill/outputs/course/clip-01.cue/transcript.json"
+  if "$0" --grade "$missing_recursive_canonical" >/dev/null 2>&1; then
+    echo "FAIL  grade accepted a missing top-level recursive canonical transcript" >&2
+    return 1
+  fi
+
+  rerendered_existing="$temporary/rerendered-existing"
+  cp -R "$success" "$rerendered_existing"
+  printf 'OpenTelemetry\n' \
+    > "$rerendered_existing/eval-existing-correction/with_skill/outputs/1. welcome.cue/transcript.txt"
+  if "$0" --grade "$rerendered_existing" >/dev/null 2>&1; then
+    echo "FAIL  grade accepted a rerendered existing transcript" >&2
     return 1
   fi
 

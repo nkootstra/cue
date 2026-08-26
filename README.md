@@ -70,14 +70,56 @@ Ollama optional, for S1 transcript cleanup. After installing, run
 
 | Command | What it does |
 |---|---|
-| `cue <file>...` | Run the full pipeline: inspect, extract audio, transcribe, normalize (S1), analyze (gateway), render |
-| `cue transcribe <file>...` | Stop after the canonical transcript (no subtitles/analysis) |
+| `cue <path>...` | Process one or more media files or directories through the full pipeline |
+| `cue transcribe <path>...` | Process paths through the canonical transcript only (no subtitles/analysis) |
 | `cue correct <file>.cue` | Apply transcript corrections from a manifest deterministically |
 | `cue doctor` | Check required and optional tools; `--fix` provisions the Python worker |
 | `cue models list/check/install s1` | Manage transcription/normalization models in Ollama |
 | `cue skill install` | Install the `transcribe` agent skill via `npx skills add` |
 | `cue config` | Show resolved configuration and its sources |
 | `cue cache dir/clear` | Inspect or clear the content-addressed cache |
+
+## Multiple files and directories
+
+Both the default pipeline and `cue transcribe` accept more than one path:
+
+```bash
+cue intro.mp4 interview.wav
+cue transcribe intro.mp4 interview.wav
+```
+
+Directories are scanned at their top level by default. Add `--recursive` to
+include nested directories:
+
+```bash
+cue ./course
+cue --recursive ./course
+cue --recursive ./course --output ./transcripts
+```
+
+Directory discovery recognizes these extensions, case-insensitively:
+`aac`, `aif`, `aiff`, `flac`, `m4a`, `mp3`, `ogg`, `opus`, `wav`, `avi`,
+`m2ts`, `m4v`, `mkv`, `mov`, `mp4`, `mpeg`, `mpg`, `mts`, `ts`, and `webm`.
+An explicitly named file is still inspected by FFprobe regardless of its
+extension.
+
+Each discovered file gets its own `<stem>.cue/` output directory. Without
+`--output`, that directory is created beside the source. In a batch,
+`--output <dir>` makes `<dir>` the common root, for example
+`transcripts/intro.cue/`. A single explicit file keeps the existing behavior:
+`--output` names its output directory directly.
+
+cue preserves the order of positional path groups and sorts files within each
+directory lexically. It removes canonical duplicates, includes hidden media
+files, and never traverses directory symlinks; pass the real directory instead
+of an explicit directory symlink. Destination-name collisions are rejected
+before processing begins. Batch files are processed sequentially, and one
+file's failure does not stop the rest; the final summary reports successes and
+failures, and any failure produces exit status 1.
+
+Processing a source again regenerates its derived text and subtitle artifacts.
+After correcting a `.cue/` output, do not include that source in a later batch
+unless you first preserve the corrected files.
 
 ## Outputs
 

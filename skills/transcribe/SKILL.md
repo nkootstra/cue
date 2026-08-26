@@ -35,8 +35,14 @@ If it is missing, install it. Prefer in this order:
 After installing, verify the environment:
 
 ```bash
+cue --version
 cue doctor
 ```
+
+Directory input requires cue 0.5.0 or newer. Before using directory syntax,
+check `cue --version`; upgrade cue with the same installation method if it is
+older. Do not substitute a hand-written directory loop for an outdated cue
+without telling the user why the upgrade could not be completed.
 
 If the required tools are fine but the Python worker is missing, provision it:
 
@@ -47,10 +53,13 @@ cue doctor --fix
 `cue doctor` reports optional integrations (Ollama, S1, an LLM gateway)
 separately — those are not required for transcription.
 
-## 2. Transcribe a file
+## 2. Transcribe files and directories
 
 ```bash
 cue <file.mp4> [--language en] [--output <dir>]
+cue <first.mp4> <second.wav>
+cue <directory>
+cue --recursive <directory>
 ```
 
 cue runs the whole local pipeline: inspect -> extract audio -> transcribe ->
@@ -68,8 +77,31 @@ write outputs. Outputs land in `<file>.cue/` next to the source (or `--output`):
 If the user only wants the plain transcript (no subtitles/analysis):
 
 ```bash
-cue transcribe <file.mp4>
+cue transcribe <path> [<path>...]
 ```
+
+Both modes accept one or more explicit media files and directories. Directory
+inputs scan only their top level unless `--recursive` is present. Directory
+discovery recognizes these extensions case-insensitively: `aac`, `aif`,
+`aiff`, `flac`, `m4a`, `mp3`, `ogg`, `opus`, `wav`, `avi`, `m2ts`, `m4v`,
+`mkv`, `mov`, `mp4`, `mpeg`, `mpg`, `mts`, `ts`, and `webm`. Explicit files
+may use another extension because FFprobe still decides whether they are
+media.
+
+Results keep the positional path-group order supplied on the command line,
+with files from each directory sorted lexically. Hidden media files are
+included. cue resolves canonical paths and processes the same media only once,
+even when it is reached through multiple inputs or a file symlink. Directory
+symlinks are never traversed; an explicitly supplied directory symlink is
+rejected, so pass its resolved target directory instead.
+
+A directory or multiple positional paths is a batch. Without `--output`, each
+file writes `<stem>.cue/` beside its source. With `--output <root>`, a batch
+writes `<root>/<stem>.cue/`; a single explicit file still uses `--output` as
+the output directory itself. cue processes batch files sequentially, continues
+after individual media failures, and exits with status 1 after its summary if
+anything failed. If two inputs would have the same destination, resolve the
+name collision before retrying.
 
 ## 3. Correct mishearings with context
 
@@ -143,10 +175,12 @@ After applying, confirm the fixes actually landed:
    `cue correct`.
 3. Report what you changed (old -> new), so the user can review.
 
-**Never re-run cue on an already-corrected file.** cue regenerates
-`transcript.txt` and subtitles from `transcript.json`, which would silently
-discard your corrections. If a re-transcription is needed, preserve the
-corrected text first (e.g., copy it aside).
+**Never re-run the processing pipeline for media whose `.cue` output has
+already been corrected.** A rerun regenerates `transcript.txt` and subtitles
+from `transcript.json`, silently discarding corrections. Do not pass `.cue`
+output directories as media inputs, and do not rerun an encompassing source
+directory after correcting any of its outputs. If re-transcription is needed,
+preserve the corrected text first (for example, copy it aside).
 
 ### Identity rule
 
@@ -225,15 +259,30 @@ order:
    open telemetry -> OpenTelemetry
    ```
 
-4. **Loop, then apply.** Transcribe each media file, then run `cue correct`
-   against every output directory (including the existing `*.cue/` outputs
-   found in step 1 — transcribing a new file is not a reason to leave older
-   transcripts with known mishearings). Put the shared manifest where
-   auto-discovery finds it (next to the outputs) and omit `--corrections`:
+4. **Transcribe pending inputs together, then apply.** Use one cue invocation
+   for multiple explicit files, or cue's directory mode for a new tree:
 
    ```bash
-   cue correct <file>.cue
+   cue <first.mp4> <second.mp4>
+   cue --recursive <course-directory>
    ```
+
+   Directory mode requires cue 0.5.0 or newer. cue discovers media, creates a
+   sibling `<stem>.cue/` per source by default, and processes it sequentially.
+   If the scan in step 1 found corrected outputs, do not rerun the encompassing
+   directory; pass only the unprocessed source files explicitly.
+
+   Then run `cue correct` against every new and existing output directory.
+   For recursive inputs, outputs can have different parents, so always pass
+   the shared manifest explicitly rather than relying on auto-discovery:
+
+   ```bash
+   cue correct <course-directory/episode.cue> --corrections /absolute/path/to/corrections.md
+   cue correct <course-directory/module/episode.cue> --corrections /absolute/path/to/corrections.md
+   ```
+
+   For a flat batch whose outputs and manifest share one parent,
+   auto-discovery remains sufficient: `cue correct <file>.cue`.
 
 5. Optionally, if the runs produced `analysis.json` per episode, summarize
    them into a course index (titles, topics, chapters) for the user.

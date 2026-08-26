@@ -3,6 +3,7 @@
 //! This struct is the single source of truth for parsing, help, and (via
 //! the emitted usage spec) completions and docs.
 
+use std::path::PathBuf;
 use usage::{Args, Cli, Subcommands};
 
 /// Turn video and audio files into transcripts, subtitles, and descriptions.
@@ -24,8 +25,12 @@ pub struct Cue {
     #[usage(long, global)]
     pub output: Option<String>,
 
-    /// Media files to process
-    pub files: Vec<String>,
+    /// Search directory inputs recursively
+    #[usage(short = 'r', long, global)]
+    pub recursive: bool,
+
+    /// Media files or directories to process
+    pub paths: Vec<PathBuf>,
 
     /// What to do (defaults to processing the given files)
     #[usage(subcommand)]
@@ -36,7 +41,7 @@ pub struct Cue {
 pub enum Command {
     /// Check the local environment for required and optional tools
     Doctor(DoctorArgs),
-    /// Transcribe files to a canonical transcript without subtitles or AI
+    /// Transcribe files or directories to a canonical transcript without subtitles or AI
     Transcribe(TranscribeArgs),
     /// Manage transcription and normalization models
     Models(ModelsArgs),
@@ -50,11 +55,11 @@ pub enum Command {
     Correct(CorrectArgs),
 }
 
-/// Transcribe files
+/// Transcribe files or directories
 #[derive(Debug, Args)]
 pub struct TranscribeArgs {
-    /// Media files to transcribe
-    pub files: Vec<String>,
+    /// Media files or directories to transcribe
+    pub paths: Vec<PathBuf>,
 }
 
 /// Check the local environment
@@ -160,6 +165,7 @@ pub enum CacheCommand {
 #[cfg(test)]
 mod tests {
     use std::ffi::{OsStr, OsString};
+    use std::path::PathBuf;
 
     use super::*;
 
@@ -170,10 +176,10 @@ mod tests {
     }
 
     #[test]
-    fn bare_files_become_the_default_pipeline() {
+    fn bare_paths_become_the_default_pipeline() {
         let cli = parse_args(&["cue", "--verbose", "./video.mp4"]);
         assert!(cli.verbose);
-        assert_eq!(cli.files, vec!["./video.mp4"]);
+        assert_eq!(cli.paths, vec![PathBuf::from("./video.mp4")]);
         assert!(cli.command.is_none());
         assert!(cli.language.is_none());
     }
@@ -188,11 +194,14 @@ mod tests {
     }
 
     #[test]
-    fn transcribe_takes_files() {
+    fn transcribe_takes_paths() {
         let cli = parse_args(&["cue", "transcribe", "a.mp4", "b.mp3"]);
         match cli.command.unwrap() {
             Command::Transcribe(args) => {
-                assert_eq!(args.files, vec!["a.mp4", "b.mp3"])
+                assert_eq!(
+                    args.paths,
+                    vec![PathBuf::from("a.mp4"), PathBuf::from("b.mp3")]
+                )
             }
             other => panic!("wrong command: {other:?}"),
         }
@@ -205,7 +214,7 @@ mod tests {
         let cli = parse_args(&["cue", "--language", "de", "transcribe", "a.mp4"]);
         assert_eq!(cli.language.as_deref(), Some("de"));
         match cli.command.unwrap() {
-            Command::Transcribe(args) => assert_eq!(args.files, vec!["a.mp4"]),
+            Command::Transcribe(args) => assert_eq!(args.paths, vec![PathBuf::from("a.mp4")]),
             other => panic!("wrong command: {other:?}"),
         }
     }
@@ -252,8 +261,32 @@ mod tests {
     fn empty_invocation_is_valid() {
         // All fields optional so we can print our own help.
         let cli = parse_args(&["cue"]);
-        assert!(cli.files.is_empty());
+        assert!(cli.paths.is_empty());
         assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn recursive_is_global_before_or_after_transcribe() {
+        let before = parse_args(&["cue", "-r", "transcribe", "media"]);
+        assert!(before.recursive);
+        match before.command.unwrap() {
+            Command::Transcribe(args) => assert_eq!(args.paths, [PathBuf::from("media")]),
+            other => panic!("wrong command: {other:?}"),
+        }
+
+        let after = parse_args(&["cue", "transcribe", "--recursive", "media"]);
+        assert!(after.recursive);
+        match after.command.unwrap() {
+            Command::Transcribe(args) => assert_eq!(args.paths, [PathBuf::from("media")]),
+            other => panic!("wrong command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn emitted_spec_names_paths_and_recursive() {
+        let kdl = Cue::to_kdl();
+        assert!(kdl.contains("[PATHS]"), "{kdl}");
+        assert!(kdl.contains("flag \"-r --recursive\""), "{kdl}");
     }
 
     #[test]
