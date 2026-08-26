@@ -20,6 +20,33 @@ use cue_transcription::Transcriber;
 use crate::cli::Cue;
 use crate::render::{human_duration, println_line};
 
+#[derive(serde::Serialize)]
+struct TranscriptionCacheKey<'a> {
+    version: u8,
+    provider: &'static str,
+    model: &'a str,
+    language: Option<&'a str>,
+    audio_hash: &'a str,
+}
+
+#[derive(serde::Serialize)]
+struct NormalizationCacheKey<'a> {
+    version: u8,
+    transcript_hash: &'a str,
+    provider: &'a str,
+    styling: &'a str,
+    structure: &'a str,
+    context: &'a str,
+}
+
+#[derive(serde::Serialize)]
+struct AnalysisCacheKey<'a> {
+    version: u8,
+    normalized_hash: &'a str,
+    model: &'a str,
+    prompt_version: u32,
+}
+
 pub async fn run(cli: &Cue) -> i32 {
     run_stopped(cli, &cli.files, None).await
 }
@@ -136,17 +163,16 @@ async fn process_file(
         language: cli.language.clone(),
     };
 
-    // Cache key: provider + model + language over the extracted audio's
-    // bytes. Any change re-transcribes; reruns with the same settings don't.
-    let transcript_cache_key = cue_cache::bytes_hash(
-        format!(
-            "faster-whisper|{}|{}|{}",
-            options.model,
-            options.language.as_deref().unwrap_or("auto"),
-            cue_cache::file_hash(&wav_path)?
-        )
-        .as_bytes(),
-    );
+    // Any output-affecting input participates in the logical key. JsonCache
+    // hashes its structured representation into a filesystem-safe identity.
+    let audio_hash = cue_cache::file_hash(&wav_path)?;
+    let transcript_cache_key = TranscriptionCacheKey {
+        version: 1,
+        provider: "faster-whisper",
+        model: &options.model,
+        language: options.language.as_deref(),
+        audio_hash: &audio_hash,
+    };
     let transcript_cache = cue_cache::JsonCache::new(stage_dir.join("transcription"));
     let transcript = match load_cached(&transcript_cache, &transcript_cache_key) {
         Some(cached) => {
@@ -202,18 +228,15 @@ async fn process_file(
         structure: config.normalization.structure.clone(),
         context: config.normalization.context.clone(),
     };
-    let normalization_settings_hash = cue_cache::bytes_hash(
-        format!(
-            "s1|{}|{}|{}|{}",
-            config.normalization.provider,
-            s1_settings.styling,
-            s1_settings.structure,
-            s1_settings.context
-        )
-        .as_bytes(),
-    );
     let normalized_cache = cue_cache::JsonCache::new(stage_dir.join("normalization"));
-    let normalization_key = format!("{transcript_hash}-{normalization_settings_hash}");
+    let normalization_key = NormalizationCacheKey {
+        version: 1,
+        transcript_hash: &transcript_hash,
+        provider: &config.normalization.provider,
+        styling: &config.normalization.styling,
+        structure: &config.normalization.structure,
+        context: &config.normalization.context,
+    };
 
     let normalized = match load_cached(&normalized_cache, &normalization_key) {
         Some(cached) => {
@@ -251,12 +274,12 @@ async fn process_file(
                     })?
                     .as_slice(),
             );
-            let analysis_key = format!(
-                "{}-{}-{}",
-                clean_hash,
-                llm.model,
-                cue_analysis::PROMPT_VERSION
-            );
+            let analysis_key = AnalysisCacheKey {
+                version: 1,
+                normalized_hash: &clean_hash,
+                model: &llm.model,
+                prompt_version: cue_analysis::PROMPT_VERSION,
+            };
             let analysis_cache = cue_cache::JsonCache::new(stage_dir.join("analysis"));
 
             match load_cached(&analysis_cache, &analysis_key) {
@@ -398,7 +421,7 @@ fn output_directory(input: &Path, cli: &Cue) -> Result<PathBuf> {
 /// than failing the run.
 fn load_cached<T: serde::de::DeserializeOwned>(
     cache: &cue_cache::JsonCache,
-    key: &str,
+    key: &impl serde::Serialize,
 ) -> Option<T> {
     match cache.get(key) {
         Ok(Some(value)) => Some(value),
@@ -411,7 +434,11 @@ fn load_cached<T: serde::de::DeserializeOwned>(
 }
 
 /// Best-effort store: cache write failures never fail the pipeline.
-fn store_cached<T: serde::Serialize>(cache: &cue_cache::JsonCache, key: &str, value: &T) {
+fn store_cached<T: serde::Serialize>(
+    cache: &cue_cache::JsonCache,
+    key: &impl serde::Serialize,
+    value: &T,
+) {
     if let Err(err) = cache.store(key, value) {
         tracing::warn!(error = %err, "could not store cache entry");
     }
