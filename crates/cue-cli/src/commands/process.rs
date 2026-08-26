@@ -11,10 +11,9 @@
 use std::path::{Path, PathBuf};
 
 use cue_analysis::Analyzer as _;
-use cue_core::config::{PartialConfig, load_user_config, resolve};
 use cue_core::media::Media;
 use cue_core::{CueError, Result};
-use cue_media::extract::{AudioExtractOptions, extract_audio};
+use cue_media::extract::extract_audio;
 use cue_transcription::Transcriber;
 
 use crate::cli::Cue;
@@ -48,8 +47,8 @@ struct AnalysisCacheKey<'a> {
     prompt_version: u32,
 }
 
-pub async fn run(cli: &Cue) -> i32 {
-    run_stopped(cli, &cli.files, None).await
+pub async fn run(cli: &Cue, config: &cue_core::Config) -> i32 {
+    run_stopped(cli, &cli.files, None, config).await
 }
 
 /// Process files, optionally stopping after a given stage.
@@ -60,8 +59,9 @@ pub async fn run_stopped(
     cli: &Cue,
     files: &[String],
     stop_after: Option<cue_core::PipelineStage>,
+    config: &cue_core::Config,
 ) -> i32 {
-    match run_inner(files, stop_after, cli).await {
+    match run_inner(files, stop_after, cli, config).await {
         Ok(code) => code,
         Err(err) => {
             eprintln!("{err}");
@@ -74,15 +74,12 @@ async fn run_inner(
     files: &[String],
     stop_after: Option<cue_core::PipelineStage>,
     cli: &Cue,
+    config: &cue_core::Config,
 ) -> Result<i32> {
     if files.is_empty() {
         print_usage_hint();
         return Ok(0);
     }
-
-    let user = load_user_config()?;
-    let config = resolve(&[&PartialConfig::default(), &user])?;
-    tracing::debug!(?config, "resolved configuration");
 
     // Stage logic emits events; the renderer decides presentation. Core
     // pipeline behavior never depends on terminal output.
@@ -92,7 +89,7 @@ async fn run_inner(
     let result: Result<()> = async {
         let mut s1_readiness: Option<std::result::Result<bool, String>> = None;
         for file in files {
-            process_file(file, cli, &config, &tx, stop_after, &mut s1_readiness).await?;
+            process_file(file, cli, config, &tx, stop_after, &mut s1_readiness).await?;
         }
         Ok(())
     }
@@ -156,7 +153,7 @@ async fn process_file(
         let _ = events.send(PipelineEvent::Cached(PipelineStage::Extract));
     } else {
         let _ = events.send(PipelineEvent::Started(PipelineStage::Extract));
-        extract_audio(&ffmpeg, &path, &wav_path, &AudioExtractOptions::default()).await?;
+        extract_audio(&ffmpeg, &path, &wav_path).await?;
         let _ = events.send(PipelineEvent::Completed(PipelineStage::Extract));
     }
 

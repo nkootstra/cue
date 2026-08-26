@@ -192,6 +192,7 @@ dependencies = [
  "indicatif",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -230,6 +231,7 @@ dependencies = [
  "cue-core",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]

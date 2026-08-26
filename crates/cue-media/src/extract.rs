@@ -6,34 +6,24 @@ use std::path::Path;
 use cue_core::{CueError, PipelineStage};
 use tracing::instrument;
 
-/// Extraction parameters: 16 kHz mono s16 WAV is the lingua franca every
-/// transcription backend accepts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AudioExtractOptions {
-    pub sample_rate_hz: u32,
-    pub channels: u32,
-}
-
-impl Default for AudioExtractOptions {
-    fn default() -> Self {
-        Self {
-            sample_rate_hz: 16_000,
-            channels: 1,
-        }
-    }
-}
+const NORMALIZED_AUDIO_ARGS: [&str; 9] = [
+    "-vn",
+    "-acodec",
+    "pcm_s16le",
+    "-ar",
+    "16000",
+    "-ac",
+    "1",
+    "-f",
+    "wav",
+];
 
 /// Extract and normalize the audio track of `input` into `output`.
 ///
 /// Callers decide where the file lives (usually the content cache); this
 /// function only guarantees the format.
 #[instrument(skip_all, fields(input = %input.display()))]
-pub async fn extract_audio(
-    ffmpeg: &Path,
-    input: &Path,
-    output: &Path,
-    options: &AudioExtractOptions,
-) -> cue_core::Result<()> {
+pub async fn extract_audio(ffmpeg: &Path, input: &Path, output: &Path) -> cue_core::Result<()> {
     if !input.exists() {
         return Err(CueError::new(
             PipelineStage::Extract,
@@ -44,15 +34,9 @@ pub async fn extract_audio(
     let output = tokio::process::Command::new(ffmpeg)
         .args(["-y", "-v", "error", "-i"])
         .arg(input)
-        .args([
-            "-vn", // drop video entirely
-            "-acodec",
-            "pcm_s16le", // raw PCM for whisper-family models
-            "-ar",
-            &options.sample_rate_hz.to_string(),
-            "-ac",
-            &options.channels.to_string(),
-        ])
+        // 16 kHz mono signed 16-bit PCM WAV is the invariant consumed by
+        // every transcription backend. Callers cannot accidentally diverge.
+        .args(NORMALIZED_AUDIO_ARGS)
         .arg(output)
         .output()
         .await
@@ -151,9 +135,7 @@ mod tests {
         let input = make_mp4(&dir).await;
         let output = dir.join("extracted.wav");
 
-        extract_audio(&ffmpeg, &input, &output, &AudioExtractOptions::default())
-            .await
-            .unwrap();
+        extract_audio(&ffmpeg, &input, &output).await.unwrap();
 
         // Verify the result by re-inspecting it with ffprobe.
         let Some(ffprobe) = find_on_path("ffprobe") else {
@@ -176,7 +158,6 @@ mod tests {
             &ffmpeg,
             Path::new("/nonexistent/x.mp4"),
             Path::new("/tmp/out.wav"),
-            &AudioExtractOptions::default(),
         )
         .await
         .unwrap_err();
@@ -193,9 +174,7 @@ mod tests {
         std::fs::write(&fake, b"definitely not media").unwrap();
         let output = dir.join("out.wav");
 
-        let err = extract_audio(&ffmpeg, &fake, &output, &AudioExtractOptions::default())
-            .await
-            .unwrap_err();
+        let err = extract_audio(&ffmpeg, &fake, &output).await.unwrap_err();
 
         assert_eq!(err.stage(), Some(PipelineStage::Extract));
         let rendered = err.to_string();
@@ -213,5 +192,49 @@ mod tests {
 
         let generic = extract_failure(Path::new("/x.mp4"), "some other error");
         assert!(generic.to_string().contains("ffmpeg failed"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn invokes_ffmpeg_with_fixed_normalized_audio_arguments() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ffmpeg = dir.path().join("ffmpeg");
+        std::fs::write(
+            &ffmpeg,
+            "#!/bin/sh\nscript_dir=$(dirname \"$0\")\nprintf '%s\\n' \"$@\" > \"$script_dir/args\"\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&ffmpeg).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&ffmpeg, permissions).unwrap();
+
+        let input = dir.path().join("input.media");
+        let output = dir.path().join("normalized.bin");
+        std::fs::write(&input, b"input").unwrap();
+
+        extract_audio(&ffmpeg, &input, &output).await.unwrap();
+        let arguments = std::fs::read_to_string(dir.path().join("args")).unwrap();
+        assert_eq!(
+            arguments.lines().collect::<Vec<_>>(),
+            vec![
+                "-y",
+                "-v",
+                "error",
+                "-i",
+                input.to_str().unwrap(),
+                "-vn",
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                "16000",
+                "-ac",
+                "1",
+                "-f",
+                "wav",
+                output.to_str().unwrap(),
+            ]
+        );
     }
 }

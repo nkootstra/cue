@@ -57,18 +57,31 @@ pub async fn check_tool(spec: &ToolSpec) -> ToolReport {
 const PYTHON_MIN_MINOR: u32 = 10;
 
 pub async fn check_python() -> ToolReport {
-    let mut report = check_tool(&PYTHON).await;
-    if let Some(path) = find_on_path(PYTHON.binary)
-        && let Ok(version) = probe_version(&path, PYTHON.version_args).await
-        && let Some(parsed) = parse_python_version(&version)
-        && parsed.1 < PYTHON_MIN_MINOR
-    {
-        report.status = ToolStatus::Error(format!(
-            "Python {}.{} found, but the transcription worker needs >= 3.{PYTHON_MIN_MINOR}",
-            parsed.0, parsed.1
+    let report = check_tool(&PYTHON).await;
+    ToolReport {
+        name: report.name,
+        status: classify_python_status(report.status),
+    }
+}
+
+fn classify_python_status(status: ToolStatus) -> ToolStatus {
+    let ToolStatus::Available { path, version } = status else {
+        return status;
+    };
+
+    let Some((major, minor)) = parse_python_version(&version) else {
+        return ToolStatus::Error(format!(
+            "could not parse Python version banner: {version:?}"
+        ));
+    };
+
+    if major < 3 || (major == 3 && minor < PYTHON_MIN_MINOR) {
+        return ToolStatus::Error(format!(
+            "Python {major}.{minor} found, but the transcription worker needs >= 3.{PYTHON_MIN_MINOR}"
         ));
     }
-    report
+
+    ToolStatus::Available { path, version }
 }
 
 /// Parse "Python 3.14.5" into (3, 14).
@@ -105,12 +118,10 @@ impl Environment {
 }
 
 pub async fn check_environment() -> Environment {
+    let (ffmpeg, ffprobe, python) =
+        tokio::join!(check_tool(&FFMPEG), check_tool(&FFPROBE), check_python());
     Environment {
-        reports: vec![
-            check_tool(&FFMPEG).await,
-            check_tool(&FFPROBE).await,
-            check_python().await,
-        ],
+        reports: vec![ffmpeg, ffprobe, python],
     }
 }
 
@@ -124,6 +135,53 @@ mod tests {
         assert_eq!(parse_python_version("Python 2.7.18"), Some((2, 7)));
         assert_eq!(parse_python_version("not python"), None);
         assert_eq!(parse_python_version("Python"), None);
+    }
+
+    #[test]
+    fn classifies_supported_and_unsupported_python_versions() {
+        for version in ["Python 3.10.0", "Python 3.14.5", "Python 4.0.0"] {
+            let status = ToolStatus::Available {
+                path: "/usr/bin/python3".into(),
+                version: version.into(),
+            };
+            assert!(matches!(
+                classify_python_status(status),
+                ToolStatus::Available { .. }
+            ));
+        }
+
+        for version in ["Python 2.7.18", "Python 3.9.19"] {
+            let status = ToolStatus::Available {
+                path: "/usr/bin/python3".into(),
+                version: version.into(),
+            };
+            assert!(matches!(
+                classify_python_status(status),
+                ToolStatus::Error(reason) if reason.contains("needs >= 3.10")
+            ));
+        }
+    }
+
+    #[test]
+    fn classifies_malformed_banner_and_preserves_probe_errors() {
+        let malformed = ToolStatus::Available {
+            path: "/usr/bin/python3".into(),
+            version: "not a Python banner".into(),
+        };
+        assert!(matches!(
+            classify_python_status(malformed),
+            ToolStatus::Error(reason) if reason.contains("could not parse")
+        ));
+
+        let error = ToolStatus::Error("permission denied".into());
+        assert_eq!(
+            classify_python_status(error),
+            ToolStatus::Error("permission denied".into())
+        );
+        assert_eq!(
+            classify_python_status(ToolStatus::Missing),
+            ToolStatus::Missing
+        );
     }
 
     #[tokio::test]

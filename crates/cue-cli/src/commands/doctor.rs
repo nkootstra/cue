@@ -3,7 +3,6 @@
 //! Required tools gate the exit code; optional integrations (Ollama, S1,
 //! an LLM gateway) are reported without failing local-only setups.
 
-use cue_core::config::{PartialConfig, load_user_config, resolve};
 use cue_llm::OllamaAdmin;
 use cue_media::{ToolReport, check_environment};
 
@@ -11,7 +10,7 @@ use crate::cli::DoctorArgs;
 use crate::render::{println_line, tool_line};
 
 /// Run environment checks and render them. Returns the process exit code.
-pub async fn run(args: DoctorArgs) -> i32 {
+pub async fn run(args: DoctorArgs, config: &cue_core::Config) -> i32 {
     println_line("Checking local environment...\n");
     let env = check_environment().await;
 
@@ -21,21 +20,7 @@ pub async fn run(args: DoctorArgs) -> i32 {
     }
 
     println_line("\nOptional (not required for local transcription):");
-    let user = match load_user_config() {
-        Ok(user) => user,
-        Err(err) => {
-            eprintln!("{err}");
-            return 1;
-        }
-    };
-    let config = match resolve(&[&PartialConfig::default(), &user]) {
-        Ok(config) => config,
-        Err(err) => {
-            eprintln!("{err}");
-            return 1;
-        }
-    };
-    for line in integration_lines(&config).await {
+    for line in integration_lines(config).await {
         println_line(&line);
     }
     println_line("\nLocal transcription and subtitles work without any of these.");
@@ -171,7 +156,7 @@ fn python_for_provisioning(env: &cue_media::checks::Environment) -> Option<std::
     let report: &ToolReport = env.python()?;
     match &report.status {
         cue_media::ToolStatus::Available { path, .. } => Some(std::path::PathBuf::from(path)),
-        _ => cue_media::tools::find_on_path("python3"),
+        cue_media::ToolStatus::Missing | cue_media::ToolStatus::Error(_) => None,
     }
 }
 
@@ -246,5 +231,30 @@ mod tests {
             line.contains("CURE_DEFINITELY_UNSET_VAR_12345 is unset"),
             "{line}"
         );
+    }
+
+    #[test]
+    fn provisioning_uses_only_the_checked_supported_python() {
+        let available = cue_media::checks::Environment {
+            reports: vec![ToolReport {
+                name: "Python".into(),
+                status: cue_media::ToolStatus::Available {
+                    path: "/opt/python3".into(),
+                    version: "Python 3.10.0".into(),
+                },
+            }],
+        };
+        assert_eq!(
+            python_for_provisioning(&available),
+            Some(std::path::PathBuf::from("/opt/python3"))
+        );
+
+        let rejected = cue_media::checks::Environment {
+            reports: vec![ToolReport {
+                name: "Python".into(),
+                status: cue_media::ToolStatus::Error("Python 3.9 is unsupported".into()),
+            }],
+        };
+        assert_eq!(python_for_provisioning(&rejected), None);
     }
 }
