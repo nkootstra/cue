@@ -217,6 +217,8 @@ write_synthetic_success() {
     "$output/course/module-02/clip-02.cue"
   printf 'John Doe presents OpenTelemetry.\n' \
     > "$output/course/clip-01.cue/transcript.txt"
+  printf '{"text":"John Doe presents open telemetry."}\n' \
+    > "$output/course/clip-01.cue/transcript.json"
   printf 'John Doe presents OpenTelemetry.\n' \
     > "$output/course/module-02/clip-02.cue/transcript.txt"
   printf '{"text":"John Doe presents open telemetry."}\n' \
@@ -241,7 +243,8 @@ write_synthetic_success() {
 }
 
 self_test() {
-  local temporary success missing corrected_canonical rerendered_existing nonempty
+  local temporary success missing corrected_canonical missing_recursive_canonical
+  local rerendered_existing nonempty
   local before after canonical_before canonical_after
   local traversal_rubric other_path_rubric symlink_rubric outside
   local non_object_rubric non_object_eval_rubric grade_output grade_status
@@ -284,6 +287,14 @@ self_test() {
     > "$corrected_canonical/eval-context-correction/with_skill/outputs/transcript.json"
   if "$0" --grade "$corrected_canonical" >/dev/null 2>&1; then
     echo "FAIL  grade accepted a corrected canonical transcript" >&2
+    return 1
+  fi
+
+  missing_recursive_canonical="$temporary/missing-recursive-canonical"
+  cp -R "$success" "$missing_recursive_canonical"
+  rm "$missing_recursive_canonical/eval-recursive-context/with_skill/outputs/course/clip-01.cue/transcript.json"
+  if "$0" --grade "$missing_recursive_canonical" >/dev/null 2>&1; then
+    echo "FAIL  grade accepted a missing top-level recursive canonical transcript" >&2
     return 1
   fi
 

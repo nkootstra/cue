@@ -63,10 +63,10 @@ fn remove_stale_artifacts(out_dir: &Path, names: &[&str]) -> Result<()> {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => {
-                return Err(CueError::general(format!(
-                    "could not remove stale output {}",
-                    path.display()
-                ))
+                return Err(CueError::new(
+                    cue_core::PipelineStage::Render,
+                    format!("could not remove stale output {}", path.display()),
+                )
                 .because(err.to_string()));
             }
         }
@@ -353,17 +353,9 @@ async fn process_file(
     // `cue transcribe` stops here: canonical transcript only.
     if !mode.includes(PipelineStage::Normalize) {
         let _ = events.send(PipelineEvent::Started(PipelineStage::Render));
-        std::fs::create_dir_all(out_dir).map_err(|e| {
-            CueError::general(format!(
-                "could not create output directory {}",
-                out_dir.display()
-            ))
-            .because(e.to_string())
-        })?;
-        write_json(&out_dir.join("transcript.json"), &transcript)?;
-        std::fs::write(out_dir.join("transcript.txt"), transcript.plain_text()).map_err(|e| {
-            CueError::general("could not write transcript.txt").because(e.to_string())
-        })?;
+        create_output_dir(out_dir)?;
+        write_render_json(&out_dir.join("transcript.json"), &transcript)?;
+        write_render_file(&out_dir.join("transcript.txt"), transcript.plain_text())?;
         let _ = events.send(PipelineEvent::Completed(PipelineStage::Render));
         println_line(&format!(
             "\nDone. Transcript written to {}/",
@@ -513,39 +505,28 @@ async fn process_file(
 
     // ---- Render ---------------------------------------------------------
     let _ = events.send(PipelineEvent::Started(PipelineStage::Render));
-    std::fs::create_dir_all(out_dir).map_err(|e| {
-        CueError::general(format!(
-            "could not create output directory {}",
-            out_dir.display()
-        ))
-        .because(e.to_string())
-    })?;
+    create_output_dir(out_dir)?;
 
-    write_json(&out_dir.join("transcript.json"), &transcript)?;
-    std::fs::write(out_dir.join("transcript.txt"), transcript.plain_text())
-        .map_err(|e| CueError::general("could not write transcript.txt").because(e.to_string()))?;
+    write_render_json(&out_dir.join("transcript.json"), &transcript)?;
+    write_render_file(&out_dir.join("transcript.txt"), transcript.plain_text())?;
 
     if let Some(clean) = &normalized {
-        write_json(&out_dir.join("normalized.json"), clean)?;
-        std::fs::write(out_dir.join("transcript.clean.txt"), clean.plain_text()).map_err(|e| {
-            CueError::general("could not write transcript.clean.txt").because(e.to_string())
-        })?;
+        write_render_json(&out_dir.join("normalized.json"), clean)?;
+        write_render_file(&out_dir.join("transcript.clean.txt"), clean.plain_text())?;
     } else {
         remove_stale_artifacts(out_dir, &["normalized.json", "transcript.clean.txt"])?;
     }
 
     if let Some(analysis) = &analysis {
-        write_json(&out_dir.join("analysis.json"), analysis)?;
-        std::fs::write(
-            out_dir.join("summary.md"),
+        write_render_json(&out_dir.join("analysis.json"), analysis)?;
+        write_render_file(
+            &out_dir.join("summary.md"),
             cue_analysis::render_summary(analysis),
-        )
-        .map_err(|e| CueError::general("could not write summary.md").because(e.to_string()))?;
-        std::fs::write(
-            out_dir.join("description.md"),
+        )?;
+        write_render_file(
+            &out_dir.join("description.md"),
             cue_analysis::render_description(analysis),
-        )
-        .map_err(|e| CueError::general("could not write description.md").because(e.to_string()))?;
+        )?;
     } else {
         remove_stale_artifacts(out_dir, &["analysis.json", "summary.md", "description.md"])?;
     }
@@ -564,9 +545,7 @@ async fn process_file(
             cue_core::config::SubtitleFormat::Srt => cue_subtitles::render_srt(&cues),
             cue_core::config::SubtitleFormat::Vtt => cue_subtitles::render_vtt(&cues),
         };
-        std::fs::write(&path, content).map_err(|e| {
-            CueError::general(format!("could not write {}", path.display())).because(e.to_string())
-        })?;
+        write_render_file(&path, content)?;
     }
 
     let _ = events.send(PipelineEvent::Completed(PipelineStage::Render));
@@ -625,6 +604,34 @@ fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
         .map_err(|e| CueError::general("serialization failed").because(e.to_string()))?;
     std::fs::write(path, json + "\n").map_err(|e| {
         CueError::general(format!("could not write {}", path.display())).because(e.to_string())
+    })
+}
+
+fn create_output_dir(path: &Path) -> Result<()> {
+    std::fs::create_dir_all(path).map_err(|err| {
+        CueError::new(
+            cue_core::PipelineStage::Render,
+            format!("could not create output directory {}", path.display()),
+        )
+        .because(err.to_string())
+    })
+}
+
+fn write_render_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
+    let json = serde_json::to_string_pretty(value).map_err(|err| {
+        CueError::new(cue_core::PipelineStage::Render, "serialization failed")
+            .because(err.to_string())
+    })?;
+    write_render_file(path, json + "\n")
+}
+
+fn write_render_file(path: &Path, content: impl AsRef<[u8]>) -> Result<()> {
+    std::fs::write(path, content).map_err(|err| {
+        CueError::new(
+            cue_core::PipelineStage::Render,
+            format!("could not write {}", path.display()),
+        )
+        .because(err.to_string())
     })
 }
 
@@ -743,6 +750,87 @@ mod tests {
             }
         );
         assert_eq!(outcome.exit_code(), 0);
+    }
+
+    #[tokio::test]
+    async fn single_input_propagates_failure_without_callback_or_continuation() {
+        let inputs = [resolved("one.mp4"), resolved("two.mp4")];
+        let mut processor = StubProcessor {
+            results: VecDeque::from([Err(CueError::general("first failed")), Ok(())]),
+            attempted: Vec::new(),
+        };
+        let mut failures = Vec::new();
+
+        let err = process_resolved_inputs(&inputs, false, &mut processor, |input, _| {
+            failures.push(input.source.clone());
+        })
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("first failed"));
+        assert_eq!(processor.attempted, [PathBuf::from("one.mp4")]);
+        assert!(failures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mixed_batch_attempts_all_inputs_and_reports_only_the_failure() {
+        let inputs = [
+            resolved("one.mp4"),
+            resolved("two.mp4"),
+            resolved("three.mp4"),
+        ];
+        let mut processor = StubProcessor {
+            results: VecDeque::from([Ok(()), Err(CueError::general("second failed")), Ok(())]),
+            attempted: Vec::new(),
+        };
+        let mut failures = Vec::new();
+
+        let outcome = process_resolved_inputs(&inputs, true, &mut processor, |input, _| {
+            failures.push(input.source.clone());
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            processor.attempted,
+            [
+                PathBuf::from("one.mp4"),
+                PathBuf::from("two.mp4"),
+                PathBuf::from("three.mp4")
+            ]
+        );
+        assert_eq!(failures, [PathBuf::from("two.mp4")]);
+        assert_eq!(
+            outcome,
+            BatchOutcome {
+                succeeded: 2,
+                failed: 1
+            }
+        );
+        assert_eq!(outcome.exit_code(), 1);
+    }
+
+    #[test]
+    fn output_directory_failures_are_attributed_to_render() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent_file = dir.path().join("not-a-directory");
+        std::fs::write(&parent_file, "occupied").unwrap();
+
+        let err = create_output_dir(&parent_file.join("output")).unwrap_err();
+
+        assert_eq!(err.stage(), Some(cue_core::PipelineStage::Render));
+    }
+
+    #[test]
+    fn artifact_write_failures_are_attributed_to_render() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let text_err = write_render_file(dir.path(), "transcript").unwrap_err();
+        let json_err =
+            write_render_json(dir.path(), &serde_json::json!({"text": "hello"})).unwrap_err();
+
+        assert_eq!(text_err.stage(), Some(cue_core::PipelineStage::Render));
+        assert_eq!(json_err.stage(), Some(cue_core::PipelineStage::Render));
     }
 
     #[test]

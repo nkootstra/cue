@@ -223,7 +223,9 @@ fn cue_directory_name(source: &Path) -> String {
 fn reject_output_collisions(inputs: &[ResolvedInput]) -> Result<()> {
     let mut destinations: HashMap<String, &ResolvedInput> = HashMap::new();
     for input in inputs {
-        let folded = input.output.to_string_lossy().to_lowercase();
+        let folded = output_collision_identity(&input.output)
+            .to_string_lossy()
+            .to_lowercase();
         if let Some(previous) = destinations.insert(folded, input) {
             return Err(
                 CueError::general("multiple inputs resolve to the same output directory")
@@ -241,6 +243,48 @@ fn reject_output_collisions(inputs: &[ResolvedInput]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn output_collision_identity(output: &Path) -> PathBuf {
+    let Ok(current_directory) = std::env::current_dir() else {
+        return output.to_owned();
+    };
+    let absolute_output = if output.is_absolute() {
+        output.to_owned()
+    } else {
+        current_directory.join(output)
+    };
+    let Some(file_name) = absolute_output.file_name() else {
+        return absolute_output;
+    };
+    let Some(parent) = absolute_output.parent() else {
+        return absolute_output;
+    };
+
+    let mut existing_ancestor = parent;
+    let mut missing_components = Vec::new();
+    let canonical_parent = loop {
+        match fs::canonicalize(existing_ancestor) {
+            Ok(canonical) => break canonical,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(component) = existing_ancestor.file_name() else {
+                    return absolute_output;
+                };
+                missing_components.push(component.to_owned());
+                let Some(ancestor) = existing_ancestor.parent() else {
+                    return absolute_output;
+                };
+                existing_ancestor = ancestor;
+            }
+            Err(_) => return absolute_output,
+        }
+    };
+
+    missing_components
+        .into_iter()
+        .rev()
+        .fold(canonical_parent, |path, component| path.join(component))
+        .join(file_name)
 }
 
 #[cfg(test)]
@@ -434,6 +478,29 @@ mod tests {
 
         assert!(error.contains("same output directory"), "{error}");
         assert!(error.contains("same.cue"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_output_collisions_resolve_symlinked_parent_aliases() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        let alias = temp.path().join("alias");
+        let video = real.join("same.mp4");
+        let audio = real.join("same.wav");
+        touch(&video);
+        touch(&audio);
+        symlink(&real, &alias).unwrap();
+
+        let error = resolve_inputs(&[video, alias.join("same.wav")], false, None)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("same output directory"), "{error}");
+        assert!(error.contains("real/same.cue"), "{error}");
+        assert!(error.contains("alias/same.cue"), "{error}");
     }
 
     #[test]

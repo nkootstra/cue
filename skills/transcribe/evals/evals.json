@@ -40,6 +40,7 @@
         {"name": "top-level transcript is non-empty", "type": "file_nonempty", "path": "eval-recursive-context/with_skill/outputs/course/clip-01.cue/transcript.txt"},
         {"name": "nested transcript is non-empty", "type": "file_nonempty", "path": "eval-recursive-context/with_skill/outputs/course/module-02/clip-02.cue/transcript.txt"},
         {"name": "top-level speaker uses Doe", "type": "contains", "path": "eval-recursive-context/with_skill/outputs/course/clip-01.cue/transcript.txt", "value": "John Doe", "case_insensitive": true},
+        {"name": "top-level canonical transcript retains raw wording", "type": "contains", "path": "eval-recursive-context/with_skill/outputs/course/clip-01.cue/transcript.json", "value": "open telemetry", "case_insensitive": true},
         {"name": "nested speaker uses Doe", "type": "contains", "path": "eval-recursive-context/with_skill/outputs/course/module-02/clip-02.cue/transcript.txt", "value": "John Doe", "case_insensitive": true},
         {"name": "nested product uses OpenTelemetry", "type": "contains", "path": "eval-recursive-context/with_skill/outputs/course/module-02/clip-02.cue/transcript.txt", "value": "OpenTelemetry", "case_insensitive": false},
         {"name": "nested split product spelling is absent", "type": "not_contains", "path": "eval-recursive-context/with_skill/outputs/course/module-02/clip-02.cue/transcript.txt", "value": "open telemetry", "case_insensitive": true},

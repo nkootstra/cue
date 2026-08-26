@@ -88,6 +88,13 @@ discovery recognizes these extensions case-insensitively: `aac`, `aif`,
 may use another extension because FFprobe still decides whether they are
 media.
 
+Results keep the positional path-group order supplied on the command line,
+with files from each directory sorted lexically. Hidden media files are
+included. cue resolves canonical paths and processes the same media only once,
+even when it is reached through multiple inputs or a file symlink. Directory
+symlinks are never traversed; an explicitly supplied directory symlink is
+rejected, so pass its resolved target directory instead.
+
 A directory or multiple positional paths is a batch. Without `--output`, each
 file writes `<stem>.cue/` beside its source. With `--output <root>`, a batch
 writes `<root>/<stem>.cue/`; a single explicit file still uses `--output` as
