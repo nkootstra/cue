@@ -4,7 +4,9 @@
 //! file and installs it into cue's data directory. Ordinary processing
 //! never downloads anything: environment setup is always explicit.
 
+use std::io::{ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use cue_core::{CueError, PipelineStage, Result};
 use tracing::instrument;
@@ -14,6 +16,10 @@ pub const WORKER_REQUIREMENTS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../workers/faster-whisper/requirements.txt"
 ));
+
+const PROVISION_RECEIPT_FILE: &str = ".cue-provisioned";
+const PROVISION_RECEIPT_VERSION: &str = "cue-faster-whisper-provision/v1\n";
+static RECEIPT_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Where the worker venv lives inside the data directory.
 pub fn venv_dir(data_dir: &Path) -> PathBuf {
@@ -29,12 +35,16 @@ pub fn venv_python(venv: &Path) -> PathBuf {
     }
 }
 
-/// True when a previously-created venv has a usable interpreter.
+/// True when a previously-created venv has a usable interpreter and was
+/// fully provisioned for the requirements embedded in this binary.
 pub fn is_provisioned(venv: &Path) -> bool {
     let python = venv_python(venv);
-    python.exists()
-        && std::fs::metadata(&python)
-            .map(|m| m.len() > 0)
+    let interpreter_is_usable = std::fs::metadata(&python)
+        .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        .unwrap_or(false);
+    interpreter_is_usable
+        && std::fs::read(receipt_path(venv))
+            .map(|receipt| receipt == expected_receipt())
             .unwrap_or(false)
 }
 
@@ -60,10 +70,97 @@ pub async fn provision(
         return Ok(ProvisionAction::AlreadyProvisioned);
     }
 
-    create_venv(base_python, &venv).await?;
-    install_requirements(&venv).await?;
-    verify_worker(&venv_python(&venv)).await?;
+    begin_provisioning(&venv)?;
+    let result = async {
+        create_venv(base_python, &venv).await?;
+        install_requirements(&venv).await?;
+        verify_worker(&venv_python(&venv), data_dir).await
+    }
+    .await;
+    complete_provisioning(&venv, result)?;
     Ok(ProvisionAction::Created)
+}
+
+fn receipt_path(venv: &Path) -> PathBuf {
+    venv.join(PROVISION_RECEIPT_FILE)
+}
+
+fn expected_receipt() -> Vec<u8> {
+    let mut receipt =
+        Vec::with_capacity(PROVISION_RECEIPT_VERSION.len() + WORKER_REQUIREMENTS.len());
+    receipt.extend_from_slice(PROVISION_RECEIPT_VERSION.as_bytes());
+    receipt.extend_from_slice(WORKER_REQUIREMENTS.as_bytes());
+    receipt
+}
+
+fn begin_provisioning(venv: &Path) -> Result<()> {
+    match std::fs::remove_file(receipt_path(venv)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(provision_error(
+            "could not invalidate the previous provisioning receipt",
+        )
+        .because(error.to_string())),
+    }
+}
+
+fn complete_provisioning(venv: &Path, result: Result<()>) -> Result<()> {
+    result?;
+    write_receipt_atomic(venv)
+}
+
+fn write_receipt_atomic(venv: &Path) -> Result<()> {
+    std::fs::create_dir_all(venv).map_err(|error| {
+        provision_error("could not create the provisioned environment directory")
+            .because(error.to_string())
+    })?;
+
+    let receipt = receipt_path(venv);
+    loop {
+        let sequence = RECEIPT_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temp = venv.join(format!(
+            ".{PROVISION_RECEIPT_FILE}.{}.{}.tmp",
+            std::process::id(),
+            sequence
+        ));
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(provision_error("could not create provisioning receipt")
+                    .because(error.to_string()));
+            }
+        };
+
+        if let Err(error) = file
+            .write_all(&expected_receipt())
+            .and_then(|()| file.sync_all())
+        {
+            drop(file);
+            let _ = std::fs::remove_file(&temp);
+            return Err(
+                provision_error("could not write provisioning receipt").because(error.to_string())
+            );
+        }
+        drop(file);
+
+        match std::fs::rename(&temp, &receipt) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists && is_provisioned(venv) => {
+                let _ = std::fs::remove_file(temp);
+                return Ok(());
+            }
+            Err(error) => {
+                let _ = std::fs::remove_file(temp);
+                return Err(provision_error("could not publish provisioning receipt")
+                    .because(error.to_string()));
+            }
+        }
+    }
 }
 
 async fn create_venv(base_python: &Path, venv: &Path) -> Result<()> {
@@ -122,11 +219,8 @@ async fn install_requirements(venv: &Path) -> Result<()> {
 }
 
 /// Confirm the worker imports cleanly inside the fresh venv.
-async fn verify_worker(python: &Path) -> Result<()> {
-    let script = crate::env::worker_dir().ok_or_else(|| {
-        provision_error("could not determine cue's data directory")
-            .remedy("set CUE_DATA_DIR to a writable directory")
-    })?;
+async fn verify_worker(python: &Path, data_dir: &Path) -> Result<()> {
+    let script = crate::env::worker_dir_in(data_dir);
     let script = crate::env::materialize_worker_script(&script)?;
 
     let output = tokio::process::Command::new(python)
@@ -158,6 +252,64 @@ mod tests {
     fn unprovisioned_venv_is_detected() {
         let dir = tempfile::tempdir().unwrap();
         assert!(!is_provisioned(dir.path()));
+    }
+
+    fn create_fake_interpreter(venv: &Path) {
+        let python = venv_python(venv);
+        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+        std::fs::write(python, b"fake interpreter").unwrap();
+    }
+
+    #[test]
+    fn interpreter_without_receipt_is_not_provisioned() {
+        let dir = tempfile::tempdir().unwrap();
+        create_fake_interpreter(dir.path());
+
+        assert!(!is_provisioned(dir.path()));
+    }
+
+    #[test]
+    fn matching_receipt_marks_environment_provisioned() {
+        let dir = tempfile::tempdir().unwrap();
+        create_fake_interpreter(dir.path());
+        write_receipt_atomic(dir.path()).unwrap();
+
+        assert!(is_provisioned(dir.path()));
+    }
+
+    #[test]
+    fn mismatched_receipt_requires_reprovisioning() {
+        let dir = tempfile::tempdir().unwrap();
+        create_fake_interpreter(dir.path());
+        std::fs::write(receipt_path(dir.path()), b"stale fingerprint").unwrap();
+
+        assert!(!is_provisioned(dir.path()));
+    }
+
+    #[test]
+    fn failed_workflow_leaves_no_receipt_and_can_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        create_fake_interpreter(dir.path());
+        write_receipt_atomic(dir.path()).unwrap();
+        assert!(is_provisioned(dir.path()));
+
+        begin_provisioning(dir.path()).unwrap();
+        let result = complete_provisioning(dir.path(), Err(provision_error("simulated failure")));
+        assert!(result.is_err());
+        assert!(!receipt_path(dir.path()).exists());
+
+        complete_provisioning(dir.path(), Ok(())).unwrap();
+        assert!(is_provisioned(dir.path()));
+    }
+
+    #[test]
+    fn receipt_paths_support_spaces() {
+        let root = tempfile::tempdir().unwrap();
+        let venv = root.path().join("cue data").join("venv with spaces");
+        create_fake_interpreter(&venv);
+        write_receipt_atomic(&venv).unwrap();
+
+        assert!(is_provisioned(&venv));
     }
 
     #[test]

@@ -4,6 +4,7 @@ pub mod correct;
 pub mod error;
 pub mod media;
 pub mod normalized;
+pub mod paths;
 pub mod pipeline;
 pub mod transcript;
 
