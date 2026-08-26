@@ -49,6 +49,12 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      - name: Global skill install smoke
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --locked -p cue-cli
+          bash scripts/test_skill_install.sh "$PWD/target/debug/cue"
+
       - name: Release contract tests
         run: |
           python3 scripts/test_render_formula.py
