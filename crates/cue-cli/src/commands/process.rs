@@ -33,6 +33,7 @@ struct NormalizationCacheKey<'a> {
     version: u8,
     transcript_hash: &'a str,
     provider: &'a str,
+    endpoint: &'a str,
     styling: &'a str,
     structure: &'a str,
     context: &'a str,
@@ -43,8 +44,26 @@ struct AnalysisCacheKey<'a> {
     version: u8,
     normalized_hash: &'a str,
     language: &'a str,
+    endpoint: &'a str,
     model: &'a str,
     prompt_version: u32,
+}
+
+fn normalized_endpoint(endpoint: &str) -> &str {
+    endpoint.trim_end_matches('/')
+}
+
+fn remember_successful_readiness(
+    readiness: &mut Option<bool>,
+    result: std::result::Result<bool, String>,
+) -> std::result::Result<bool, String> {
+    match result {
+        Ok(ready) => {
+            *readiness = Some(ready);
+            Ok(ready)
+        }
+        Err(reason) => Err(reason),
+    }
 }
 
 /// The two supported processing contracts.
@@ -111,7 +130,7 @@ async fn run_inner(
     let renderer = tokio::spawn(crate::events::run_renderer(rx));
 
     let result: Result<()> = async {
-        let mut s1_readiness: Option<std::result::Result<bool, String>> = None;
+        let mut s1_readiness = None;
         for file in files {
             process_file(file, cli, config, &tx, mode, &mut s1_readiness).await?;
         }
@@ -133,7 +152,7 @@ async fn process_file(
     config: &cue_core::Config,
     events: &tokio::sync::mpsc::UnboundedSender<cue_core::PipelineEvent>,
     mode: ProcessMode,
-    s1_readiness: &mut Option<std::result::Result<bool, String>>,
+    s1_readiness: &mut Option<bool>,
 ) -> Result<()> {
     use cue_core::{PipelineEvent, PipelineStage};
 
@@ -266,9 +285,10 @@ async fn process_file(
     };
     let normalized_cache = cue_cache::JsonCache::new(stage_dir.join("normalization"));
     let normalization_key = NormalizationCacheKey {
-        version: 1,
+        version: 2,
         transcript_hash: &transcript_hash,
         provider: &config.normalization.provider,
+        endpoint: normalized_endpoint(&config.normalization.ollama_url),
         styling: &s1_settings.styling,
         structure: &s1_settings.structure,
         context: &s1_settings.context,
@@ -280,15 +300,19 @@ async fn process_file(
             Some(cached)
         }
         None => {
-            if s1_readiness.is_none() {
-                let admin = cue_llm::OllamaAdmin::new(&config.normalization.ollama_url);
-                *s1_readiness = Some(
-                    cue_normalization::s1_ready(&admin)
-                        .await
-                        .map_err(|err| err.to_string()),
-                );
-            }
-            let outcome = match s1_readiness.as_ref().expect("readiness set above") {
+            let readiness = match *s1_readiness {
+                Some(ready) => Ok(ready),
+                None => {
+                    let admin = cue_llm::OllamaAdmin::new(&config.normalization.ollama_url);
+                    remember_successful_readiness(
+                        s1_readiness,
+                        cue_normalization::s1_ready(&admin)
+                            .await
+                            .map_err(|err| err.to_string()),
+                    )
+                }
+            };
+            let outcome = match readiness {
                 Ok(true) => match cue_normalization::normalize_s1(
                     &config.normalization.ollama_url,
                     s1_settings.clone(),
@@ -332,9 +356,10 @@ async fn process_file(
                     .as_slice(),
             );
             let analysis_key = AnalysisCacheKey {
-                version: 2,
+                version: 3,
                 normalized_hash: &clean_hash,
                 language: &transcript.language,
+                endpoint: normalized_endpoint(&llm.base_url),
                 model: &llm.model,
                 prompt_version: cue_analysis::PROMPT_VERSION,
             };
@@ -556,9 +581,10 @@ mod tests {
     #[test]
     fn analysis_cache_identity_includes_canonical_language() {
         let english = AnalysisCacheKey {
-            version: 2,
+            version: 3,
             normalized_hash: "same-normalized-text",
             language: "en",
+            endpoint: "https://gateway.example/v1",
             model: "model",
             prompt_version: cue_analysis::PROMPT_VERSION,
         };
@@ -571,6 +597,66 @@ mod tests {
             serde_json::to_vec(&english).unwrap(),
             serde_json::to_vec(&dutch).unwrap()
         );
+    }
+
+    #[test]
+    fn provider_endpoints_participate_in_cache_identity() {
+        let normalization_a = NormalizationCacheKey {
+            version: 2,
+            transcript_hash: "transcript",
+            provider: "ollama",
+            endpoint: normalized_endpoint("http://ollama-a:11434/"),
+            styling: "style",
+            structure: "structure",
+            context: "context",
+        };
+        let normalization_b = NormalizationCacheKey {
+            endpoint: normalized_endpoint("http://ollama-b:11434"),
+            ..normalization_a
+        };
+        assert_ne!(
+            serde_json::to_vec(&normalization_a).unwrap(),
+            serde_json::to_vec(&normalization_b).unwrap()
+        );
+
+        let analysis_a = AnalysisCacheKey {
+            version: 3,
+            normalized_hash: "normalized",
+            language: "en",
+            endpoint: normalized_endpoint("https://gateway-a.example/v1/"),
+            model: "model",
+            prompt_version: cue_analysis::PROMPT_VERSION,
+        };
+        let analysis_b = AnalysisCacheKey {
+            endpoint: normalized_endpoint("https://gateway-b.example/v1"),
+            ..analysis_a
+        };
+        assert_ne!(
+            serde_json::to_vec(&analysis_a).unwrap(),
+            serde_json::to_vec(&analysis_b).unwrap()
+        );
+
+        let analysis_a_with_slash = AnalysisCacheKey {
+            endpoint: normalized_endpoint("https://gateway-a.example/v1/"),
+            ..analysis_a
+        };
+        assert_eq!(
+            serde_json::to_vec(&analysis_a).unwrap(),
+            serde_json::to_vec(&analysis_a_with_slash).unwrap()
+        );
+    }
+
+    #[test]
+    fn readiness_errors_are_not_remembered_for_later_files() {
+        let mut readiness = None;
+
+        let first = remember_successful_readiness(&mut readiness, Err("temporary outage".into()));
+        assert_eq!(first.unwrap_err(), "temporary outage");
+        assert_eq!(readiness, None);
+
+        let second = remember_successful_readiness(&mut readiness, Ok(true));
+        assert!(second.unwrap());
+        assert_eq!(readiness, Some(true));
     }
 
     #[test]

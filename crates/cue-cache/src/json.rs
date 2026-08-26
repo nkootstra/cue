@@ -83,12 +83,34 @@ impl JsonCache {
 
         match std::fs::rename(&temp_path, &path) {
             Ok(()) => Ok(()),
-            // Some platforms do not replace an entry created by a competing
-            // writer. That writer has already published a complete value for
-            // this logical key, so the store is still successful.
+            // Some platforms do not replace an existing destination. Remove
+            // the stale entry and retry so corrupt cache entries can heal.
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                let _ = std::fs::remove_file(temp_path);
-                Ok(())
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
+                    Err(error) => {
+                        let _ = std::fs::remove_file(&temp_path);
+                        return Err(CueError::general("could not replace cache entry")
+                            .because(error.to_string()));
+                    }
+                }
+
+                match std::fs::rename(&temp_path, &path) {
+                    Ok(()) => Ok(()),
+                    // A competing writer may publish after the removal and
+                    // before this retry. Its successful rename also exposes
+                    // only a complete file, so this store can succeed.
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                        let _ = std::fs::remove_file(temp_path);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        let _ = std::fs::remove_file(temp_path);
+                        Err(CueError::general("could not publish cache entry")
+                            .because(error.to_string()))
+                    }
+                }
             }
             Err(error) => {
                 let _ = std::fs::remove_file(temp_path);
@@ -321,6 +343,22 @@ mod tests {
 
         let err = cache.get::<Payload>(&key).unwrap_err();
         assert!(err.to_string().contains("corrupt"), "{err}");
+    }
+
+    #[test]
+    fn storing_replaces_a_corrupt_existing_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = JsonCache::new(dir.path());
+        let key = LogicalKey {
+            version: 1,
+            left: "bad",
+            right: "value",
+        };
+        std::fs::write(cache.path_for(&key).unwrap(), "{ not json").unwrap();
+
+        cache.store(&key, &payload(7)).unwrap();
+
+        assert_eq!(cache.get::<Payload>(&key).unwrap(), Some(payload(7)));
     }
 
     #[test]

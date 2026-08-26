@@ -53,6 +53,18 @@ impl Transcript {
     /// Centralizing this check prevents consumers from disagreeing about how
     /// malformed ranges should be handled.
     pub fn validate(&self) -> crate::Result<()> {
+        if self.schema_version != TRANSCRIPT_SCHEMA_VERSION {
+            return Err(crate::CueError::new(
+                crate::PipelineStage::Transcribe,
+                "transcript uses an unsupported schema version",
+            )
+            .because(format!(
+                "schema version {} was provided, but version {} is required",
+                self.schema_version, TRANSCRIPT_SCHEMA_VERSION
+            ))
+            .remedy("regenerate the transcript or remove the incompatible cache entry"));
+        }
+
         for (index, segment) in self.segments.iter().enumerate() {
             self.words_for_segment(segment).map_err(|err| {
                 crate::CueError::new(
@@ -182,6 +194,7 @@ mod tests {
         let stripped = json.replace(r#""schema_version":1,"#, "");
         let loaded: Transcript = serde_json::from_str(&stripped).unwrap();
         assert_eq!(loaded.schema_version, TRANSCRIPT_SCHEMA_VERSION);
+        loaded.validate().unwrap();
     }
 
     #[test]
@@ -237,6 +250,21 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["this", "is", "cue."]
         );
+    }
+
+    #[test]
+    fn unsupported_schema_versions_are_rejected_before_segment_ranges() {
+        for schema_version in [0, 2] {
+            let mut transcript = sample();
+            transcript.schema_version = schema_version;
+            transcript.segments[0].word_start = 2;
+            transcript.segments[0].word_end = 1;
+
+            let error = transcript.validate().unwrap_err().to_string();
+            assert!(error.contains("unsupported schema version"), "{error}");
+            assert!(error.contains(&schema_version.to_string()), "{error}");
+            assert!(!error.contains("segment 0"), "{error}");
+        }
     }
 
     #[test]
