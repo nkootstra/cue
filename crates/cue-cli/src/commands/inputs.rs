@@ -147,6 +147,8 @@ fn collect_directory(directory: &Path, recursive: bool, files: &mut Vec<PathBuf>
                 files.push(path);
             }
         } else if file_type.is_symlink() && is_media_path(&path) {
+            // Media-looking symlinks stay fatal when unresolvable: silently skipping one could
+            // produce an incomplete batch while still reporting success.
             let metadata = fs::metadata(&path).map_err(|err| {
                 CueError::general(format!(
                     "could not resolve media symlink {}",
@@ -223,6 +225,7 @@ fn cue_directory_name(source: &Path) -> String {
 fn reject_output_collisions(inputs: &[ResolvedInput]) -> Result<()> {
     let mut destinations: HashMap<String, &ResolvedInput> = HashMap::new();
     for input in inputs {
+        // Fold on every platform so accepted batches remain portable to case-insensitive targets.
         let folded = output_collision_identity(&input.output)
             .to_string_lossy()
             .to_lowercase();
@@ -448,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn output_collisions_are_rejected_before_processing() {
+    fn case_only_output_collisions_are_rejected_on_every_platform() {
         let temp = tempfile::tempdir().unwrap();
         let upper = temp.path().join("a/Same.mp4");
         let lower = temp.path().join("b/same.mp3");
@@ -552,7 +555,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn broken_allowlisted_symlinks_are_fatal() {
+    fn broken_allowlisted_explicit_file_symlinks_are_fatal() {
         use std::os::unix::fs::symlink;
 
         let temp = tempfile::tempdir().unwrap();
@@ -564,6 +567,24 @@ mod tests {
             .to_string();
 
         assert!(error.contains("could not resolve input symlink"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_allowlisted_symlinks_discovered_in_directories_are_fatal() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let input = temp.path().join("input");
+        std::fs::create_dir(&input).unwrap();
+        symlink(input.join("missing.mp4"), input.join("broken.mp4")).unwrap();
+
+        let error = resolve_inputs(&[input], false, None)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("could not resolve media symlink"), "{error}");
+        assert!(error.contains("broken.mp4"), "{error}");
     }
 
     #[cfg(unix)]
