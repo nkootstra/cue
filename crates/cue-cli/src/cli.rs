@@ -136,7 +136,7 @@ pub struct CorrectArgs {
 
 #[derive(Debug, Subcommands)]
 pub enum SkillCommand {
-    /// Install the transcribe skill for AI agents (proxies `npx skills add`)
+    /// Install the transcribe skill globally for AI agents
     Install(SkillInstallArgs),
 }
 
@@ -149,6 +149,9 @@ pub struct SkillInstallArgs {
     /// Target agent (e.g. "opencode", "claude-code"); auto-detect when unset
     #[usage(long)]
     pub agent: Option<String>,
+    /// Install in the current project instead of globally
+    #[usage(long)]
+    pub local: bool,
     /// Opt out of the skills CLI's anonymous telemetry
     #[usage(long)]
     pub no_telemetry: bool,
@@ -238,6 +241,25 @@ mod tests {
             Command::Cache(cache) => match cache.command.unwrap() {
                 CacheCommand::Dir => {}
                 other => panic!("wrong subcommand: {other:?}"),
+            },
+            other => panic!("wrong command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skill_install_is_global_unless_local_is_requested() {
+        let global = parse_args(&["cue", "skill", "install"]);
+        match global.command.unwrap() {
+            Command::Skill(skill) => match skill.command.unwrap() {
+                SkillCommand::Install(args) => assert!(!args.local),
+            },
+            other => panic!("wrong command: {other:?}"),
+        }
+
+        let local = parse_args(&["cue", "skill", "install", "--local"]);
+        match local.command.unwrap() {
+            Command::Skill(skill) => match skill.command.unwrap() {
+                SkillCommand::Install(args) => assert!(args.local),
             },
             other => panic!("wrong command: {other:?}"),
         }
