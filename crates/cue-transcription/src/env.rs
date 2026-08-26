@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 use cue_core::{CueError, PipelineStage, Result};
 
+pub use cue_core::paths::data_dir;
+
 /// The embedded worker script text.
 pub const WORKER_SCRIPT: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -33,27 +35,13 @@ impl WorkerEnvironment {
     }
 }
 
-/// Cue's data directory: `$CUE_DATA_DIR`, else `$XDG_DATA_HOME/cue`, else
-/// `~/.local/share/cue`.
-pub fn data_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("CUE_DATA_DIR") {
-        return Some(PathBuf::from(dir));
-    }
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| home_dir().map(|h| h.join(".local/share")))?;
-    Some(base.join("cue"))
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|h| !h.is_empty())
-        .map(PathBuf::from)
-}
-
 /// Directory holding the worker script inside the data dir.
 pub fn worker_dir() -> Option<PathBuf> {
-    data_dir().map(|d| d.join("workers").join("faster-whisper"))
+    data_dir().map(|dir| worker_dir_in(&dir))
+}
+
+pub(crate) fn worker_dir_in(data_dir: &Path) -> PathBuf {
+    data_dir.join("workers").join("faster-whisper")
 }
 
 /// Write the embedded script into place when missing or stale.
@@ -92,9 +80,10 @@ pub fn materialize_worker_script(dir: &Path) -> Result<PathBuf> {
 /// `python_override` wins over discovery; discovery prefers the
 /// auto-provisioned venv, then falls back to `python3`.
 pub fn resolve(python_override: Option<&Path>) -> Result<WorkerEnvironment> {
+    let data_dir = data_dir();
     let python = match python_override {
         Some(explicit) => explicit.to_path_buf(),
-        None => find_python().ok_or_else(|| {
+        None => find_python(data_dir.as_deref()).ok_or_else(|| {
             CueError::new(PipelineStage::Transcribe, "no usable Python interpreter")
                 .because("python3 was not found on PATH and no override was configured")
                 .remedy("install Python 3.10+ and verify with `cue doctor`")
@@ -110,7 +99,7 @@ pub fn resolve(python_override: Option<&Path>) -> Result<WorkerEnvironment> {
         });
     }
 
-    let dir = worker_dir().ok_or_else(|| {
+    let dir = data_dir.as_deref().map(worker_dir_in).ok_or_else(|| {
         CueError::new(
             PipelineStage::Transcribe,
             "could not determine cue's data directory",
@@ -123,15 +112,11 @@ pub fn resolve(python_override: Option<&Path>) -> Result<WorkerEnvironment> {
 }
 
 /// Prefer the venv provisioned for cue; fall back to system python3.
-fn find_python() -> Option<PathBuf> {
-    if let Some(dir) = data_dir() {
-        let venv_python = dir
-            .join("venvs")
-            .join("faster-whisper")
-            .join("bin")
-            .join("python3");
-        if venv_python.exists() {
-            return Some(venv_python);
+fn find_python(data_dir: Option<&Path>) -> Option<PathBuf> {
+    if let Some(data_dir) = data_dir {
+        let venv = crate::provision::venv_dir(data_dir);
+        if crate::provision::is_provisioned(&venv) {
+            return Some(crate::provision::venv_python(&venv));
         }
     }
     // Cheap PATH search without spawning anything: reuse cue-media's helper.

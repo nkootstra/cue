@@ -30,13 +30,17 @@ impl OllamaAdmin {
 
     /// Names of models already present locally.
     pub async fn list_models(&self) -> Result<Vec<OllamaModel>> {
-        let response: TagsResponse = self
+        let response = self
             .http
             .get(format!("{}/api/tags", self.base_url))
             .timeout(std::time::Duration::from_secs(10))
             .send()
             .await
-            .map_err(|e| ollama_unreachable(e.to_string()))?
+            .map_err(|e| ollama_unreachable(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(http_error("listing", "models", response.status()));
+        }
+        let response: TagsResponse = response
             .json()
             .await
             .map_err(|e| ollama_error("Ollama returned unreadable output", e.to_string()))?;
@@ -52,11 +56,15 @@ impl OllamaAdmin {
     /// `:latest` tag as equivalent (`cue-s1-mini` matches
     /// `cue-s1-mini:latest`).
     pub async fn has_model(&self, name: &str) -> Result<bool> {
-        Ok(self
-            .list_models()
-            .await?
+        Ok(Self::models_include(&self.list_models().await?, name))
+    }
+
+    /// Test a model-list snapshot without issuing another `/api/tags`
+    /// request.
+    pub fn models_include(models: &[OllamaModel], name: &str) -> bool {
+        models
             .iter()
-            .any(|m| model_name_matches(&m.name, name)))
+            .any(|model| model_name_matches(&model.name, name))
     }
 
     /// Pull a model by reference (e.g. an `hf.co/...` GGUF tag).
@@ -80,7 +88,7 @@ impl OllamaAdmin {
             .map_err(|e| ollama_unreachable(e.to_string()))?;
 
         if !response.status().is_success() {
-            return Err(http_error("pulling", model_ref, response).await);
+            return Err(http_error("pulling", model_ref, response.status()));
         }
         Ok(())
     }
@@ -113,24 +121,19 @@ impl OllamaAdmin {
             .map_err(|e| ollama_unreachable(e.to_string()))?;
 
         if !response.status().is_success() {
-            return Err(http_error("creating model", name, response).await);
+            return Err(http_error("creating model", name, response.status()));
         }
         Ok(())
     }
 }
 
-/// Build an error that includes the server's response body (the reason for
-/// the failure), truncated, with the full body at debug trace.
-async fn http_error(verb: &str, subject: &str, response: reqwest::Response) -> CueError {
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    let trimmed = body.chars().take(300).collect::<String>();
-    tracing::debug!(%status, %body, "ollama http error body");
+/// Build an actionable status-only error. Provider bodies can contain
+/// request data, so they are deliberately neither read nor logged.
+fn http_error(verb: &str, subject: &str, status: reqwest::StatusCode) -> CueError {
     CueError::new(
         cue_core::PipelineStage::Normalize,
         format!("{verb} {subject} failed ({status})"),
     )
-    .because(trimmed)
     .remedy("run `cue doctor` to inspect the local Ollama setup, or use the `ollama` CLI directly")
 }
 
@@ -242,5 +245,43 @@ mod tests {
         let rendered = err.to_string();
         assert!(rendered.contains("could not reach Ollama"), "{rendered}");
         assert!(rendered.contains("is Ollama running?"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn tags_http_error_reports_status_without_response_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("private-transcript-sentinel"))
+            .mount(&server)
+            .await;
+
+        let err = OllamaAdmin::new(server.uri())
+            .list_models()
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("500"), "{err}");
+        assert!(!err.contains("private-transcript-sentinel"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn malformed_tags_are_distinct_from_an_unreachable_server() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&server)
+            .await;
+
+        let err = OllamaAdmin::new(server.uri())
+            .list_models()
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("unreadable output"), "{err}");
+        assert!(!err.contains("could not reach Ollama"), "{err}");
     }
 }

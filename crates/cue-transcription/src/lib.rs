@@ -43,9 +43,9 @@ pub trait Transcriber: Send + Sync {
     /// Like [`Transcriber::transcribe`], reporting progress when the
     /// provider supports it.
     ///
-    /// Progress arrives as [`PipelineEvent::Progress`] with `current` as a
-    /// percentage (0-100) and `total` of 100. The default delegates to
-    /// `transcribe` without reporting anything.
+    /// Progress arrives as [`PipelineEvent::Progress`] with a percentage in
+    /// the inclusive range `0..=100`. The default delegates to `transcribe`
+    /// without reporting anything.
     async fn transcribe_with_progress(
         &self,
         input: &Path,

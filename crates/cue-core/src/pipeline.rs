@@ -9,18 +9,16 @@ pub enum PipelineStage {
     Inspect,
     Extract,
     Transcribe,
-    Caption,
     Normalize,
     Analyze,
     Render,
 }
 
 impl PipelineStage {
-    pub const ALL: [PipelineStage; 7] = [
+    pub const ALL: [PipelineStage; 6] = [
         PipelineStage::Inspect,
         PipelineStage::Extract,
         PipelineStage::Transcribe,
-        PipelineStage::Caption,
         PipelineStage::Normalize,
         PipelineStage::Analyze,
         PipelineStage::Render,
@@ -31,7 +29,6 @@ impl PipelineStage {
             PipelineStage::Inspect => "inspect",
             PipelineStage::Extract => "extract",
             PipelineStage::Transcribe => "transcribe",
-            PipelineStage::Caption => "caption",
             PipelineStage::Normalize => "normalize",
             PipelineStage::Analyze => "analyze",
             PipelineStage::Render => "render",
@@ -54,8 +51,7 @@ pub enum PipelineEvent {
     Started(PipelineStage),
     Progress {
         stage: PipelineStage,
-        current: u64,
-        total: Option<u64>,
+        percent: u8,
     },
     /// A stage was satisfied from cache without doing work.
     Cached(PipelineStage),
@@ -79,7 +75,6 @@ mod tests {
                 "inspect",
                 "extract",
                 "transcribe",
-                "caption",
                 "normalize",
                 "analyze",
                 "render"
@@ -101,12 +96,11 @@ mod tests {
 
         let progress = PipelineEvent::Progress {
             stage: PipelineStage::Transcribe,
-            current: 5,
-            total: Some(10),
+            percent: 50,
         };
         assert!(matches!(
             progress,
-            PipelineEvent::Progress { current: 5, .. }
+            PipelineEvent::Progress { percent: 50, .. }
         ));
 
         let failed = PipelineEvent::Failed {

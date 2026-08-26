@@ -4,7 +4,9 @@
 //! in order: sentence punctuation, pauses between words, then the configured
 //! character and duration budgets.
 
-use cue_core::Transcript;
+use cue_core::{Result, Transcript};
+
+use crate::lines::LineLayout;
 
 /// Policy knobs for segmentation and line breaking. Deliberately not
 /// language-aware; callers derive it from configuration.
@@ -13,9 +15,6 @@ pub struct SubtitlePolicy {
     pub max_lines: usize,
     pub max_chars_per_line: usize,
     pub max_duration_ms: u64,
-    /// Reading-speed ceiling in characters per second; `None` disables the
-    /// check.
-    pub max_chars_per_second: Option<f32>,
 }
 
 impl Default for SubtitlePolicy {
@@ -24,19 +23,11 @@ impl Default for SubtitlePolicy {
             max_lines: 2,
             max_chars_per_line: 42,
             max_duration_ms: 6_000,
-            max_chars_per_second: None,
         }
     }
 }
 
-impl SubtitlePolicy {
-    /// Total characters that fit on one cue's lines (newlines included).
-    pub fn char_budget(&self) -> usize {
-        self.max_lines * self.max_chars_per_line + self.max_lines.saturating_sub(1)
-    }
-}
-
-/// One subtitle cue: a time range plus its text (not yet line-broken).
+/// One subtitle cue: a time range plus its final physical line layout.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cue {
     pub start_ms: u64,
@@ -54,27 +45,62 @@ fn ends_sentence(text: &str) -> bool {
 }
 
 /// Segment transcript words into cues under the policy.
-pub fn segment(transcript: &Transcript, policy: &SubtitlePolicy) -> Vec<Cue> {
+pub fn segment(transcript: &Transcript, policy: &SubtitlePolicy) -> Result<Vec<Cue>> {
+    transcript.validate()?;
     let mut cues = Vec::new();
     for spoken in &transcript.segments {
-        let words = transcript.words.get(spoken.word_start..spoken.word_end);
-        let Some(words) = words else { continue };
+        let words = transcript.words_for_segment(spoken)?;
         segment_range(words, policy, &mut cues);
     }
-    enforce_monotonic(cues)
+    Ok(enforce_monotonic(cues))
 }
 
 fn segment_range(words: &[cue_core::Word], policy: &SubtitlePolicy, out: &mut Vec<Cue>) {
-    const _: () = ();
-    let budget = policy.char_budget();
-
-    struct Pending {
+    struct PendingCue {
         start_ms: u64,
-        parts: Vec<String>,
-        chars: usize,
+        end_ms: u64,
+        layout: LineLayout,
     }
 
-    let mut pending: Option<Pending> = None;
+    impl PendingCue {
+        fn new(word: &cue_core::Word, text: &str, policy: &SubtitlePolicy) -> Self {
+            let mut layout = LineLayout::new(policy.max_lines, policy.max_chars_per_line);
+            let appended = layout.try_append(text);
+            debug_assert!(appended);
+            Self {
+                start_ms: word.start_ms,
+                end_ms: word.end_ms.max(word.start_ms),
+                layout,
+            }
+        }
+
+        fn try_append(
+            &mut self,
+            word: &cue_core::Word,
+            text: &str,
+            policy: &SubtitlePolicy,
+        ) -> bool {
+            let candidate_end = self.end_ms.max(word.end_ms).max(self.start_ms);
+            if candidate_end.saturating_sub(self.start_ms) > policy.max_duration_ms {
+                return false;
+            }
+            if !self.layout.try_append(text) {
+                return false;
+            }
+            self.end_ms = candidate_end;
+            true
+        }
+
+        fn finish(self) -> Cue {
+            Cue {
+                start_ms: self.start_ms,
+                end_ms: self.end_ms,
+                text: self.layout.into_text(),
+            }
+        }
+    }
+
+    let mut pending: Option<PendingCue> = None;
     let mut previous_end: Option<u64> = None;
 
     for word in words {
@@ -85,36 +111,20 @@ fn segment_range(words: &[cue_core::Word], policy: &SubtitlePolicy, out: &mut Ve
 
         let pause_before = previous_end.map_or(0, |prev| word.start_ms.saturating_sub(prev));
 
-        // Close the running cue when this word starts a new one anyway.
-        if let Some(state) = &pending {
-            let duration = word.start_ms.saturating_sub(state.start_ms);
-            let over_budget = state.chars + 1 + text.len() > budget;
-            let over_duration = duration > policy.max_duration_ms;
-            let after_pause = pause_before >= PAUSE_BREAK_MS;
-
-            if over_budget || over_duration || after_pause {
-                let end = previous_end.unwrap_or(state.start_ms);
-                out.push(Cue {
-                    start_ms: state.start_ms,
-                    end_ms: end.max(state.start_ms),
-                    text: state.parts.join(" "),
-                });
-                pending = None;
-            }
+        if pause_before >= PAUSE_BREAK_MS
+            && let Some(state) = pending.take()
+        {
+            out.push(state.finish());
         }
 
-        match &mut pending {
-            None => {
-                pending = Some(Pending {
-                    start_ms: word.start_ms,
-                    parts: vec![text.to_string()],
-                    chars: text.chars().count(),
-                });
+        let appended = pending
+            .as_mut()
+            .is_some_and(|state| state.try_append(word, text, policy));
+        if !appended {
+            if let Some(state) = pending.take() {
+                out.push(state.finish());
             }
-            Some(state) => {
-                state.parts.push(text.to_string());
-                state.chars += 1 + text.chars().count();
-            }
+            pending = Some(PendingCue::new(word, text, policy));
         }
         previous_end = Some(word.end_ms);
 
@@ -122,21 +132,13 @@ fn segment_range(words: &[cue_core::Word], policy: &SubtitlePolicy, out: &mut Ve
         if ends_sentence(text)
             && let Some(state) = pending.take()
         {
-            out.push(Cue {
-                start_ms: state.start_ms,
-                end_ms: word.end_ms.max(state.start_ms),
-                text: state.parts.join(" "),
-            });
+            out.push(state.finish());
         }
     }
 
     // Flush a trailing cue without sentence punctuation.
     if let Some(state) = pending.take() {
-        out.push(Cue {
-            start_ms: state.start_ms,
-            end_ms: previous_end.unwrap_or(state.start_ms).max(state.start_ms),
-            text: state.parts.join(" "),
-        });
+        out.push(state.finish());
     }
 }
 

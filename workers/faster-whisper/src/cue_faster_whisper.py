@@ -37,52 +37,51 @@ import sys
 WORKER_VERSION = 1
 
 
-def fail(message: str) -> None:
-    print(f"cue-faster-whisper: {message}", file=sys.stderr)
-    raise SystemExit(1)
+def diagnostic(message: str) -> None:
+    lines = str(message).splitlines() or ["unknown worker failure"]
+    for line in lines:
+        print(f"cue-faster-whisper: {line}", file=sys.stderr)
+
+
+class WorkerArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        diagnostic(f"invalid arguments: {message}")
+        raise SystemExit(2)
 
 
 def emit(payload: dict) -> None:
-    json.dump(payload, sys.stdout, ensure_ascii=False)
-    sys.stdout.write("\n")
+    encoded = json.dumps(payload, ensure_ascii=False)
+    sys.stdout.write(f"{encoded}\n")
 
 
-def check() -> int:
-    try:
-        import faster_whisper  # noqa: F401
-    except Exception as exc:  # pragma: no cover - depends on environment
-        fail(f"faster-whisper is not importable: {exc}")
-        return 1
+def load_backend():
     import faster_whisper
 
+    return faster_whisper
+
+
+def check(faster_whisper) -> int:
     emit({"ok": True, "faster_whisper": faster_whisper.__version__})
     return 0
 
 
-def transcribe(input_path: str, model_name: str, language: str | None) -> int:
+def transcribe(
+    faster_whisper, input_path: str, model_name: str, language: str | None
+) -> int:
     if language == "auto":
         language = None
 
-    try:
-        from faster_whisper import WhisperModel
-    except Exception as exc:  # pragma: no cover - depends on environment
-        fail(f"could not import faster_whisper (is the venv provisioned?): {exc}")
-        return 1
-
-    print(f"loading model {model_name}", file=sys.stderr)
-    try:
-        model = WhisperModel(model_name, device="auto", compute_type="auto")
-        segments_iter, info = model.transcribe(
-            input_path,
-            language=language,
-            word_timestamps=True,
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 300},
-        )
-    except Exception as exc:
-        fail(f"transcription failed for {input_path}: {exc}")
-        return 1
-
+    diagnostic(f"loading model {model_name}")
+    model = faster_whisper.WhisperModel(
+        model_name, device="auto", compute_type="auto"
+    )
+    segments_iter, info = model.transcribe(
+        input_path,
+        language=language,
+        word_timestamps=True,
+        vad_filter=True,
+        vad_parameters={"min_silence_duration_ms": 300},
+    )
     segments = []
     for index, segment in enumerate(segments_iter):
         words = []
@@ -105,7 +104,7 @@ def transcribe(input_path: str, model_name: str, language: str | None) -> int:
             }
         )
         # Machine-readable progress on stderr: the Rust adapter parses
-        # PROGRESS lines; anything else here is a human log.
+        # PROGRESS lines; anything else here is a prefixed human log.
         if info.duration and info.duration > 0:
             fraction = min(segment.end / info.duration, 1.0)
             print(f"PROGRESS {fraction:.3f}", file=sys.stderr, flush=True)
@@ -118,23 +117,34 @@ def transcribe(input_path: str, model_name: str, language: str | None) -> int:
             "segments": segments,
         }
     )
+
     return 0
 
 
+def run(args: argparse.Namespace) -> int:
+    faster_whisper = load_backend()
+    if args.check:
+        return check(faster_whisper)
+    return transcribe(faster_whisper, args.input, args.model, args.language)
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="cue-faster-whisper")
+    parser = WorkerArgumentParser(prog="cue-faster-whisper")
     parser.add_argument("--input", help="audio file to transcribe")
     parser.add_argument("--model", default="large-v3-turbo")
     parser.add_argument("--language", default=None)
     parser.add_argument("--check", action="store_true", help="verify imports and exit")
     args = parser.parse_args()
 
-    if args.check:
-        return check()
     if not args.input:
-        parser.error("--input is required unless --check is given")
+        if not args.check:
+            parser.error("--input is required unless --check is given")
 
-    return transcribe(args.input, args.model, args.language)
+    try:
+        return run(args)
+    except Exception as exc:
+        diagnostic(exc)
+        return 1
 
 
 if __name__ == "__main__":

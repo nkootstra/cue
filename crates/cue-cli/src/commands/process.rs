@@ -11,29 +11,100 @@
 use std::path::{Path, PathBuf};
 
 use cue_analysis::Analyzer as _;
-use cue_core::config::{PartialConfig, load_user_config, resolve};
 use cue_core::media::Media;
 use cue_core::{CueError, Result};
-use cue_media::extract::{AudioExtractOptions, extract_audio};
+use cue_media::extract::extract_audio;
 use cue_transcription::Transcriber;
 
 use crate::cli::Cue;
 use crate::render::{human_duration, println_line};
 
-pub async fn run(cli: &Cue) -> i32 {
-    run_stopped(cli, &cli.files, None).await
+#[derive(serde::Serialize)]
+struct TranscriptionCacheKey<'a> {
+    version: u8,
+    provider: &'static str,
+    model: &'a str,
+    language: Option<&'a str>,
+    audio_hash: &'a str,
 }
 
-/// Process files, optionally stopping after a given stage.
+#[derive(serde::Serialize)]
+struct NormalizationCacheKey<'a> {
+    version: u8,
+    transcript_hash: &'a str,
+    provider: &'a str,
+    endpoint: &'a str,
+    styling: &'a str,
+    structure: &'a str,
+    context: &'a str,
+}
+
+#[derive(serde::Serialize)]
+struct AnalysisCacheKey<'a> {
+    version: u8,
+    normalized_hash: &'a str,
+    language: &'a str,
+    endpoint: &'a str,
+    model: &'a str,
+    prompt_version: u32,
+}
+
+fn normalized_endpoint(endpoint: &str) -> &str {
+    endpoint.trim_end_matches('/')
+}
+
+fn remember_successful_readiness(
+    readiness: &mut Option<bool>,
+    result: std::result::Result<bool, String>,
+) -> std::result::Result<bool, String> {
+    match result {
+        Ok(ready) => {
+            *readiness = Some(ready);
+            Ok(ready)
+        }
+        Err(reason) => Err(reason),
+    }
+}
+
+/// The two supported processing contracts.
 ///
-/// `cue transcribe` uses this to produce transcripts without subtitles,
-/// normalization, or analysis.
-pub async fn run_stopped(
+/// Keeping this as an enum makes unsupported intermediate stopping points
+/// unrepresentable while preserving the dedicated `cue transcribe` output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessMode {
+    Full,
+    TranscriptOnly,
+}
+
+impl ProcessMode {
+    fn includes(self, stage: cue_core::PipelineStage) -> bool {
+        use cue_core::PipelineStage;
+
+        match self {
+            Self::Full => true,
+            Self::TranscriptOnly => matches!(
+                stage,
+                PipelineStage::Inspect
+                    | PipelineStage::Extract
+                    | PipelineStage::Transcribe
+                    | PipelineStage::Render
+            ),
+        }
+    }
+}
+
+pub async fn run(cli: &Cue, config: &cue_core::Config) -> i32 {
+    run_mode(cli, &cli.files, ProcessMode::Full, config).await
+}
+
+/// Process files under one of the supported artifact contracts.
+pub async fn run_mode(
     cli: &Cue,
     files: &[String],
-    stop_after: Option<cue_core::PipelineStage>,
+    mode: ProcessMode,
+    config: &cue_core::Config,
 ) -> i32 {
-    match run_inner(files, stop_after, cli).await {
+    match run_inner(files, mode, cli, config).await {
         Ok(code) => code,
         Err(err) => {
             eprintln!("{err}");
@@ -44,17 +115,14 @@ pub async fn run_stopped(
 
 async fn run_inner(
     files: &[String],
-    stop_after: Option<cue_core::PipelineStage>,
+    mode: ProcessMode,
     cli: &Cue,
+    config: &cue_core::Config,
 ) -> Result<i32> {
     if files.is_empty() {
         print_usage_hint();
         return Ok(0);
     }
-
-    let user = load_user_config()?;
-    let config = resolve(&[&PartialConfig::default(), &user]);
-    tracing::debug!(?config, "resolved configuration");
 
     // Stage logic emits events; the renderer decides presentation. Core
     // pipeline behavior never depends on terminal output.
@@ -62,8 +130,9 @@ async fn run_inner(
     let renderer = tokio::spawn(crate::events::run_renderer(rx));
 
     let result: Result<()> = async {
+        let mut s1_readiness = None;
         for file in files {
-            process_file(file, cli, &config, &tx, stop_after).await?;
+            process_file(file, cli, config, &tx, mode, &mut s1_readiness).await?;
         }
         Ok(())
     }
@@ -82,7 +151,8 @@ async fn process_file(
     cli: &Cue,
     config: &cue_core::Config,
     events: &tokio::sync::mpsc::UnboundedSender<cue_core::PipelineEvent>,
-    stop_after: Option<cue_core::PipelineStage>,
+    mode: ProcessMode,
+    s1_readiness: &mut Option<bool>,
 ) -> Result<()> {
     use cue_core::{PipelineEvent, PipelineStage};
 
@@ -126,7 +196,7 @@ async fn process_file(
         let _ = events.send(PipelineEvent::Cached(PipelineStage::Extract));
     } else {
         let _ = events.send(PipelineEvent::Started(PipelineStage::Extract));
-        extract_audio(&ffmpeg, &path, &wav_path, &AudioExtractOptions::default()).await?;
+        extract_audio(&ffmpeg, &path, &wav_path).await?;
         let _ = events.send(PipelineEvent::Completed(PipelineStage::Extract));
     }
 
@@ -136,19 +206,29 @@ async fn process_file(
         language: cli.language.clone(),
     };
 
-    // Cache key: provider + model + language over the extracted audio's
-    // bytes. Any change re-transcribes; reruns with the same settings don't.
-    let transcript_cache_key = cue_cache::bytes_hash(
-        format!(
-            "faster-whisper|{}|{}|{}",
-            options.model,
-            options.language.as_deref().unwrap_or("auto"),
-            cue_cache::file_hash(&wav_path)?
-        )
-        .as_bytes(),
-    );
+    // Any output-affecting input participates in the logical key. JsonCache
+    // hashes its structured representation into a filesystem-safe identity.
+    let audio_hash = cue_cache::file_hash(&wav_path)?;
+    let transcript_cache_key = TranscriptionCacheKey {
+        version: 1,
+        provider: "faster-whisper",
+        model: &options.model,
+        language: options.language.as_deref(),
+        audio_hash: &audio_hash,
+    };
     let transcript_cache = cue_cache::JsonCache::new(stage_dir.join("transcription"));
-    let transcript = match load_cached(&transcript_cache, &transcript_cache_key) {
+    let cached_transcript: Option<cue_core::Transcript> =
+        load_cached::<cue_core::Transcript>(&transcript_cache, &transcript_cache_key).and_then(
+            |cached| {
+                if let Err(err) = cached.validate() {
+                    tracing::warn!(error = %err, "ignoring invalid cached transcript");
+                    None
+                } else {
+                    Some(cached)
+                }
+            },
+        );
+    let transcript = match cached_transcript {
         Some(cached) => {
             let _ = events.send(PipelineEvent::Cached(PipelineStage::Transcribe));
             cached
@@ -159,6 +239,7 @@ async fn process_file(
             let fresh = transcriber
                 .transcribe_with_progress(&wav_path, &options, Some(events.clone()))
                 .await?;
+            fresh.validate()?;
             store_cached(&transcript_cache, &transcript_cache_key, &fresh);
             let _ = events.send(PipelineEvent::Completed(PipelineStage::Transcribe));
             fresh
@@ -166,7 +247,7 @@ async fn process_file(
     };
 
     // `cue transcribe` stops here: canonical transcript only.
-    if stop_after == Some(PipelineStage::Transcribe) {
+    if !mode.includes(PipelineStage::Normalize) {
         let _ = events.send(PipelineEvent::Started(PipelineStage::Render));
         let out_dir = output_directory(&path, cli)?;
         std::fs::create_dir_all(&out_dir).map_err(|e| {
@@ -202,18 +283,16 @@ async fn process_file(
         structure: config.normalization.structure.clone(),
         context: config.normalization.context.clone(),
     };
-    let normalization_settings_hash = cue_cache::bytes_hash(
-        format!(
-            "s1|{}|{}|{}|{}",
-            config.normalization.provider,
-            s1_settings.styling,
-            s1_settings.structure,
-            s1_settings.context
-        )
-        .as_bytes(),
-    );
     let normalized_cache = cue_cache::JsonCache::new(stage_dir.join("normalization"));
-    let normalization_key = format!("{transcript_hash}-{normalization_settings_hash}");
+    let normalization_key = NormalizationCacheKey {
+        version: 2,
+        transcript_hash: &transcript_hash,
+        provider: &config.normalization.provider,
+        endpoint: normalized_endpoint(&config.normalization.ollama_url),
+        styling: &s1_settings.styling,
+        structure: &s1_settings.structure,
+        context: &s1_settings.context,
+    };
 
     let normalized = match load_cached(&normalized_cache, &normalization_key) {
         Some(cached) => {
@@ -221,13 +300,38 @@ async fn process_file(
             Some(cached)
         }
         None => {
-            match cue_normalization::normalize_if_ready(
-                &config.normalization.ollama_url,
-                s1_settings,
-                &transcript,
-            )
-            .await
-            {
+            let readiness = match *s1_readiness {
+                Some(ready) => Ok(ready),
+                None => {
+                    let admin = cue_llm::OllamaAdmin::new(&config.normalization.ollama_url);
+                    remember_successful_readiness(
+                        s1_readiness,
+                        cue_normalization::s1_ready(&admin)
+                            .await
+                            .map_err(|err| err.to_string()),
+                    )
+                }
+            };
+            let outcome = match readiness {
+                Ok(true) => match cue_normalization::normalize_s1(
+                    &config.normalization.ollama_url,
+                    s1_settings.clone(),
+                    &transcript,
+                )
+                .await
+                {
+                    Ok(clean) => cue_normalization::NormalizationOutcome::Done(clean),
+                    Err(err) => cue_normalization::NormalizationOutcome::Skipped(err.to_string()),
+                },
+                Ok(false) => cue_normalization::NormalizationOutcome::Skipped(format!(
+                    "model \"{}\" not found in Ollama",
+                    cue_normalization::S1_MODEL_NAME
+                )),
+                Err(reason) => cue_normalization::NormalizationOutcome::Skipped(format!(
+                    "could not determine S1 readiness: {reason}"
+                )),
+            };
+            match outcome {
                 cue_normalization::NormalizationOutcome::Done(clean) => {
                     store_cached(&normalized_cache, &normalization_key, &clean);
                     let _ = events.send(PipelineEvent::Completed(PipelineStage::Normalize));
@@ -251,12 +355,14 @@ async fn process_file(
                     })?
                     .as_slice(),
             );
-            let analysis_key = format!(
-                "{}-{}-{}",
-                clean_hash,
-                llm.model,
-                cue_analysis::PROMPT_VERSION
-            );
+            let analysis_key = AnalysisCacheKey {
+                version: 3,
+                normalized_hash: &clean_hash,
+                language: &transcript.language,
+                endpoint: normalized_endpoint(&llm.base_url),
+                model: &llm.model,
+                prompt_version: cue_analysis::PROMPT_VERSION,
+            };
             let analysis_cache = cue_cache::JsonCache::new(stage_dir.join("analysis"));
 
             match load_cached(&analysis_cache, &analysis_key) {
@@ -269,7 +375,10 @@ async fn process_file(
                     let client = cue_llm::ChatClient::new(llm.base_url.clone(), llm.api_key());
                     let analyzer = cue_analysis::GatewayAnalyzer::new(client, &llm.model);
                     match analyzer
-                        .analyze(&cue_analysis::AnalysisInput::from_normalized(clean))
+                        .analyze(&cue_analysis::AnalysisInput::from_normalized(
+                            &transcript.language,
+                            clean,
+                        ))
                         .await
                     {
                         Ok(a) => {
@@ -341,9 +450,8 @@ async fn process_file(
         max_lines: config.subtitles.max_lines,
         max_chars_per_line: config.subtitles.max_chars_per_line,
         max_duration_ms: config.subtitles.max_duration_ms,
-        max_chars_per_second: config.subtitles.max_chars_per_second,
     };
-    let cues = cue_subtitles::build_cues(&transcript, &policy);
+    let cues = cue_subtitles::build_cues(&transcript, &policy)?;
     for format in &config.subtitles.formats {
         let path = out_dir.join(format!("subtitles.{}", format.extension()));
         let content = match format {
@@ -398,7 +506,7 @@ fn output_directory(input: &Path, cli: &Cue) -> Result<PathBuf> {
 /// than failing the run.
 fn load_cached<T: serde::de::DeserializeOwned>(
     cache: &cue_cache::JsonCache,
-    key: &str,
+    key: &impl serde::Serialize,
 ) -> Option<T> {
     match cache.get(key) {
         Ok(Some(value)) => Some(value),
@@ -411,7 +519,11 @@ fn load_cached<T: serde::de::DeserializeOwned>(
 }
 
 /// Best-effort store: cache write failures never fail the pipeline.
-fn store_cached<T: serde::Serialize>(cache: &cue_cache::JsonCache, key: &str, value: &T) {
+fn store_cached<T: serde::Serialize>(
+    cache: &cue_cache::JsonCache,
+    key: &impl serde::Serialize,
+    value: &T,
+) {
     if let Err(err) = cache.store(key, value) {
         tracing::warn!(error = %err, "could not store cache entry");
     }
@@ -459,5 +571,108 @@ fn print_media_summary(media: &Media) {
             "  audio:      #{} {} ({} Hz, {} ch)",
             stream.index, stream.codec, stream.sample_rate_hz, stream.channels
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn analysis_cache_identity_includes_canonical_language() {
+        let english = AnalysisCacheKey {
+            version: 3,
+            normalized_hash: "same-normalized-text",
+            language: "en",
+            endpoint: "https://gateway.example/v1",
+            model: "model",
+            prompt_version: cue_analysis::PROMPT_VERSION,
+        };
+        let dutch = AnalysisCacheKey {
+            language: "nl",
+            ..english
+        };
+
+        assert_ne!(
+            serde_json::to_vec(&english).unwrap(),
+            serde_json::to_vec(&dutch).unwrap()
+        );
+    }
+
+    #[test]
+    fn provider_endpoints_participate_in_cache_identity() {
+        let normalization_a = NormalizationCacheKey {
+            version: 2,
+            transcript_hash: "transcript",
+            provider: "ollama",
+            endpoint: normalized_endpoint("http://ollama-a:11434/"),
+            styling: "style",
+            structure: "structure",
+            context: "context",
+        };
+        let normalization_b = NormalizationCacheKey {
+            endpoint: normalized_endpoint("http://ollama-b:11434"),
+            ..normalization_a
+        };
+        assert_ne!(
+            serde_json::to_vec(&normalization_a).unwrap(),
+            serde_json::to_vec(&normalization_b).unwrap()
+        );
+
+        let analysis_a = AnalysisCacheKey {
+            version: 3,
+            normalized_hash: "normalized",
+            language: "en",
+            endpoint: normalized_endpoint("https://gateway-a.example/v1/"),
+            model: "model",
+            prompt_version: cue_analysis::PROMPT_VERSION,
+        };
+        let analysis_b = AnalysisCacheKey {
+            endpoint: normalized_endpoint("https://gateway-b.example/v1"),
+            ..analysis_a
+        };
+        assert_ne!(
+            serde_json::to_vec(&analysis_a).unwrap(),
+            serde_json::to_vec(&analysis_b).unwrap()
+        );
+
+        let analysis_a_with_slash = AnalysisCacheKey {
+            endpoint: normalized_endpoint("https://gateway-a.example/v1/"),
+            ..analysis_a
+        };
+        assert_eq!(
+            serde_json::to_vec(&analysis_a).unwrap(),
+            serde_json::to_vec(&analysis_a_with_slash).unwrap()
+        );
+    }
+
+    #[test]
+    fn readiness_errors_are_not_remembered_for_later_files() {
+        let mut readiness = None;
+
+        let first = remember_successful_readiness(&mut readiness, Err("temporary outage".into()));
+        assert_eq!(first.unwrap_err(), "temporary outage");
+        assert_eq!(readiness, None);
+
+        let second = remember_successful_readiness(&mut readiness, Ok(true));
+        assert!(second.unwrap());
+        assert_eq!(readiness, Some(true));
+    }
+
+    #[test]
+    fn process_modes_define_complete_or_transcript_only_stage_contracts() {
+        use cue_core::PipelineStage;
+
+        assert!(
+            PipelineStage::ALL
+                .into_iter()
+                .all(|stage| ProcessMode::Full.includes(stage))
+        );
+        assert!(ProcessMode::TranscriptOnly.includes(PipelineStage::Inspect));
+        assert!(ProcessMode::TranscriptOnly.includes(PipelineStage::Extract));
+        assert!(ProcessMode::TranscriptOnly.includes(PipelineStage::Transcribe));
+        assert!(ProcessMode::TranscriptOnly.includes(PipelineStage::Render));
+        assert!(!ProcessMode::TranscriptOnly.includes(PipelineStage::Normalize));
+        assert!(!ProcessMode::TranscriptOnly.includes(PipelineStage::Analyze));
     }
 }

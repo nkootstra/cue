@@ -6,8 +6,70 @@
 
 use crate::segment::SubtitlePolicy;
 
-/// Wrap cue text into at most `policy.max_lines` balanced lines of at most
-/// `policy.max_chars_per_line` characters each.
+/// The physical lines owned by a pending cue. Words are admitted using the
+/// same greedy layout that will be rendered, so segmentation and wrapping
+/// cannot disagree about capacity.
+#[derive(Debug)]
+pub(crate) struct LineLayout {
+    max_lines: usize,
+    max_chars_per_line: usize,
+    lines: Vec<String>,
+}
+
+impl LineLayout {
+    pub(crate) fn new(max_lines: usize, max_chars_per_line: usize) -> Self {
+        Self {
+            max_lines,
+            max_chars_per_line,
+            lines: Vec::new(),
+        }
+    }
+
+    pub(crate) fn try_append(&mut self, word: &str) -> bool {
+        let word_len = word.chars().count();
+        let Some(last) = self.lines.last_mut() else {
+            // Content is never discarded. An indivisible word that is wider
+            // than the configured line width is allowed as its own cue.
+            self.lines.push(word.to_string());
+            return true;
+        };
+
+        // An overlong indivisible word occupies a cue by itself.
+        if last.chars().count() > self.max_chars_per_line {
+            return false;
+        }
+
+        if last.chars().count() + 1 + word_len <= self.max_chars_per_line {
+            last.push(' ');
+            last.push_str(word);
+            return true;
+        }
+
+        if word_len > self.max_chars_per_line || self.lines.len() >= self.max_lines {
+            return false;
+        }
+
+        self.lines.push(word.to_string());
+        true
+    }
+
+    fn push_new_line(&mut self, word: &str) {
+        self.lines.push(word.to_string());
+    }
+
+    pub(crate) fn into_text(self) -> String {
+        if self.lines.len() == 2 {
+            balance_two_lines(self.lines, self.max_chars_per_line)
+        } else {
+            join_lines(self.lines)
+        }
+    }
+}
+
+/// Wrap cue text greedily into balanced lines of at most
+/// `policy.max_chars_per_line` characters each. This standalone utility may
+/// exceed `policy.max_lines` to preserve pathological input; runtime cue
+/// construction enforces the configured line count while admitting words.
 ///
 /// Returns the original text untouched when it already fits. When a single
 /// word exceeds the line width the algorithm degrades gracefully rather
@@ -23,41 +85,18 @@ pub fn break_lines(text: &str, policy: &SubtitlePolicy) -> String {
         return text.to_string();
     }
 
-    let greedy = greedy_wrap(&words, policy);
-
-    // Balance two-line results so the first line is not disproportionately
-    // long — standard subtitle practice.
-    if greedy.len() == 2 {
-        balance_two_lines(greedy, policy)
-    } else {
-        join_lines(greedy)
-    }
-}
-
-fn greedy_wrap(words: &[&str], policy: &SubtitlePolicy) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    let mut current = String::new();
-
+    let mut layout = LineLayout::new(usize::MAX, policy.max_chars_per_line);
     for word in words {
-        if current.is_empty() {
-            current.push_str(word);
-        } else if current.chars().count() + 1 + word.chars().count() <= policy.max_chars_per_line {
-            current.push(' ');
-            current.push_str(word);
-        } else {
-            lines.push(std::mem::take(&mut current));
-            current.push_str(word);
+        if !layout.try_append(word) {
+            layout.push_new_line(word);
         }
     }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    lines
+    layout.into_text()
 }
 
 /// Move trailing words from line 1 down while both lines stay within
 /// budget and the result gets more balanced.
-fn balance_two_lines(mut lines: Vec<String>, policy: &SubtitlePolicy) -> String {
+fn balance_two_lines(mut lines: Vec<String>, max_chars_per_line: usize) -> String {
     if lines.len() != 2 {
         return join_lines(lines);
     }
@@ -70,7 +109,7 @@ fn balance_two_lines(mut lines: Vec<String>, policy: &SubtitlePolicy) -> String 
         };
         let new_second_len = tail.chars().count() + 1 + lines[1].chars().count();
         // Only rebalance while line 1 remains strictly longer.
-        if head.chars().count() >= new_second_len && new_second_len <= policy.max_chars_per_line {
+        if head.chars().count() >= new_second_len && new_second_len <= max_chars_per_line {
             lines[0] = head.to_string();
             lines[1] = format!("{tail} {}", lines[1]);
         } else {
@@ -141,9 +180,7 @@ mod tests {
     }
 
     #[test]
-    fn three_lines_are_possible_for_wide_budgets_only_via_segmentation() {
-        // The breaker itself caps at max_lines via segmentation budgets;
-        // verify a pathological input still round-trips its words.
+    fn pathological_input_may_exceed_max_lines_to_preserve_content() {
         let text = "one two three four five six seven eight";
         let result = break_lines(text, &policy(8));
         assert_eq!(

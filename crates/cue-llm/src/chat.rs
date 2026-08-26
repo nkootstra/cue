@@ -93,16 +93,11 @@ impl ChatClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            // Body may echo request contents; only surface it at debug.
-            let body = response.text().await.unwrap_or_default();
-            tracing::debug!(%status, %body, "gateway error body");
             return Err(CueError::new(
                 cue_core::PipelineStage::Analyze,
                 format!("the LLM gateway rejected a request ({status})"),
             )
-            .remedy(
-                "verify the model name and API key; run with --verbose for the response body",
-            ));
+            .remedy("verify the configured gateway URL, model name, and API key"));
         }
 
         let parsed: WireResponse = response
@@ -229,6 +224,7 @@ mod tests {
         // The failing response body must not leak into the rendered error.
         assert!(!rendered.contains("secret-input"), "{rendered}");
         assert!(rendered.contains("401"), "{rendered}");
+        assert!(!rendered.contains("response body"), "{rendered}");
     }
 
     #[test]

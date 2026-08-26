@@ -192,10 +192,12 @@ dependencies = [
  "indicatif",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "usage-rs",
+ "wiremock",
 ]
 
 [[package]]
@@ -207,6 +209,7 @@ dependencies = [
  "thiserror",
  "toml",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -229,6 +232,7 @@ dependencies = [
  "cue-core",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]

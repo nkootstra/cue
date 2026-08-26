@@ -26,3 +26,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 usage.workspace = true
 
 [dev-dependencies]
+tempfile = "3"
+wiremock = "0.6"

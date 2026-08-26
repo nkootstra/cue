@@ -13,6 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use url::{Host, Url};
 
 use crate::error::CueError;
 
@@ -115,7 +116,6 @@ pub struct SubtitlesConfig {
     pub max_chars_per_line: usize,
     #[serde(default = "default_max_duration_ms")]
     pub max_duration_ms: u64,
-    pub max_chars_per_second: Option<f32>,
 }
 
 fn default_subtitle_formats() -> Vec<SubtitleFormat> {
@@ -141,7 +141,6 @@ impl Default for SubtitlesConfig {
             max_lines: default_max_lines(),
             max_chars_per_line: default_max_chars_per_line(),
             max_duration_ms: default_max_duration_ms(),
-            max_chars_per_second: None,
         }
     }
 }
@@ -283,7 +282,6 @@ partial_section!(
     max_lines: usize,
     max_chars_per_line: usize,
     max_duration_ms: u64,
-    max_chars_per_second: Option<f32>,
 );
 
 partial_section!(
@@ -295,7 +293,7 @@ partial_section!(
 );
 
 /// Merge layers into a total config. Earlier layers win.
-pub fn resolve(layers: &[&PartialConfig]) -> Config {
+pub fn resolve(layers: &[&PartialConfig]) -> Result<Config, CueError> {
     let mut config = Config::default();
     for layer in layers.iter().rev() {
         layer
@@ -312,7 +310,67 @@ pub fn resolve(layers: &[&PartialConfig]) -> Config {
         }
         layer.analysis.clone().apply_to(&mut config.analysis);
     }
-    config
+    validate_normalization(&config.normalization)?;
+    validate_subtitles(&config.subtitles)?;
+    Ok(config)
+}
+
+fn validate_normalization(config: &NormalizationConfig) -> Result<(), CueError> {
+    let url = Url::parse(&config.ollama_url).map_err(|error| {
+        CueError::general("normalization.ollama_url must be a valid local URL")
+            .because(error.to_string())
+            .remedy("set normalization.ollama_url to a localhost or loopback address")
+    })?;
+
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(
+            CueError::general("normalization.ollama_url must be an HTTP(S) URL")
+                .because(format!("{} uses an unsupported scheme", config.ollama_url))
+                .remedy("set normalization.ollama_url to a local HTTP(S) Ollama endpoint"),
+        );
+    }
+
+    let is_local = match url.host() {
+        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => {
+            address.is_loopback()
+                || address
+                    .to_ipv4_mapped()
+                    .is_some_and(|address| address.is_loopback())
+        }
+        None => false,
+    };
+
+    if !is_local {
+        return Err(
+            CueError::general("normalization.ollama_url must point to the local machine")
+                .because(format!(
+                    "{} is not a localhost or loopback address",
+                    config.ollama_url
+                ))
+                .remedy("run Ollama locally and use a URL such as http://localhost:11434"),
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_subtitles(config: &SubtitlesConfig) -> Result<(), CueError> {
+    for (field, value) in [
+        ("max_lines", config.max_lines as u64),
+        ("max_chars_per_line", config.max_chars_per_line as u64),
+        ("max_duration_ms", config.max_duration_ms),
+    ] {
+        if value == 0 {
+            return Err(
+                CueError::general(format!("subtitles.{field} must be greater than zero")).remedy(
+                    format!("set subtitles.{field} to a positive value in cue.toml"),
+                ),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Parse user configuration from TOML text.
@@ -385,12 +443,21 @@ struct RawToml {
 struct PartialSubtitlesRaw {
     #[serde(default)]
     formats: Option<Vec<String>>,
+    /// One-release compatibility input. Reading speed was never enforced,
+    /// so retaining it in resolved state implied behavior that did not exist.
+    #[serde(default)]
+    max_chars_per_second: Option<f32>,
     #[serde(flatten)]
     rest: PartialSubtitles,
 }
 
 impl RawToml {
     fn finish(self) -> Result<PartialConfig, CueError> {
+        if self.subtitles.max_chars_per_second.is_some() {
+            tracing::warn!(
+                "subtitles.max_chars_per_second is deprecated and ignored; remove it from cue.toml"
+            );
+        }
         let formats = match self.subtitles.formats {
             Some(names) => Some(
                 names
@@ -438,7 +505,7 @@ mod tests {
 
     #[test]
     fn resolve_empty_layers_yields_defaults() {
-        let config = resolve(&[&PartialConfig::default(), &PartialConfig::default()]);
+        let config = resolve(&[&PartialConfig::default(), &PartialConfig::default()]).unwrap();
         assert_eq!(config, Config::default());
     }
 
@@ -464,7 +531,7 @@ mod tests {
             ..Default::default()
         };
 
-        let config = resolve(&[&cli_layer, &file_layer]);
+        let config = resolve(&[&cli_layer, &file_layer]).unwrap();
         // CLI wins over file...
         assert_eq!(config.transcription.model, "tiny");
         // ...but untouched CLI fields fall through to the file layer.
@@ -486,7 +553,7 @@ mod tests {
             })),
             ..Default::default()
         };
-        let config = resolve(&[&no_llm, &with_llm]);
+        let config = resolve(&[&no_llm, &with_llm]).unwrap();
         assert_eq!(config.llm, None);
     }
 
@@ -496,10 +563,82 @@ mod tests {
             "[normalization]\nstyling = \"formal\"\nstructure = \"bullets\"\ncontext = \"technical\"\n",
         )
         .unwrap();
-        let config = resolve(&[&partial]);
+        let config = resolve(&[&partial]).unwrap();
         assert_eq!(config.normalization.styling, "formal");
         assert_eq!(config.normalization.structure, "bullets");
         assert_eq!(config.normalization.context, "technical");
+    }
+
+    #[test]
+    fn normalization_accepts_localhost_and_loopback_urls() {
+        for ollama_url in [
+            "http://localhost:11434",
+            "http://LOCALHOST:11434/api",
+            "http://127.0.0.1:11434",
+            "http://127.42.0.9:11434",
+            "http://[::1]:11434",
+            "http://[::ffff:127.0.0.1]:11434",
+        ] {
+            let layer = PartialConfig {
+                normalization: PartialNormalization {
+                    ollama_url: Some(ollama_url.into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            resolve(&[&layer])
+                .unwrap_or_else(|error| panic!("expected {ollama_url} to be accepted: {error}"));
+        }
+    }
+
+    #[test]
+    fn normalization_rejects_remote_and_misleading_urls() {
+        for ollama_url in [
+            "https://ollama.example.com",
+            "http://192.168.1.8:11434",
+            "http://localhost.example.com:11434",
+            "http://localhost@ollama.example.com:11434",
+        ] {
+            let layer = PartialConfig {
+                normalization: PartialNormalization {
+                    ollama_url: Some(ollama_url.into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            let error = resolve(&[&layer]).unwrap_err().to_string();
+            assert!(
+                error.contains("local machine"),
+                "unexpected error for {ollama_url}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalization_rejects_invalid_or_hostless_urls() {
+        for ollama_url in [
+            "localhost:11434",
+            "file:///tmp/ollama.sock",
+            "ftp://localhost:11434",
+        ] {
+            let layer = PartialConfig {
+                normalization: PartialNormalization {
+                    ollama_url: Some(ollama_url.into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            let error = resolve(&[&layer]).unwrap_err().to_string();
+            assert!(
+                error.contains("valid local URL")
+                    || error.contains("local machine")
+                    || error.contains("HTTP(S) URL"),
+                "unexpected error for {ollama_url}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -529,7 +668,7 @@ description = true
 chapters = true
 "#;
         let partial = parse_toml(text).unwrap();
-        let config = resolve(&[&partial]);
+        let config = resolve(&[&partial]).unwrap();
 
         assert_eq!(config.transcription.model, "large-v3-turbo");
         assert_eq!(config.normalization.ollama_url, "http://localhost:11434");
@@ -563,6 +702,57 @@ chapters = true
         assert!(
             err.to_string().contains("unknown subtitle format \"ass\""),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn zero_subtitle_limits_are_rejected_during_resolution() {
+        for (partial, field) in [
+            (
+                PartialSubtitles {
+                    max_lines: Some(0),
+                    ..Default::default()
+                },
+                "max_lines",
+            ),
+            (
+                PartialSubtitles {
+                    max_chars_per_line: Some(0),
+                    ..Default::default()
+                },
+                "max_chars_per_line",
+            ),
+            (
+                PartialSubtitles {
+                    max_duration_ms: Some(0),
+                    ..Default::default()
+                },
+                "max_duration_ms",
+            ),
+        ] {
+            let err = resolve(&[&PartialConfig {
+                subtitles: partial,
+                ..Default::default()
+            }])
+            .unwrap_err();
+            let rendered = err.to_string();
+            assert!(rendered.contains(field), "{rendered}");
+            assert!(rendered.contains("greater than zero"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn legacy_reading_speed_key_is_accepted_but_ignored() {
+        let partial =
+            parse_toml("[subtitles]\nmax_chars_per_second = 17.0\nmax_chars_per_line = 21\n")
+                .unwrap();
+        let config = resolve(&[&partial]).unwrap();
+
+        assert_eq!(config.subtitles.max_chars_per_line, 21);
+        assert!(
+            !serde_json::to_string(&config)
+                .unwrap()
+                .contains("max_chars_per_second")
         );
     }
 

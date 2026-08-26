@@ -3,23 +3,20 @@
 //! Keeping this pure (no I/O) makes the adapter contract testable without
 //! spawning processes or models.
 
-use cue_core::{Segment, TRANSCRIPT_SCHEMA_VERSION, Transcript, Word};
+use cue_core::{
+    CueError, PipelineStage, Result, Segment, TRANSCRIPT_SCHEMA_VERSION, Transcript, Word,
+};
 use serde::Deserialize;
 
 /// Root object emitted by the faster-whisper worker on stdout.
 #[derive(Debug, Deserialize)]
 pub struct WorkerOutput {
-    #[serde(default = "default_version")]
     pub version: u32,
     pub language: Option<String>,
     #[serde(default)]
     pub duration: Option<f64>,
     #[serde(default)]
     pub segments: Vec<WorkerSegment>,
-}
-
-fn default_version() -> u32 {
-    1
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,7 +54,21 @@ impl WorkerOutput {
     ///
     /// Words missing timestamps fall back to their segment bounds so the
     /// word list stays time-ordered and total.
-    pub fn into_transcript(self) -> Transcript {
+    pub fn into_transcript(self) -> Result<Transcript> {
+        if self.version != 1 {
+            return Err(CueError::new(
+                PipelineStage::Transcribe,
+                "the faster-whisper worker uses an incompatible protocol",
+            )
+            .because(format!(
+                "worker reported protocol version {}, but cue requires protocol version 1",
+                self.version
+            ))
+            .remedy(
+                "run `cue doctor`; if CUE_FASTER_WHISPER_SCRIPT is set, update or remove that override",
+            ));
+        }
+
         let language = self.language.unwrap_or_else(|| "unknown".to_string());
         let duration_ms = self.duration.map(seconds_to_ms).unwrap_or(0);
 
@@ -108,13 +119,13 @@ impl WorkerOutput {
             });
         }
 
-        Transcript {
+        Ok(Transcript {
             schema_version: TRANSCRIPT_SCHEMA_VERSION,
             language,
             duration_ms,
             words,
             segments,
-        }
+        })
     }
 }
 
@@ -150,7 +161,7 @@ mod tests {
     #[test]
     fn maps_fixture_onto_canonical_transcript() {
         let output: WorkerOutput = serde_json::from_str(FIXTURE).unwrap();
-        let transcript = output.into_transcript();
+        let transcript = output.into_transcript().unwrap();
 
         assert_eq!(transcript.schema_version, TRANSCRIPT_SCHEMA_VERSION);
         assert_eq!(transcript.language, "en");
@@ -181,11 +192,11 @@ mod tests {
     #[test]
     fn segments_without_words_synthesize_word_entries() {
         let json = r#"{
-            "language": "en", "duration": 1.0,
+            "version": 1, "language": "en", "duration": 1.0,
             "segments": [{"id": 0, "start": 0.1, "end": 0.9, "text": " no word timings"}]
         }"#;
         let output: WorkerOutput = serde_json::from_str(json).unwrap();
-        let transcript = output.into_transcript();
+        let transcript = output.into_transcript().unwrap();
 
         assert_eq!(transcript.words.len(), 3);
         assert_eq!(transcript.segments[0].word_start, 0);
@@ -198,8 +209,8 @@ mod tests {
     #[test]
     fn empty_output_maps_to_empty_transcript() {
         let output: WorkerOutput =
-            serde_json::from_str(r#"{"language": null, "duration": 0}"#).unwrap();
-        let transcript = output.into_transcript();
+            serde_json::from_str(r#"{"version": 1, "language": null, "duration": 0}"#).unwrap();
+        let transcript = output.into_transcript().unwrap();
         assert_eq!(transcript.language, "unknown");
         assert!(transcript.words.is_empty());
         assert!(transcript.segments.is_empty());
@@ -215,9 +226,40 @@ mod tests {
 
     #[test]
     fn unknown_fields_are_tolerated_for_forward_compatibility() {
-        let json = r#"{"language": "en", "future_field": true, "segments": []}"#;
+        let json = r#"{"version": 1, "language": "en", "future_field": true, "segments": []}"#;
         let output: WorkerOutput =
             serde_json::from_str(json).expect("worker v1 must tolerate unknown fields");
-        assert_eq!(output.into_transcript().language, "en");
+        assert_eq!(output.into_transcript().unwrap().language, "en");
+    }
+
+    #[test]
+    fn worker_version_is_required() {
+        let error = serde_json::from_str::<WorkerOutput>(
+            r#"{"language": "en", "duration": 0, "segments": []}"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("version"), "{error}");
+    }
+
+    #[test]
+    fn unsupported_worker_versions_are_rejected_before_mapping() {
+        for version in [0, 2, u32::MAX] {
+            let output: WorkerOutput = serde_json::from_value(serde_json::json!({
+                "version": version,
+                "language": "en",
+                "duration": 0,
+                "segments": [{"id": 0, "start": 0, "end": 1, "text": "must not map"}]
+            }))
+            .unwrap();
+
+            let rendered = output.into_transcript().unwrap_err().to_string();
+            assert!(
+                rendered.contains(&format!("protocol version {version}")),
+                "{rendered}"
+            );
+            assert!(rendered.contains("protocol version 1"), "{rendered}");
+            assert!(rendered.contains("cue doctor"), "{rendered}");
+        }
     }
 }

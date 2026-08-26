@@ -12,7 +12,7 @@ use crate::json::parse_lenient_json;
 
 /// Bump when prompt wording changes in a way that could alter output; this
 /// participates in analysis cache keys.
-pub const PROMPT_VERSION: u32 = 1;
+pub const PROMPT_VERSION: u32 = 2;
 
 /// Chars per analysis chunk. Sized to keep prompts well within small local
 /// model contexts while limiting request count.
@@ -41,9 +41,9 @@ pub struct SpanText {
 
 impl AnalysisInput {
     /// From a normalized transcript.
-    pub fn from_normalized(normalized: &NormalizedTranscript) -> Self {
+    pub fn from_normalized(language: impl Into<String>, normalized: &NormalizedTranscript) -> Self {
         Self {
-            language: "en".to_string(),
+            language: language.into(),
             spans: normalized
                 .chunks
                 .iter()
@@ -180,7 +180,8 @@ fn render_spans(input: &AnalysisInput) -> String {
 
 fn direct_prompt(input: &AnalysisInput) -> String {
     format!(
-        "{SCHEMA_INSTRUCTION}\n\nVideo transcript:\n{}",
+        "{SCHEMA_INSTRUCTION}\n\nTranscript language: {}\n\nVideo transcript:\n{}",
+        input.language,
         render_spans(input)
     )
 }
@@ -342,11 +343,26 @@ mod tests {
             GatewayAnalyzer::new(cue_llm::ChatClient::new("http://127.0.0.1:9", None), "m");
         let result = analyzer
             .analyze(&AnalysisInput {
-                language: "en".into(),
+                language: "de".into(),
                 spans: vec![],
             })
-            .await;
+            .await
+            .unwrap();
         // No request is made; an empty analysis comes back.
-        assert!(result.is_ok());
+        assert_eq!(result.language, "de");
+    }
+
+    #[test]
+    fn normalized_input_preserves_canonical_language() {
+        let normalized = NormalizedTranscript::default();
+        let input = AnalysisInput::from_normalized("nl", &normalized);
+        assert_eq!(input.language, "nl");
+    }
+
+    #[test]
+    fn empty_model_language_falls_back_to_canonical_language() {
+        let raw = r#"{"language":"","title":"Titel","summary":"","topics":[],"key_points":[],"keywords":[]}"#;
+        let analysis = parse_analysis(raw, "nl").unwrap();
+        assert_eq!(analysis.language, "nl");
     }
 }

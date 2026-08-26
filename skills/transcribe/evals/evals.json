@@ -7,9 +7,10 @@
       "expected_output": "A transcript of the clip (transcript.txt) plus subtitle files, produced locally by cue.",
       "files": ["evals/files/clip-01.mp3"],
       "assertions": [
-        "A transcript.txt exists and is non-empty",
-        "transcript.txt contains the word 'observability'",
-        "subtitles.srt and subtitles.vtt both exist"
+        {"name": "transcript is non-empty", "type": "file_nonempty", "path": "eval-basic-transcribe/with_skill/outputs/transcript.txt"},
+        {"name": "transcript contains observability", "type": "contains", "path": "eval-basic-transcribe/with_skill/outputs/transcript.txt", "value": "observability", "case_insensitive": true},
+        {"name": "SRT exists", "type": "file_exists", "path": "eval-basic-transcribe/with_skill/outputs/subtitles.srt"},
+        {"name": "VTT exists", "type": "file_exists", "path": "eval-basic-transcribe/with_skill/outputs/subtitles.vtt"}
       ]
     },
     {
@@ -18,9 +19,11 @@
       "expected_output": "A corrected transcript.txt where the speaker's name and product terms match the context file.",
       "files": ["evals/files/clip-02.mp3", "evals/files/context.md"],
       "assertions": [
-        "transcript.txt uses the spelling 'Doe' for the speaker's name",
-        "transcript.txt uses the product spelling 'OpenTelemetry' (not a lowercased or split variant)",
-        "transcript.json still exists and is unchanged (the raw canonical transcript is kept intact)"
+        {"name": "transcript is non-empty", "type": "file_nonempty", "path": "eval-context-correction/with_skill/outputs/transcript.txt"},
+        {"name": "speaker name uses Doe", "type": "contains", "path": "eval-context-correction/with_skill/outputs/transcript.txt", "value": "John Doe", "case_insensitive": true},
+        {"name": "product uses OpenTelemetry", "type": "contains", "path": "eval-context-correction/with_skill/outputs/transcript.txt", "value": "OpenTelemetry", "case_insensitive": false},
+        {"name": "split product spelling is absent", "type": "not_contains", "path": "eval-context-correction/with_skill/outputs/transcript.txt", "value": "open telemetry", "case_insensitive": true},
+        {"name": "canonical transcript retains raw product wording", "type": "contains", "path": "eval-context-correction/with_skill/outputs/transcript.json", "value": "open telemetry", "case_insensitive": true}
       ]
     },
     {
@@ -33,10 +36,11 @@
         "evals/files/context.md"
       ],
       "assertions": [
-        "Both clips produced a transcript.txt that is non-empty",
-        "Both transcripts use the spelling 'Doe' for the speaker's name",
-        "Both transcripts use the product spelling 'OpenTelemetry' where the term appears",
-        "The second transcript contains the term 'OpenTelemetry'"
+        {"name": "clip 1 transcript is non-empty", "type": "file_nonempty", "path": "eval-batch-context/with_skill/outputs/clip-01/transcript.txt"},
+        {"name": "clip 2 transcript is non-empty", "type": "file_nonempty", "path": "eval-batch-context/with_skill/outputs/clip-02/transcript.txt"},
+        {"name": "clip 1 speaker uses Doe", "type": "contains", "path": "eval-batch-context/with_skill/outputs/clip-01/transcript.txt", "value": "John Doe", "case_insensitive": true},
+        {"name": "clip 2 speaker uses Doe", "type": "contains", "path": "eval-batch-context/with_skill/outputs/clip-02/transcript.txt", "value": "John Doe", "case_insensitive": true},
+        {"name": "clip 2 product uses OpenTelemetry", "type": "contains", "path": "eval-batch-context/with_skill/outputs/clip-02/transcript.txt", "value": "OpenTelemetry", "case_insensitive": false}
       ]
     },
     {
@@ -48,11 +52,13 @@
         "evals/files/context.md"
       ],
       "assertions": [
-        "A corrections.md manifest exists and maps the garbled term to 'OpenTelemetry'",
-        "cue correct was run (or the fix is otherwise applied) and the pre-existing transcript.txt now uses 'OpenTelemetry'",
-        "The pre-existing output folder's transcript.json is unchanged from the seeded state",
-        "The pre-existing output folder's subtitles received the same correction",
-        "The new clip produced a transcript.txt that is non-empty"
+        {"name": "manifest maps the garbled term", "type": "contains", "path": "eval-existing-correction/with_skill/outputs/corrections.md", "value": "open telemetry -> OpenTelemetry", "case_insensitive": true},
+        {"name": "existing transcript is non-empty", "type": "file_nonempty", "path": "eval-existing-correction/with_skill/outputs/1. welcome.cue/transcript.txt"},
+        {"name": "existing transcript is corrected", "type": "contains", "path": "eval-existing-correction/with_skill/outputs/1. welcome.cue/transcript.txt", "value": "OpenTelemetry", "case_insensitive": false},
+        {"name": "existing transcript has no garble", "type": "not_contains", "path": "eval-existing-correction/with_skill/outputs/1. welcome.cue/transcript.txt", "value": "open telemetry", "case_insensitive": true},
+        {"name": "existing subtitles are corrected", "type": "contains", "path": "eval-existing-correction/with_skill/outputs/1. welcome.cue/subtitles.srt", "value": "OpenTelemetry", "case_insensitive": false},
+        {"name": "canonical transcript is unchanged", "type": "files_equal", "path": "eval-existing-correction/with_skill/outputs/1. welcome.cue/transcript.json", "other_path": ".baselines/with_skill-transcript.json"},
+        {"name": "new clip transcript is non-empty", "type": "file_nonempty", "path": "eval-existing-correction/with_skill/outputs/2. what we cover.cue/transcript.txt"}
       ]
     }
   ]

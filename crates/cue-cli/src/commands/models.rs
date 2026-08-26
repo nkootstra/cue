@@ -1,36 +1,34 @@
 //! `cue models` — transcription and normalization model management.
 
-use cue_core::config::{PartialConfig, load_user_config, resolve};
 use cue_llm::OllamaAdmin;
 
-use crate::cli::{ModelsArgs, ModelsCommand};
+use crate::cli::ModelsCommand;
 use crate::render::println_line;
 
 /// The `models` subcommands touch Ollama; run them on the async runtime.
-pub async fn run(args: ModelsArgs) -> i32 {
-    match args.command {
-        None => {
-            println_line("Manage transcription and normalization models.");
-            println_line("\nUsage:");
-            println_line("    cue models list           List models relevant to cue");
-            println_line("    cue models check          Verify configured models load");
-            println_line("    cue models install s1     Create the S1 model in Ollama");
-            0
-        }
-        Some(ModelsCommand::List) => list().await,
-        Some(ModelsCommand::Check) => check().await,
-        Some(ModelsCommand::Install(install)) => install_model(&install.model).await,
+pub fn print_help() -> i32 {
+    println_line("Manage transcription and normalization models.");
+    println_line("\nUsage:");
+    println_line("    cue models list           List models relevant to cue");
+    println_line("    cue models check          Verify configured models load");
+    println_line("    cue models install s1     Create the S1 model in Ollama");
+    0
+}
+
+pub async fn run(command: ModelsCommand, config: &cue_core::Config) -> i32 {
+    match command {
+        ModelsCommand::List => list(config).await,
+        ModelsCommand::Check => check(config).await,
+        ModelsCommand::Install(install) => install_model(&install.model, config).await,
     }
 }
 
-fn ollama_url() -> String {
-    let user = load_user_config().unwrap_or_default();
-    let config = resolve(&[&PartialConfig::default(), &user]);
-    config.normalization.ollama_url
+fn configured_admin(config: &cue_core::Config) -> OllamaAdmin {
+    OllamaAdmin::new(&config.normalization.ollama_url)
 }
 
-async fn list() -> i32 {
-    let admin = OllamaAdmin::new(ollama_url());
+async fn list(config: &cue_core::Config) -> i32 {
+    let admin = configured_admin(config);
     match admin.list_models().await {
         Ok(models) => {
             if models.is_empty() {
@@ -57,33 +55,37 @@ async fn list() -> i32 {
     }
 }
 
-async fn check() -> i32 {
-    let admin = OllamaAdmin::new(ollama_url());
+async fn check(config: &cue_core::Config) -> i32 {
+    let admin = configured_admin(config);
     match cue_normalization::s1_ready(&admin).await {
-        true => {
+        Ok(true) => {
             println_line(&format!(
                 "{} is installed and ready for normalization.",
                 cue_normalization::S1_MODEL_NAME
             ));
             0
         }
-        false => {
+        Ok(false) => {
             println_line(&format!(
                 "{} is not installed. Run: cue models install s1",
                 cue_normalization::S1_MODEL_NAME
             ));
             1
         }
+        Err(err) => {
+            eprintln!("{err}");
+            1
+        }
     }
 }
 
-async fn install_model(model: &str) -> i32 {
+async fn install_model(model: &str, config: &cue_core::Config) -> i32 {
     if model != "s1" {
         eprintln!("unknown model \"{model}\" — the first supported model is \"s1\"");
         return 2;
     }
 
-    let admin = OllamaAdmin::new(ollama_url());
+    let admin = configured_admin(config);
     println_line(&format!(
         "Installing {} (pulls {} on first use; this can take a while)...",
         cue_normalization::S1_MODEL_NAME,

@@ -3,7 +3,6 @@
 //! Required tools gate the exit code; optional integrations (Ollama, S1,
 //! an LLM gateway) are reported without failing local-only setups.
 
-use cue_core::config::{PartialConfig, load_user_config, resolve};
 use cue_llm::OllamaAdmin;
 use cue_media::{ToolReport, check_environment};
 
@@ -11,9 +10,9 @@ use crate::cli::DoctorArgs;
 use crate::render::{println_line, tool_line};
 
 /// Run environment checks and render them. Returns the process exit code.
-pub async fn run(args: DoctorArgs) -> i32 {
+pub async fn run(args: DoctorArgs, config: &cue_core::Config) -> i32 {
     println_line("Checking local environment...\n");
-    let env = check_environment().await;
+    let (env, integrations) = tokio::join!(check_environment(), integration_lines(config));
 
     println_line("Required:");
     for report in &env.reports {
@@ -21,9 +20,7 @@ pub async fn run(args: DoctorArgs) -> i32 {
     }
 
     println_line("\nOptional (not required for local transcription):");
-    let user = load_user_config().unwrap_or_default();
-    let config = resolve(&[&PartialConfig::default(), &user]);
-    for line in integration_lines(&config).await {
+    for line in integrations {
         println_line(&line);
     }
     println_line("\nLocal transcription and subtitles work without any of these.");
@@ -60,23 +57,26 @@ pub async fn integration_lines(config: &cue_core::Config) -> Vec<String> {
     // Ollama reachability and S1 presence share one probe.
     let admin = OllamaAdmin::new(&config.normalization.ollama_url);
     match admin.list_models().await {
-        Ok(_) => {
+        Ok(models) => {
             lines.push(format!(
                 "{:<10} ok       {}",
                 "Ollama", config.normalization.ollama_url
             ));
             lines.push(s1_line(
-                cue_normalization::s1_ready(&admin).await,
+                cue_normalization::s1_ready_in(&models),
                 cue_normalization::S1_MODEL_NAME,
             ));
         }
         Err(reason) => {
             lines.push(format!(
-                "{:<10} not configured  not reachable at {}",
+                "{:<10} error    probe failed at {}",
                 "Ollama", config.normalization.ollama_url
             ));
             tracing::debug!(reason = %reason, "ollama probe failed");
-            lines.push(s1_line(false, cue_normalization::S1_MODEL_NAME));
+            lines.push(format!(
+                "{:<10} unknown  Ollama probe failed; model presence was not checked",
+                "S1"
+            ));
         }
     }
 
@@ -156,13 +156,44 @@ fn python_for_provisioning(env: &cue_media::checks::Environment) -> Option<std::
     let report: &ToolReport = env.python()?;
     match &report.status {
         cue_media::ToolStatus::Available { path, .. } => Some(std::path::PathBuf::from(path)),
-        _ => cue_media::tools::find_on_path("python3"),
+        cue_media::ToolStatus::Missing | cue_media::ToolStatus::Error(_) => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn integrations_derive_ollama_and_s1_from_one_probe() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"models":[{{"name":"{}"}}]}}"#,
+                cue_normalization::S1_MODEL_NAME
+            )))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut config = cue_core::Config::default();
+        config.normalization.ollama_url = server.uri();
+        let lines = integration_lines(&config).await;
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Ollama") && line.contains("ok"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("S1") && line.contains("ready"))
+        );
+    }
 
     #[test]
     fn s1_line_distinguishes_installed_from_not_configured() {
@@ -200,5 +231,30 @@ mod tests {
             line.contains("CURE_DEFINITELY_UNSET_VAR_12345 is unset"),
             "{line}"
         );
+    }
+
+    #[test]
+    fn provisioning_uses_only_the_checked_supported_python() {
+        let available = cue_media::checks::Environment {
+            reports: vec![ToolReport {
+                name: "Python".into(),
+                status: cue_media::ToolStatus::Available {
+                    path: "/opt/python3".into(),
+                    version: "Python 3.10.0".into(),
+                },
+            }],
+        };
+        assert_eq!(
+            python_for_provisioning(&available),
+            Some(std::path::PathBuf::from("/opt/python3"))
+        );
+
+        let rejected = cue_media::checks::Environment {
+            reports: vec![ToolReport {
+                name: "Python".into(),
+                status: cue_media::ToolStatus::Error("Python 3.9 is unsupported".into()),
+            }],
+        };
+        assert_eq!(python_for_provisioning(&rejected), None);
     }
 }

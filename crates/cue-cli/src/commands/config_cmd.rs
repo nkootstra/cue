@@ -20,7 +20,13 @@ pub fn run(args: ConfigArgs) -> i32 {
     let path = user_config_path();
     match load_user_config() {
         Ok(user) => {
-            let resolved = resolve(&[&PartialConfig::default(), &user]);
+            let resolved = match resolve(&[&PartialConfig::default(), &user]) {
+                Ok(resolved) => resolved,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return 1;
+                }
+            };
             match serde_json::to_string_pretty(&resolved) {
                 Ok(json) => println_line(&json),
                 Err(e) => {

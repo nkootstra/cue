@@ -19,6 +19,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -43,3 +48,14 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      - name: Release contract tests
+        run: |
+          python3 scripts/test_render_formula.py
+          python3 scripts/test_release_contract.py
+
+      - name: Installer mapping tests
+        run: bash scripts/test_install_mapping.sh
+
+      - name: Skill eval harness self-test
+        run: bash scripts/skill-eval-harness.sh --self-test

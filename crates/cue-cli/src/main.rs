@@ -10,6 +10,7 @@ mod render;
 use std::process::ExitCode;
 
 use cli::{Command, Cue};
+use cue_core::config::{load_user_config, resolve};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -17,23 +18,54 @@ async fn main() -> ExitCode {
     logging::init(cli.verbose);
     tracing::debug!("parsed CLI: {:?}", cli);
 
-    let code = match cli.command {
-        Some(Command::Doctor(args)) => commands::doctor::run(args).await,
-        Some(Command::Transcribe(ref args)) => {
-            commands::process::run_stopped(
-                &cli,
-                &args.files,
-                Some(cue_core::PipelineStage::Transcribe),
-            )
-            .await
+    let code = match dispatch(cli).await {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("{err}");
+            1
         }
-        Some(Command::Models(args)) => commands::models::run(args).await,
-        Some(Command::Config(args)) => commands::config_cmd::run(args),
-        Some(Command::Cache(args)) => commands::cache_cmd::run(args.command),
-        Some(Command::Skill(args)) => commands::skill::run(args).await,
-        Some(Command::Correct(args)) => commands::correct::run(args),
-        None => commands::process::run(&cli).await,
     };
 
     ExitCode::from(code as u8)
+}
+
+async fn dispatch(mut cli: Cue) -> cue_core::Result<i32> {
+    match cli.command.take() {
+        Some(Command::Doctor(args)) => {
+            let config = load_resolved_config()?;
+            Ok(commands::doctor::run(args, &config).await)
+        }
+        Some(Command::Transcribe(args)) => {
+            let config = load_resolved_config()?;
+            Ok(commands::process::run_mode(
+                &cli,
+                &args.files,
+                commands::process::ProcessMode::TranscriptOnly,
+                &config,
+            )
+            .await)
+        }
+        Some(Command::Models(args)) => match args.command {
+            None => Ok(commands::models::print_help()),
+            Some(command) => {
+                let config = load_resolved_config()?;
+                Ok(commands::models::run(command, &config).await)
+            }
+        },
+        Some(Command::Config(args)) => Ok(commands::config_cmd::run(args)),
+        Some(Command::Cache(args)) => Ok(commands::cache_cmd::run(args.command)),
+        Some(Command::Skill(args)) => Ok(commands::skill::run(args).await),
+        Some(Command::Correct(args)) => Ok(commands::correct::run(args)),
+        None => {
+            let config = load_resolved_config()?;
+            Ok(commands::process::run(&cli, &config).await)
+        }
+    }
+}
+
+fn load_resolved_config() -> cue_core::Result<cue_core::Config> {
+    let user = load_user_config()?;
+    let config = resolve(&[&user])?;
+    tracing::debug!(?config, "resolved configuration");
+    Ok(config)
 }
