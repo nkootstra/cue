@@ -186,6 +186,18 @@ mod tests {
     }
 
     #[test]
+    fn first_word_is_preserved_when_starting_each_cue() {
+        let t = transcript(vec![word("first.", 0, 100), word("second.", 200, 300)]);
+
+        let cues = segment(&t, &SubtitlePolicy::default());
+
+        assert_eq!(
+            cues.iter().map(|cue| cue.text.as_str()).collect::<Vec<_>>(),
+            ["first.", "second."]
+        );
+    }
+
+    #[test]
     fn cues_carry_sorted_times_within_themselves() {
         let t = transcript(vec![word("fine.", 100, 400), word("later.", 800, 1_100)]);
         let cues: Vec<Cue> = segment(&t, &SubtitlePolicy::default());

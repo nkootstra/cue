@@ -13,6 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use url::{Host, Url};
 
 use crate::error::CueError;
 
@@ -309,8 +310,50 @@ pub fn resolve(layers: &[&PartialConfig]) -> Result<Config, CueError> {
         }
         layer.analysis.clone().apply_to(&mut config.analysis);
     }
+    validate_normalization(&config.normalization)?;
     validate_subtitles(&config.subtitles)?;
     Ok(config)
+}
+
+fn validate_normalization(config: &NormalizationConfig) -> Result<(), CueError> {
+    let url = Url::parse(&config.ollama_url).map_err(|error| {
+        CueError::general("normalization.ollama_url must be a valid local URL")
+            .because(error.to_string())
+            .remedy("set normalization.ollama_url to a localhost or loopback address")
+    })?;
+
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(
+            CueError::general("normalization.ollama_url must be an HTTP(S) URL")
+                .because(format!("{} uses an unsupported scheme", config.ollama_url))
+                .remedy("set normalization.ollama_url to a local HTTP(S) Ollama endpoint"),
+        );
+    }
+
+    let is_local = match url.host() {
+        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => {
+            address.is_loopback()
+                || address
+                    .to_ipv4_mapped()
+                    .is_some_and(|address| address.is_loopback())
+        }
+        None => false,
+    };
+
+    if !is_local {
+        return Err(
+            CueError::general("normalization.ollama_url must point to the local machine")
+                .because(format!(
+                    "{} is not a localhost or loopback address",
+                    config.ollama_url
+                ))
+                .remedy("run Ollama locally and use a URL such as http://localhost:11434"),
+        );
+    }
+
+    Ok(())
 }
 
 fn validate_subtitles(config: &SubtitlesConfig) -> Result<(), CueError> {
@@ -524,6 +567,78 @@ mod tests {
         assert_eq!(config.normalization.styling, "formal");
         assert_eq!(config.normalization.structure, "bullets");
         assert_eq!(config.normalization.context, "technical");
+    }
+
+    #[test]
+    fn normalization_accepts_localhost_and_loopback_urls() {
+        for ollama_url in [
+            "http://localhost:11434",
+            "http://LOCALHOST:11434/api",
+            "http://127.0.0.1:11434",
+            "http://127.42.0.9:11434",
+            "http://[::1]:11434",
+            "http://[::ffff:127.0.0.1]:11434",
+        ] {
+            let layer = PartialConfig {
+                normalization: PartialNormalization {
+                    ollama_url: Some(ollama_url.into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            resolve(&[&layer])
+                .unwrap_or_else(|error| panic!("expected {ollama_url} to be accepted: {error}"));
+        }
+    }
+
+    #[test]
+    fn normalization_rejects_remote_and_misleading_urls() {
+        for ollama_url in [
+            "https://ollama.example.com",
+            "http://192.168.1.8:11434",
+            "http://localhost.example.com:11434",
+            "http://localhost@ollama.example.com:11434",
+        ] {
+            let layer = PartialConfig {
+                normalization: PartialNormalization {
+                    ollama_url: Some(ollama_url.into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            let error = resolve(&[&layer]).unwrap_err().to_string();
+            assert!(
+                error.contains("local machine"),
+                "unexpected error for {ollama_url}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalization_rejects_invalid_or_hostless_urls() {
+        for ollama_url in [
+            "localhost:11434",
+            "file:///tmp/ollama.sock",
+            "ftp://localhost:11434",
+        ] {
+            let layer = PartialConfig {
+                normalization: PartialNormalization {
+                    ollama_url: Some(ollama_url.into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            let error = resolve(&[&layer]).unwrap_err().to_string();
+            assert!(
+                error.contains("valid local URL")
+                    || error.contains("local machine")
+                    || error.contains("HTTP(S) URL"),
+                "unexpected error for {ollama_url}: {error}"
+            );
+        }
     }
 
     #[test]

@@ -20,6 +20,8 @@ SUPPORTED_CHECKS = {
 
 def load_checks(rubric_path: Path) -> list[dict[str, object]]:
     rubric = json.loads(rubric_path.read_text(encoding="utf-8"))
+    if not isinstance(rubric, dict):
+        raise ValueError("rubric must be an object")
     evals = rubric.get("evals")
     if not isinstance(evals, list) or not evals:
         raise ValueError("rubric must contain a non-empty evals list")
@@ -27,6 +29,8 @@ def load_checks(rubric_path: Path) -> list[dict[str, object]]:
     checks: list[dict[str, object]] = []
     ids: set[int] = set()
     for evaluation in evals:
+        if not isinstance(evaluation, dict):
+            raise ValueError("every eval must be an object")
         eval_id = evaluation.get("id")
         if not isinstance(eval_id, int) or eval_id in ids:
             raise ValueError("every eval must have a unique integer id")

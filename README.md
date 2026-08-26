@@ -192,13 +192,17 @@ model = "large-v3-turbo"
 
 [normalization]
 provider = "s1"
-ollama_url = "http://localhost:11434"
+ollama_url = "http://localhost:11434"         # local endpoints only
 
 [llm]
 base_url = "https://openrouter.ai/api/v1"   # or http://localhost:11434/v1
 model = "model-name"
 api_key_env = "CUE_LLM_API_KEY"             # key read from env, never stored
 ```
+
+S1 normalization is deliberately restricted to `localhost` and IP loopback
+addresses. Remote OpenAI-compatible endpoints remain supported for analysis
+through `llm.base_url`.
 
 ## Development
 

@@ -210,6 +210,7 @@ write_synthetic_success() {
 self_test() {
   local temporary success missing corrected_canonical nonempty before after canonical_before canonical_after
   local traversal_rubric other_path_rubric symlink_rubric outside
+  local non_object_rubric non_object_eval_rubric grade_output grade_status
   temporary="$(mktemp -d "${TMPDIR:-/tmp}/cue-skill-eval-test.XXXXXX")"
   trap "rm -rf '$temporary'" EXIT
   success="$temporary/success"
@@ -280,6 +281,28 @@ EOF
 EOF
   if python3 "$GRADER" --rubric "$symlink_rubric" --workspace "$success" >/dev/null 2>&1; then
     echo "FAIL  grader followed a symlink outside the workspace" >&2
+    return 1
+  fi
+
+  non_object_rubric="$temporary/non-object-rubric.json"
+  printf '[]\n' > "$non_object_rubric"
+  set +e
+  grade_output="$(python3 "$GRADER" --rubric "$non_object_rubric" --workspace "$success" 2>&1)"
+  grade_status=$?
+  set -e
+  if [ "$grade_status" -ne 2 ] || ! printf '%s\n' "$grade_output" | grep -q '^grade error: rubric must be an object$'; then
+    echo "FAIL  grader did not report a non-object rubric as a grade error" >&2
+    return 1
+  fi
+
+  non_object_eval_rubric="$temporary/non-object-eval-rubric.json"
+  printf '{"evals":[[]]}\n' > "$non_object_eval_rubric"
+  set +e
+  grade_output="$(python3 "$GRADER" --rubric "$non_object_eval_rubric" --workspace "$success" 2>&1)"
+  grade_status=$?
+  set -e
+  if [ "$grade_status" -ne 2 ] || ! printf '%s\n' "$grade_output" | grep -q '^grade error: every eval must be an object$'; then
+    echo "FAIL  grader did not report a non-object eval as a grade error" >&2
     return 1
   fi
 

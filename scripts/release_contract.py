@@ -20,10 +20,11 @@ CHECKSUM_LINE = re.compile(r"^([0-9a-fA-F]{64})[ \t]+\*?(\S+)$")
 
 
 def release_version(tag: str) -> str:
-    version = tag.removeprefix("v")
-    if not version:
+    if not tag or tag == "v":
         raise ValueError("release tag has no version")
-    return version
+    if not tag.startswith("v"):
+        raise ValueError("release tag must start with lowercase 'v'")
+    return tag[1:]
 
 
 def workspace_version(manifest: Path) -> str:

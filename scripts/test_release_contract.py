@@ -67,6 +67,26 @@ with tempfile.TemporaryDirectory() as directory:
     assert mismatched.returncode != 0
     assert "does not match workspace version" in mismatched.stderr
 
+    unprefixed = run(
+        "check-version",
+        "--tag",
+        version,
+        "--manifest",
+        ROOT / "Cargo.toml",
+    )
+    assert unprefixed.returncode != 0
+    assert "must start with lowercase 'v'" in unprefixed.stderr
+
+    empty = run(
+        "check-version",
+        "--tag",
+        "",
+        "--manifest",
+        ROOT / "Cargo.toml",
+    )
+    assert empty.returncode != 0
+    assert "has no version" in empty.stderr
+
     # Rendering works in a clean workspace that has no Formula/ directory.
     assert not (workspace / "Formula").exists()
     rendered = run(

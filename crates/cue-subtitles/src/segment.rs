@@ -65,7 +65,8 @@ fn segment_range(words: &[cue_core::Word], policy: &SubtitlePolicy, out: &mut Ve
     impl PendingCue {
         fn new(word: &cue_core::Word, text: &str, policy: &SubtitlePolicy) -> Self {
             let mut layout = LineLayout::new(policy.max_lines, policy.max_chars_per_line);
-            debug_assert!(layout.try_append(text));
+            let appended = layout.try_append(text);
+            debug_assert!(appended);
             Self {
                 start_ms: word.start_ms,
                 end_ms: word.end_ms.max(word.start_ms),

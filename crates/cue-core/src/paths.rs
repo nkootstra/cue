@@ -18,15 +18,18 @@ fn data_dir_from(
     xdg_data_home: Option<OsString>,
     home: Option<OsString>,
 ) -> Option<PathBuf> {
-    if let Some(dir) = cue_data_dir {
+    if let Some(dir) = cue_data_dir.filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(dir));
     }
 
-    let base = xdg_data_home.map(PathBuf::from).or_else(|| {
-        home.filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .map(|home| home.join(".local/share"))
-    })?;
+    let base = xdg_data_home
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            home.filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .map(|home| home.join(".local/share"))
+        })?;
     Some(base.join("cue"))
 }
 
@@ -58,6 +61,30 @@ mod tests {
                 Some(OsString::from("/home")),
             ),
             Some(PathBuf::from("/xdg data/cue"))
+        );
+    }
+
+    #[test]
+    fn empty_cue_data_dir_falls_back_to_xdg_data_home() {
+        assert_eq!(
+            data_dir_from(
+                Some(OsString::new()),
+                Some(OsString::from("/xdg data")),
+                Some(OsString::from("/home")),
+            ),
+            Some(PathBuf::from("/xdg data/cue"))
+        );
+    }
+
+    #[test]
+    fn empty_xdg_data_home_falls_back_to_home() {
+        assert_eq!(
+            data_dir_from(
+                None,
+                Some(OsString::new()),
+                Some(OsString::from("/home/user name")),
+            ),
+            Some(PathBuf::from("/home/user name/.local/share/cue"))
         );
     }
 
