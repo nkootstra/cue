@@ -196,6 +196,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "usage-rs",
+ "wiremock",
 ]
 
 [[package]]

@@ -13,9 +13,12 @@ configured — summaries, descriptions, and chapters.
 
 ## Why cue?
 
-- **Local-first privacy.** Media, audio, the raw transcript, and subtitles
-  never leave your machine. Only cleaned transcript text may be sent to an
-  LLM gateway you explicitly configure (Ollama `/v1` or OpenRouter).
+- **Local-first privacy.** Media, extracted audio, the raw transcript, and
+  subtitles stay on your machine. S1 normalization runs through your local
+  Ollama instance. When analysis is enabled, cue sends only the normalized
+  transcript text to the explicitly configured LLM gateway; a remote gateway
+  such as OpenRouter receives that text, while a local Ollama gateway does not
+  send it off-machine.
 - **Canonical transcript as source of truth.** The raw timed transcript
   (`transcript.json`) is never overwritten. Cleaned text, subtitles, and
   analysis all derive from it.
@@ -128,8 +131,10 @@ npx skills add nkootstra/cue
 The skill teaches agents to install cue when missing, run the pipeline,
 gather speaker/domain context, write a corrections manifest, and apply it
 with `cue correct` (batch-processing course folders and correcting existing
-outputs too), and to respect the privacy boundary (media stays local). All
-examples in the skill use fictional identities.
+outputs too), and to respect the privacy boundary: media, audio, raw
+transcripts, and subtitles stay local; only normalized text may be sent to
+the configured analysis gateway. All examples in the skill use fictional
+identities.
 
 The skill lives in `skills/transcribe/` and ships with an eval suite
 (`skills/transcribe/evals/evals.json`). Run the eval harness to regenerate
@@ -160,9 +165,11 @@ Work in progress.
 
 ## Design principles
 
-**Local first.** Media, transcription, and normalization never leave the
-machine. Only normalized transcript text may be sent to a configured LLM
-gateway for analysis.
+**Local first.** Media, extracted audio, raw transcripts, subtitles, and S1
+normalization stay local. Analysis sends normalized transcript text to the
+configured LLM gateway. Choose a local Ollama gateway to keep that text on
+the machine; choosing a remote gateway such as OpenRouter sends it to that
+provider.
 
 **Canonical transcript.** The raw timed transcript is the source of truth.
 Cleaned text is derived and never replaces it.

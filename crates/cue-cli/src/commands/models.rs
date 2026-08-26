@@ -60,18 +60,22 @@ async fn list() -> i32 {
 async fn check() -> i32 {
     let admin = OllamaAdmin::new(ollama_url());
     match cue_normalization::s1_ready(&admin).await {
-        true => {
+        Ok(true) => {
             println_line(&format!(
                 "{} is installed and ready for normalization.",
                 cue_normalization::S1_MODEL_NAME
             ));
             0
         }
-        false => {
+        Ok(false) => {
             println_line(&format!(
                 "{} is not installed. Run: cue models install s1",
                 cue_normalization::S1_MODEL_NAME
             ));
+            1
+        }
+        Err(err) => {
+            eprintln!("{err}");
             1
         }
     }

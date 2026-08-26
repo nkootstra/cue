@@ -43,6 +43,7 @@ struct NormalizationCacheKey<'a> {
 struct AnalysisCacheKey<'a> {
     version: u8,
     normalized_hash: &'a str,
+    language: &'a str,
     model: &'a str,
     prompt_version: u32,
 }
@@ -89,8 +90,9 @@ async fn run_inner(
     let renderer = tokio::spawn(crate::events::run_renderer(rx));
 
     let result: Result<()> = async {
+        let mut s1_readiness: Option<std::result::Result<bool, String>> = None;
         for file in files {
-            process_file(file, cli, &config, &tx, stop_after).await?;
+            process_file(file, cli, &config, &tx, stop_after, &mut s1_readiness).await?;
         }
         Ok(())
     }
@@ -110,6 +112,7 @@ async fn process_file(
     config: &cue_core::Config,
     events: &tokio::sync::mpsc::UnboundedSender<cue_core::PipelineEvent>,
     stop_after: Option<cue_core::PipelineStage>,
+    s1_readiness: &mut Option<std::result::Result<bool, String>>,
 ) -> Result<()> {
     use cue_core::{PipelineEvent, PipelineStage};
 
@@ -244,13 +247,34 @@ async fn process_file(
             Some(cached)
         }
         None => {
-            match cue_normalization::normalize_if_ready(
-                &config.normalization.ollama_url,
-                s1_settings,
-                &transcript,
-            )
-            .await
-            {
+            if s1_readiness.is_none() {
+                let admin = cue_llm::OllamaAdmin::new(&config.normalization.ollama_url);
+                *s1_readiness = Some(
+                    cue_normalization::s1_ready(&admin)
+                        .await
+                        .map_err(|err| err.to_string()),
+                );
+            }
+            let outcome = match s1_readiness.as_ref().expect("readiness set above") {
+                Ok(true) => match cue_normalization::normalize_s1(
+                    &config.normalization.ollama_url,
+                    s1_settings,
+                    &transcript,
+                )
+                .await
+                {
+                    Ok(clean) => cue_normalization::NormalizationOutcome::Done(clean),
+                    Err(err) => cue_normalization::NormalizationOutcome::Skipped(err.to_string()),
+                },
+                Ok(false) => cue_normalization::NormalizationOutcome::Skipped(format!(
+                    "model \"{}\" not found in Ollama",
+                    cue_normalization::S1_MODEL_NAME
+                )),
+                Err(reason) => cue_normalization::NormalizationOutcome::Skipped(format!(
+                    "could not determine S1 readiness: {reason}"
+                )),
+            };
+            match outcome {
                 cue_normalization::NormalizationOutcome::Done(clean) => {
                     store_cached(&normalized_cache, &normalization_key, &clean);
                     let _ = events.send(PipelineEvent::Completed(PipelineStage::Normalize));
@@ -275,8 +299,9 @@ async fn process_file(
                     .as_slice(),
             );
             let analysis_key = AnalysisCacheKey {
-                version: 1,
+                version: 2,
                 normalized_hash: &clean_hash,
+                language: &transcript.language,
                 model: &llm.model,
                 prompt_version: cue_analysis::PROMPT_VERSION,
             };
@@ -292,7 +317,10 @@ async fn process_file(
                     let client = cue_llm::ChatClient::new(llm.base_url.clone(), llm.api_key());
                     let analyzer = cue_analysis::GatewayAnalyzer::new(client, &llm.model);
                     match analyzer
-                        .analyze(&cue_analysis::AnalysisInput::from_normalized(clean))
+                        .analyze(&cue_analysis::AnalysisInput::from_normalized(
+                            &transcript.language,
+                            clean,
+                        ))
                         .await
                     {
                         Ok(a) => {
@@ -486,5 +514,30 @@ fn print_media_summary(media: &Media) {
             "  audio:      #{} {} ({} Hz, {} ch)",
             stream.index, stream.codec, stream.sample_rate_hz, stream.channels
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn analysis_cache_identity_includes_canonical_language() {
+        let english = AnalysisCacheKey {
+            version: 2,
+            normalized_hash: "same-normalized-text",
+            language: "en",
+            model: "model",
+            prompt_version: cue_analysis::PROMPT_VERSION,
+        };
+        let dutch = AnalysisCacheKey {
+            language: "nl",
+            ..english
+        };
+
+        assert_ne!(
+            serde_json::to_vec(&english).unwrap(),
+            serde_json::to_vec(&dutch).unwrap()
+        );
     }
 }

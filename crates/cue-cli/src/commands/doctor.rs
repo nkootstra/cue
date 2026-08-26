@@ -60,23 +60,26 @@ pub async fn integration_lines(config: &cue_core::Config) -> Vec<String> {
     // Ollama reachability and S1 presence share one probe.
     let admin = OllamaAdmin::new(&config.normalization.ollama_url);
     match admin.list_models().await {
-        Ok(_) => {
+        Ok(models) => {
             lines.push(format!(
                 "{:<10} ok       {}",
                 "Ollama", config.normalization.ollama_url
             ));
             lines.push(s1_line(
-                cue_normalization::s1_ready(&admin).await,
+                cue_normalization::s1_ready_in(&models),
                 cue_normalization::S1_MODEL_NAME,
             ));
         }
         Err(reason) => {
             lines.push(format!(
-                "{:<10} not configured  not reachable at {}",
+                "{:<10} error    probe failed at {}",
                 "Ollama", config.normalization.ollama_url
             ));
             tracing::debug!(reason = %reason, "ollama probe failed");
-            lines.push(s1_line(false, cue_normalization::S1_MODEL_NAME));
+            lines.push(format!(
+                "{:<10} unknown  Ollama probe failed; model presence was not checked",
+                "S1"
+            ));
         }
     }
 
@@ -163,6 +166,37 @@ fn python_for_provisioning(env: &cue_media::checks::Environment) -> Option<std::
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn integrations_derive_ollama_and_s1_from_one_probe() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"models":[{{"name":"{}"}}]}}"#,
+                cue_normalization::S1_MODEL_NAME
+            )))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut config = cue_core::Config::default();
+        config.normalization.ollama_url = server.uri();
+        let lines = integration_lines(&config).await;
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Ollama") && line.contains("ok"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("S1") && line.contains("ready"))
+        );
+    }
 
     #[test]
     fn s1_line_distinguishes_installed_from_not_configured() {

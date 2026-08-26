@@ -240,9 +240,12 @@ order:
 
 ## 5. Privacy
 
-Media, audio, the raw transcript, and subtitles stay local. Only cleaned
-text is ever sent to a configured LLM gateway (for S1 normalization and
-analysis). Never upload media files anywhere.
+Media, extracted audio, the raw transcript, and subtitles stay local. S1
+normalization runs through the user's local Ollama instance. If analysis is
+enabled, cue sends only the normalized transcript text to the configured LLM
+gateway. A local Ollama analysis gateway keeps that text on the machine; a
+remote gateway such as OpenRouter receives it. Never upload media files
+anywhere.
 
 ## 6. Troubleshooting
 

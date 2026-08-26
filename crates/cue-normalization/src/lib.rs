@@ -78,11 +78,12 @@ fn materialize_modelfile_in(data_dir: &Path) -> Result<PathBuf> {
 /// cue's embedded Modelfile via the `ollama` CLI (the HTTP create API
 /// rejects `FROM hf.co/...` Modelfiles). Safe to run repeatedly.
 pub async fn install_s1(admin: &cue_llm::OllamaAdmin) -> Result<String> {
-    if admin.has_model(S1_MODEL_NAME).await? {
+    let models = admin.list_models().await?;
+    if cue_llm::OllamaAdmin::models_include(&models, S1_MODEL_NAME) {
         return Ok(format!("{S1_MODEL_NAME} is already installed"));
     }
     let cli = OllamaCli::new(admin.base_url());
-    if !admin.has_model(S1_SOURCE_REF).await? {
+    if !cue_llm::OllamaAdmin::models_include(&models, S1_SOURCE_REF) {
         cli.pull(S1_SOURCE_REF).await?;
     }
     let modelfile = materialize_modelfile()?;
@@ -90,9 +91,26 @@ pub async fn install_s1(admin: &cue_llm::OllamaAdmin) -> Result<String> {
     Ok(format!("installed {S1_MODEL_NAME}"))
 }
 
-/// Check whether Ollama has the S1 model ready.
-pub async fn s1_ready(admin: &cue_llm::OllamaAdmin) -> bool {
-    admin.has_model(S1_MODEL_NAME).await.unwrap_or(false)
+/// Check whether Ollama has the S1 model ready without hiding probe errors.
+pub async fn s1_ready(admin: &cue_llm::OllamaAdmin) -> Result<bool> {
+    Ok(s1_ready_in(&admin.list_models().await?))
+}
+
+/// Derive S1 readiness from an existing model snapshot.
+pub fn s1_ready_in(models: &[cue_llm::OllamaModel]) -> bool {
+    cue_llm::OllamaAdmin::models_include(models, S1_MODEL_NAME)
+}
+
+/// Normalize with S1 after the caller has established readiness.
+pub async fn normalize_s1(
+    ollama_url: &str,
+    settings: S1Settings,
+    transcript: &Transcript,
+) -> Result<NormalizedTranscript> {
+    S1Normalizer::new(ollama_url)
+        .with_settings(settings)
+        .normalize(transcript)
+        .await
 }
 
 /// Result of attempting normalization in the pipeline: either cleaned text
@@ -110,17 +128,17 @@ pub async fn normalize_if_ready(
     transcript: &Transcript,
 ) -> NormalizationOutcome {
     let admin = cue_llm::OllamaAdmin::new(ollama_url);
-    if !s1_ready(&admin).await {
-        return NormalizationOutcome::Skipped(format!(
-            "model \"{S1_MODEL_NAME}\" not found in Ollama"
-        ));
+    match s1_ready(&admin).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return NormalizationOutcome::Skipped(format!(
+                "model \"{S1_MODEL_NAME}\" not found in Ollama"
+            ));
+        }
+        Err(err) => return NormalizationOutcome::Skipped(err.to_string()),
     }
 
-    match S1Normalizer::new(ollama_url)
-        .with_settings(settings)
-        .normalize(transcript)
-        .await
-    {
+    match normalize_s1(ollama_url, settings, transcript).await {
         Ok(clean) => NormalizationOutcome::Done(clean),
         Err(err) => NormalizationOutcome::Skipped(err.to_string()),
     }
@@ -129,6 +147,8 @@ pub async fn normalize_if_ready(
 #[cfg(test)]
 mod data_path_tests {
     use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn materializes_modelfile_under_data_root_with_spaces() {
@@ -139,5 +159,64 @@ mod data_path_tests {
 
         assert_eq!(path, data_dir.join("models/s1/Modelfile"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), S1_MODELFILE);
+    }
+
+    #[tokio::test]
+    async fn readiness_preserves_probe_failures() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("provider-private-body"))
+            .mount(&server)
+            .await;
+
+        let err = s1_ready(&cue_llm::OllamaAdmin::new(server.uri()))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("500"), "{err}");
+        assert!(!err.contains("provider-private-body"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn readiness_distinguishes_present_and_absent_models() {
+        for (models, expected) in [
+            (r#"{"models":[{"name":"cue-s1-mini:latest"}]}"#, true),
+            (r#"{"models":[{"name":"other-model"}]}"#, false),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/tags"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(models))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            assert_eq!(
+                s1_ready(&cue_llm::OllamaAdmin::new(server.uri()))
+                    .await
+                    .unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn installing_an_existing_model_uses_one_snapshot() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(format!(r#"{{"models":[{{"name":"{}"}}]}}"#, S1_MODEL_NAME)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let message = install_s1(&cue_llm::OllamaAdmin::new(server.uri()))
+            .await
+            .unwrap();
+        assert!(message.contains("already installed"), "{message}");
     }
 }
