@@ -222,26 +222,36 @@ EOF
 
   write_correction_receipt() {
     local path="$1"
-    cat > "$path" <<'EOF'
-{
+    local output_dir manifest
+    output_dir="$(dirname "$path")"
+    manifest="$output_dir/corrections.md"
+    printf 'open telemetry -> OpenTelemetry\n' > "$manifest"
+    local manifest_hash transcript_hash
+    manifest_hash="$(python3 - "$manifest" "$GRADER" <<'PY'
+import importlib.util, pathlib, sys
+spec = importlib.util.spec_from_file_location("grader", sys.argv[2])
+grader = importlib.util.module_from_spec(spec); spec.loader.exec_module(grader)
+print(grader.blake3_hash(pathlib.Path(sys.argv[1]).read_bytes()))
+PY
+    )"
+    transcript_hash="$(python3 - "$output_dir/transcript.json" "$GRADER" <<'PY'
+import importlib.util, pathlib, sys
+spec = importlib.util.spec_from_file_location("grader", sys.argv[2])
+grader = importlib.util.module_from_spec(spec); spec.loader.exec_module(grader)
+print(grader.blake3_hash(pathlib.Path(sys.argv[1]).read_bytes()))
+PY
+    )"
+    MANIFEST_HASH="$manifest_hash" TRANSCRIPT_HASH="$transcript_hash" python3 - "$path" <<'PY'
+import json, os, pathlib, sys
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
   "schema_version": 1,
-  "manifest_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "manifest_hash": os.environ["MANIFEST_HASH"],
   "manifest_source": "explicit",
-  "source_hashes": {
-    "transcript": "1111111111111111111111111111111111111111111111111111111111111111",
-    "normalized": null
-  },
-  "rules": [
-    {
-      "find": "open telemetry",
-      "replace": "OpenTelemetry",
-      "applications": [
-        {"artifact": "transcript.txt", "replacements": 1}
-      ]
-    }
-  ]
-}
-EOF
+  "source_hashes": {"transcript": os.environ["TRANSCRIPT_HASH"], "normalized": None},
+  "rules": [{"find": "open telemetry", "replace": "OpenTelemetry", "applications": [{"artifact": "transcript.txt", "replacements": 1}] }]
+}, indent=2) + "\n")
+PY
+    return
   }
 
   output="$workspace/eval-basic-transcribe/with_skill/outputs"

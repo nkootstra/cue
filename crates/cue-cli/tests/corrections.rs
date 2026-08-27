@@ -171,6 +171,7 @@ fn correct_regenerates_subtitles_from_the_canonical_transcript() {
     let vtt = fs::read_to_string(output.join("subtitles.vtt")).unwrap();
     assert!(srt.contains("OpenTelemetry."), "{srt}");
     assert!(vtt.contains("OpenTelemetry."), "{vtt}");
+    assert!(vtt.starts_with("WEBVTT\n\n"), "{vtt}");
     assert!(!srt.contains("SENTINEL"), "{srt}");
     assert!(!vtt.contains("SENTINEL"), "{vtt}");
 }

@@ -73,7 +73,7 @@ write outputs. Outputs land in `<file>.cue/` next to the source (or `--output`):
 | `normalized.json` / `transcript.clean.txt` | S1-cleaned prose (present when Ollama has the S1 model). |
 | `subtitles.srt` / `subtitles.vtt` | Subtitles derived from the canonical transcript. |
 | `analysis.json` / `summary.md` / `description.md` | LLM analysis (present when a gateway is configured). |
-| `corrections.applied.json` | Receipt written after correction, showing which rules were applied to which derived files. |
+| `corrections.applied.json` | Receipt written after correction, showing which rules were applied to `transcript.txt`, optional `transcript.clean.txt`, and subtitles. |
 
 If the user only wants the plain transcript (no subtitles/analysis):
 
@@ -132,7 +132,8 @@ In this order, until you have enough:
 
 **Corrections are applied deterministically, not by editing files by hand.**
 Your job is to *identify* corrections from context; cue applies them to every
-derived text artifact mechanically. Keeping the manifest lets cached reruns
+`transcript.txt`, optional `transcript.clean.txt`, and subtitle artifact
+mechanically. Keeping the manifest lets cached reruns
 reapply the same decisions without changing the raw transcript.
 
 1. Read `transcript.txt` from the output directory.

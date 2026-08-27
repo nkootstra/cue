@@ -279,11 +279,13 @@ fn render_output(
         };
         let cues = cue_subtitles::build_cues(&transcript, &policy)?;
         for format in subtitle_formats {
-            let (name, raw) = match format {
-                SubtitleFormat::Srt => ("subtitles.srt", cue_subtitles::render_srt(&cues)),
-                SubtitleFormat::Vtt => ("subtitles.vtt", cue_subtitles::render_vtt(&cues)),
-            };
-            artifacts.push(prepare_artifact(output_dir, name, raw, &manifest.rules));
+            let (name, content, counts) = prepare_subtitle_artifact(format, &cues, &manifest.rules);
+            artifacts.push(PreparedArtifact {
+                name,
+                path: output_dir.join(name),
+                content,
+                counts,
+            });
         }
     }
 
@@ -374,6 +376,27 @@ fn prepare_artifact(
         content,
         counts,
     }
+}
+
+fn prepare_subtitle_artifact(
+    format: SubtitleFormat,
+    cues: &[cue_subtitles::Cue],
+    rules: &[cue_core::correct::Correction],
+) -> (&'static str, String, Vec<usize>) {
+    let mut corrected_cues = cues.to_vec();
+    let mut counts = vec![0; rules.len()];
+    for cue in &mut corrected_cues {
+        let (text, cue_counts) = cue_core::correct::apply_with_counts(&cue.text, rules);
+        cue.text = text;
+        for (total, count) in counts.iter_mut().zip(cue_counts) {
+            *total += count;
+        }
+    }
+    let (name, content) = match format {
+        SubtitleFormat::Srt => ("subtitles.srt", cue_subtitles::render_srt(&corrected_cues)),
+        SubtitleFormat::Vtt => ("subtitles.vtt", cue_subtitles::render_vtt(&corrected_cues)),
+    };
+    (name, content, counts)
 }
 
 fn clear_non_transcript_artifacts(output_dir: &Path) -> Result<()> {
