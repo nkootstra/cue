@@ -108,14 +108,14 @@ check "description has chapters" bash -c "grep -q 'Chapters' '$OUT/description.m
 
 echo
 echo "== cache behavior =="
-check "rerun fully cached" bash -c "env CUE_CONFIG_DIR=$CFG_DIR $CUE /tmp/cue-verify-speech.mp3 --output $OUT 2>&1 | grep -c cached | grep -q 4"
+check "rerun fully cached" bash -c "env CUE_CONFIG_DIR=$CFG_DIR $CUE '$SPEECH_MP3' --output '$OUT' 2>&1 | grep -c cached | grep -q 4"
 
 SOURCE_TERM=$(python3 -c "import json,re; d=json.load(open('$OUT/transcript.json')); m=re.search(r'[A-Za-z0-9]+', d['segments'][0]['text']); assert m; print(m.group(0))")
 PIPELINE_CANONICAL_HASH=$(shasum -a 256 "$OUT/transcript.json" "$OUT/analysis.json" "$OUT/normalized.json" | shasum | cut -d' ' -f1)
 printf '%s -> DurableFirst\n' "$SOURCE_TERM" > "$OUT/corrections.md"
 check "manifest applies on cached rerun" env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" "$SPEECH_MP3" --output "$OUT"
 check "corrected render uses first manifest" bash -c "grep -q 'DurableFirst' '$OUT/transcript.txt' && grep -q 'DurableFirst' '$OUT/subtitles.srt'"
-check "correction receipt is valid" bash -c "python3 -c \"import json; d=json.load(open('$OUT/corrections.applied.json')); assert d['schema_version']==1; assert d['manifest_source']=='output-directory'; assert d['source_hashes']['transcript']; assert d['rules'][0]['replace']=='DurableFirst'\""
+check "correction receipt is valid" bash -c "python3 -c \"import json; d=json.load(open('$OUT/corrections.applied.json')); assert d['schema_version']==2; assert d['manifests'][0]['source']=='output-directory'; assert d['source_hashes']['transcript']; assert d['rules'][0]['replace']=='DurableFirst'; assert d['rules'][0]['source_manifest']==0\""
 check "first corrected rerun keeps canonical data" bash -c "test '$PIPELINE_CANONICAL_HASH' = \"\$(shasum -a 256 '$OUT/transcript.json' '$OUT/analysis.json' '$OUT/normalized.json' | shasum | cut -d' ' -f1)\""
 
 printf '%s -> DurableSecond\n' "$SOURCE_TERM" > "$OUT/corrections.md"
@@ -175,7 +175,7 @@ cat > "$VERIFY_DIR/talk.cue/transcript.json" <<'EOF'
 }
 EOF
 printf '{"analysis":"UNCHANGED"}\n' > "$VERIFY_DIR/talk.cue/analysis.json"
-printf '{"normalized":"UNCHANGED"}\n' > "$VERIFY_DIR/talk.cue/normalized.json"
+printf '{"schema_version":1,"chunks":[{"start_ms":0,"end_ms":1600,"text":"UNCHANGED"}]}\n' > "$VERIFY_DIR/talk.cue/normalized.json"
 printf 'STALE RECEIPT\n' > "$VERIFY_DIR/talk.cue/corrections.applied.json"
 printf 'John Dough -> John Doe\nopen telemetry -> OpenTelemetry\n' > "$VERIFY_DIR/corrections.md"
 BEFORE=$(shasum -a 256 "$VERIFY_DIR/talk.cue/transcript.txt" "$VERIFY_DIR/talk.cue/subtitles.srt" "$VERIFY_DIR/talk.cue/transcript.json" "$VERIFY_DIR/talk.cue/normalized.json" "$VERIFY_DIR/talk.cue/analysis.json" "$VERIFY_DIR/talk.cue/corrections.applied.json" | shasum | cut -d' ' -f1)
@@ -185,10 +185,15 @@ check "correct dry-run leaves all artifacts unchanged" test "$BEFORE" = "$AFTER"
 check "correct applies"               bash -c "$CUE correct $VERIFY_DIR/talk.cue 2>&1 | grep -q 'replacement(s)'"
 check "correct fixed transcript"      bash -c "grep -q 'OpenTelemetry' $VERIFY_DIR/talk.cue/transcript.txt && ! grep -q 'John Dough' $VERIFY_DIR/talk.cue/transcript.txt"
 check "correct fixed subtitles"       bash -c "grep -q 'OpenTelemetry' $VERIFY_DIR/talk.cue/subtitles.srt"
-check "correct wrote receipt"          bash -c "python3 -c \"import json; d=json.load(open('$VERIFY_DIR/talk.cue/corrections.applied.json')); assert d['schema_version']==1; assert len(d['rules'])==2\""
+check "correct wrote receipt"          bash -c "python3 -c \"import json; d=json.load(open('$VERIFY_DIR/talk.cue/corrections.applied.json')); assert d['schema_version']==2; assert len(d['manifests'])==1; assert len(d['rules'])==2\""
 check "correct kept canonical json"   bash -c "grep -q 'John Dough' $VERIFY_DIR/talk.cue/transcript.json"
 check "correct kept normalized"        bash -c "grep -q 'UNCHANGED' '$VERIFY_DIR/talk.cue/normalized.json'"
 check "correct kept analysis"         bash -c "grep -q 'UNCHANGED' $VERIFY_DIR/talk.cue/analysis.json"
+check "review emits versioned JSON" bash -c "$CUE review '$VERIFY_DIR/talk.cue' --json | python3 -c \"import json,sys; d=json.load(sys.stdin); assert d['schema_version']==1; assert isinstance(d['diagnostics'], list)\""
+mkdir "$VERIFY_DIR/promoted"
+check "promote verified correction" "$CUE" lexicon promote "$VERIFY_DIR/talk.cue" --rule "open telemetry" --to "$VERIFY_DIR/promoted"
+check "promoted lexicon contains rule" grep -q "open telemetry -> OpenTelemetry" "$VERIFY_DIR/promoted/corrections.md"
+check "promotion emits JSON attestation" bash -c "$CUE lexicon promote '$VERIFY_DIR/talk.cue' --rule 'open telemetry' --to '$VERIFY_DIR/promoted' --json | python3 -c \"import json,sys; d=json.load(sys.stdin); assert d['schema_version']==1; assert d['status']=='already-present'; assert len(d['source_receipt_hash'])==64; assert len(d['target_lexicon_hash'])==64\""
 
 kill $GW 2>/dev/null || true
 

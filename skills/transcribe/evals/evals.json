@@ -82,6 +82,21 @@
         {"name": "first explicit-file transcript is non-empty", "type": "file_nonempty", "path": "eval-explicit-multi/with_skill/outputs/clip-01.cue/transcript.txt"},
         {"name": "second explicit-file transcript is non-empty", "type": "file_nonempty", "path": "eval-explicit-multi/with_skill/outputs/clip-02.cue/transcript.txt"}
       ]
+    },
+    {
+      "id": 6,
+      "prompt": "An existing lesson.cue has an applied source-local correction. Run cue's focused review and save its JSON report as review.json, then deliberately promote the verified 'open telemetry' rule into the current project directory so later lessons can reuse it. Use promotion's JSON output and save it as promotion.json.",
+      "expected_output": "A machine-readable review report and a project-level corrections.md containing the verified promoted rule, without modifying the canonical transcript.",
+      "files": [],
+      "assertions": [
+        {"name": "review report is structurally valid", "type": "review_report", "path": "eval-lexicon-flywheel/with_skill/outputs/review.json"},
+        {"name": "review report uses the review schema", "type": "contains", "path": "eval-lexicon-flywheel/with_skill/outputs/review.json", "value": "\"schema_version\": 1", "case_insensitive": false},
+        {"name": "review report contains diagnostics", "type": "contains", "path": "eval-lexicon-flywheel/with_skill/outputs/review.json", "value": "\"diagnostics\"", "case_insensitive": false},
+        {"name": "review report contains a focused diagnostic", "type": "contains", "path": "eval-lexicon-flywheel/with_skill/outputs/review.json", "value": "CUE-REVIEW-", "case_insensitive": false},
+        {"name": "project lexicon contains promoted rule", "type": "contains", "path": "eval-lexicon-flywheel/with_skill/outputs/corrections.md", "value": "open telemetry -> OpenTelemetry", "case_insensitive": false},
+        {"name": "promotion attestation matches its source and target", "type": "promotion_attestation", "path": "eval-lexicon-flywheel/with_skill/outputs/promotion.json", "receipt_path": "eval-lexicon-flywheel/with_skill/outputs/lesson.cue/corrections.applied.json", "lexicon_path": "eval-lexicon-flywheel/with_skill/outputs/corrections.md"},
+        {"name": "canonical transcript remains unchanged", "type": "files_equal", "path": "eval-lexicon-flywheel/with_skill/outputs/lesson.cue/transcript.json", "other_path": ".baselines/with_skill-flywheel-transcript.json"}
+      ]
     }
   ]
 }

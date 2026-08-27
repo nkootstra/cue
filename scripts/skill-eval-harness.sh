@@ -83,7 +83,7 @@ seed_workspace() {
 EOF
 
   local case variant output
-  for case in eval-basic-transcribe eval-context-correction eval-recursive-context eval-existing-correction eval-explicit-multi; do
+  for case in eval-basic-transcribe eval-context-correction eval-recursive-context eval-existing-correction eval-explicit-multi eval-lexicon-flywheel; do
     for variant in with_skill without_skill; do
       mkdir -p "$workspace/$case/$variant/outputs"
     done
@@ -121,6 +121,28 @@ EOF
 
     output="$workspace/eval-explicit-multi/$variant/outputs"
     cp "$fixtures/clip-01.mp3" "$fixtures/clip-02.mp3" "$output/"
+
+    output="$workspace/eval-lexicon-flywheel/$variant/outputs"
+    mkdir -p "$output/lesson.cue"
+    cat > "$output/lesson.cue/transcript.json" <<'EOF'
+{
+  "schema_version": 1,
+  "language": "en",
+  "duration_ms": 1000,
+  "words": [
+    {"text":"open","start_ms":0,"end_ms":300,"confidence":0.4,"speaker":null},
+    {"text":"telemetry.","start_ms":310,"end_ms":1000,"confidence":0.9,"speaker":null}
+  ],
+  "segments": [
+    {"start_ms":0,"end_ms":1000,"text":"open telemetry.","word_start":0,"word_end":2}
+  ]
+}
+EOF
+    printf 'open telemetry -> OpenTelemetry\n' \
+      > "$output/lesson.cue/corrections.md"
+    (cd "$output" && "$ROOT/target/debug/cue" correct lesson.cue >/dev/null)
+    cp "$output/lesson.cue/transcript.json" \
+      "$workspace/.baselines/$variant-flywheel-transcript.json"
   done
 
   echo "workspace ready: $workspace"
@@ -192,6 +214,18 @@ print_prompts() {
   Input:  $workspace/eval-explicit-multi/without_skill/outputs/
   Save outputs to: $workspace/eval-explicit-multi/without_skill/outputs
 
+[lexicon-flywheel] with_skill
+  Prompt: Review lesson.cue with cue and save the JSON report as review.json.
+  Then promote the verified "open telemetry" correction into this project
+  directory so later lessons reuse it.
+  Input:  $workspace/eval-lexicon-flywheel/with_skill/outputs/
+  Save outputs to: $workspace/eval-lexicon-flywheel/with_skill/outputs
+
+[lexicon-flywheel] without_skill
+  Prompt: Review the existing lesson transcript for likely mistakes.
+  Input:  $workspace/eval-lexicon-flywheel/without_skill/outputs/
+  Save outputs to: $workspace/eval-lexicon-flywheel/without_skill/outputs
+
 === Then run: scripts/skill-eval-harness.sh --grade $workspace ===
 EOF
 }
@@ -244,12 +278,14 @@ PY
     MANIFEST_HASH="$manifest_hash" TRANSCRIPT_HASH="$transcript_hash" python3 - "$path" <<'PY'
 import json, os, pathlib, sys
 pathlib.Path(sys.argv[1]).write_text(json.dumps({
-  "schema_version": 1,
-  "manifest_hash": os.environ["MANIFEST_HASH"],
-  "manifest_path": "corrections.md",
-  "manifest_source": "explicit",
+  "schema_version": 2,
+  "manifests": [{
+    "hash": os.environ["MANIFEST_HASH"],
+    "path": "corrections.md",
+    "source": "output-directory"
+  }],
   "source_hashes": {"transcript": os.environ["TRANSCRIPT_HASH"], "normalized": None},
-  "rules": [{"find": "open telemetry", "replace": "OpenTelemetry", "applications": [{"artifact": "transcript.txt", "replacements": 1}] }]
+  "rules": [{"find": "open telemetry", "replace": "OpenTelemetry", "source_manifest": 0, "applications": [{"artifact": "transcript.txt", "replacements": 1}] }]
 }, indent=2) + "\n")
 PY
     return
@@ -302,11 +338,48 @@ PY
   mkdir -p "$output/clip-01.cue" "$output/clip-02.cue"
   printf 'first transcript\n' > "$output/clip-01.cue/transcript.txt"
   printf 'second transcript\n' > "$output/clip-02.cue/transcript.txt"
+
+  output="$workspace/eval-lexicon-flywheel/with_skill/outputs"
+  mkdir -p "$output/lesson.cue"
+  write_canonical_transcript "$output/lesson.cue/transcript.json"
+  cp "$output/lesson.cue/transcript.json" \
+    "$workspace/.baselines/with_skill-flywheel-transcript.json"
+  printf 'open telemetry -> OpenTelemetry\n' > "$output/corrections.md"
+  write_correction_receipt "$output/lesson.cue/corrections.applied.json"
+  printf '{"schema_version": 1, "output": "lesson.cue", "confidence_below": 0.75, "diagnostics": [{"id": "CUE-REVIEW-LOW-CONFIDENCE", "word": "open", "word_index": 0, "confidence": 0.4, "start_ms": 0, "end_ms": 300}]}\n' > "$output/review.json"
+  RECEIPT_HASH="$(python3 - "$output/lesson.cue/corrections.applied.json" "$GRADER" <<'PY'
+import importlib.util, pathlib, sys
+spec = importlib.util.spec_from_file_location("grader", sys.argv[2])
+grader = importlib.util.module_from_spec(spec); spec.loader.exec_module(grader)
+print(grader.blake3_hash(pathlib.Path(sys.argv[1]).read_bytes()))
+PY
+  )"
+  LEXICON_HASH="$(python3 - "$output/corrections.md" "$GRADER" <<'PY'
+import importlib.util, pathlib, sys
+spec = importlib.util.spec_from_file_location("grader", sys.argv[2])
+grader = importlib.util.module_from_spec(spec); spec.loader.exec_module(grader)
+print(grader.blake3_hash(pathlib.Path(sys.argv[1]).read_bytes()))
+PY
+  )"
+  RECEIPT_HASH="$RECEIPT_HASH" LEXICON_HASH="$LEXICON_HASH" python3 - "$output/promotion.json" "$output/corrections.md" <<'PY'
+import json, os, pathlib, sys
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+  "schema_version": 1,
+  "status": "promoted",
+  "source_receipt_hash": os.environ["RECEIPT_HASH"],
+  "target_lexicon": "corrections.md",
+  "target_lexicon_hash": os.environ["LEXICON_HASH"],
+  "find": "open telemetry",
+  "replace": "OpenTelemetry"
+}, indent=2) + "\n")
+PY
 }
 
 self_test() {
   local temporary success missing corrected_canonical missing_recursive_canonical
   local manual_sentinel_existing malformed_receipt missing_receipt nonempty
+  local legacy_receipt stale_normalized tampered_rule malformed_review
+  local fabricated_attestation unapplied_attestation
   local before after canonical_before canonical_after
   local traversal_rubric other_path_rubric symlink_rubric outside
   local non_object_rubric non_object_eval_rubric grade_output grade_status
@@ -383,6 +456,86 @@ self_test() {
     "$malformed_receipt/eval-context-correction/with_skill/outputs/corrections.applied.json"
   if "$0" --grade "$malformed_receipt" >/dev/null 2>&1; then
     echo "FAIL  grade accepted invalid receipt field types and omissions" >&2
+    return 1
+  fi
+
+  legacy_receipt="$temporary/legacy-receipt"
+  cp -R "$success" "$legacy_receipt"
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); m=d.pop("manifests")[0]; d["schema_version"]=1; d["manifest_hash"]=m["hash"]; d["manifest_path"]=m["path"]; d["manifest_source"]=m["source"]; [r.pop("source_manifest") for r in d["rules"]]; open(p,"w").write(json.dumps(d))' \
+    "$legacy_receipt/eval-context-correction/with_skill/outputs/corrections.applied.json"
+  if ! "$0" --grade "$legacy_receipt" >/dev/null 2>&1; then
+    echo "FAIL  grade rejected a valid legacy schema-v1 receipt" >&2
+    return 1
+  fi
+
+  stale_normalized="$temporary/stale-normalized"
+  cp -R "$success" "$stale_normalized"
+  printf '{"schema_version":1,"chunks":[]}\n' \
+    > "$stale_normalized/eval-context-correction/with_skill/outputs/normalized.json"
+  if "$0" --grade "$stale_normalized" >/dev/null 2>&1; then
+    echo "FAIL  grade accepted normalized state absent from the receipt" >&2
+    return 1
+  fi
+
+  tampered_rule="$temporary/tampered-rule"
+  cp -R "$success" "$tampered_rule"
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["rules"][0]["replace"]="Fabricated"; open(p,"w").write(json.dumps(d))' \
+    "$tampered_rule/eval-context-correction/with_skill/outputs/corrections.applied.json"
+  if "$0" --grade "$tampered_rule" >/dev/null 2>&1; then
+    echo "FAIL  grade accepted a receipt rule absent from its manifest" >&2
+    return 1
+  fi
+
+  malformed_review="$temporary/malformed-review"
+  cp -R "$success" "$malformed_review"
+  printf '{"schema_version": 1, "diagnostics": []}\n' \
+    > "$malformed_review/eval-lexicon-flywheel/with_skill/outputs/review.json"
+  if "$0" --grade "$malformed_review" >/dev/null 2>&1; then
+    echo "FAIL  grade accepted an incomplete review report" >&2
+    return 1
+  fi
+
+  fabricated_attestation="$temporary/fabricated-attestation"
+  cp -R "$success" "$fabricated_attestation"
+  python3 - "$fabricated_attestation/eval-lexicon-flywheel/with_skill/outputs" "$GRADER" <<'PY'
+import importlib.util, json, pathlib, sys
+output = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("grader", sys.argv[2])
+grader = importlib.util.module_from_spec(spec); spec.loader.exec_module(grader)
+lexicon = output / "corrections.md"
+lexicon.write_text(lexicon.read_text() + "fabricated -> Fabricated\n")
+attestation_path = output / "promotion.json"
+attestation = json.loads(attestation_path.read_text())
+attestation.update({
+    "target_lexicon_hash": grader.blake3_hash(lexicon.read_bytes()),
+    "find": "fabricated",
+    "replace": "Fabricated",
+})
+attestation_path.write_text(json.dumps(attestation))
+PY
+  if "$0" --grade "$fabricated_attestation" >/dev/null 2>&1; then
+    echo "FAIL  grade accepted an attestation for a rule absent from its receipt" >&2
+    return 1
+  fi
+
+  unapplied_attestation="$temporary/unapplied-attestation"
+  cp -R "$success" "$unapplied_attestation"
+  python3 - "$unapplied_attestation/eval-lexicon-flywheel/with_skill/outputs" "$GRADER" <<'PY'
+import importlib.util, json, pathlib, sys
+output = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("grader", sys.argv[2])
+grader = importlib.util.module_from_spec(spec); spec.loader.exec_module(grader)
+receipt_path = output / "lesson.cue" / "corrections.applied.json"
+receipt = json.loads(receipt_path.read_text())
+receipt["rules"][0]["applications"][0]["replacements"] = 0
+receipt_path.write_text(json.dumps(receipt))
+attestation_path = output / "promotion.json"
+attestation = json.loads(attestation_path.read_text())
+attestation["source_receipt_hash"] = grader.blake3_hash(receipt_path.read_bytes())
+attestation_path.write_text(json.dumps(attestation))
+PY
+  if "$0" --grade "$unapplied_attestation" >/dev/null 2>&1; then
+    echo "FAIL  grade accepted an attestation for a rule with no replacements" >&2
     return 1
   fi
 

@@ -44,6 +44,10 @@ check `cue --version`; upgrade cue with the same installation method if it is
 older. Do not substitute a hand-written directory loop for an outdated cue
 without telling the user why the upgrade could not be completed.
 
+The scoped lexicon workflow requires `cue review` and `cue lexicon` to appear
+in `cue --help`. Upgrade cue before using review or promotion when either
+command is absent; do not emulate promotion by silently copying rules.
+
 If the required tools are fine but the Python worker is missing, provision it:
 
 ```bash
@@ -136,12 +140,21 @@ Your job is to *identify* corrections from context; cue applies them to every
 mechanically. Keeping the manifest lets cached reruns
 reapply the same decisions without changing the raw transcript.
 
-1. Read `transcript.txt` from the output directory.
+1. Run a focused review, then inspect the relevant surrounding text:
+
+   ```bash
+   cue review <file>.cue
+   cue review <file>.cue --json
+   ```
+
+   The report is read-only. Low confidence, possible fallback timing,
+   unmatched rules, scoped conflicts, and speaker ambiguity are candidates to
+   investigate—not facts and not permission to guess.
 2. Identify **only** places where the text conflicts with known context —
    misheard names, wrong technical terms, garbled proper nouns. Do **not**
    rewrite style, fillers, phrasing, or anything that does not conflict with
    known facts.
-3. Write a `corrections.md` manifest next to the output directory, one rule
+3. Write a `corrections.md` manifest at the narrowest appropriate scope, one rule
    per line in `phrase to find -> replacement` form:
 
    ```text
@@ -159,8 +172,11 @@ reapply the same decisions without changing the raw transcript.
    ```
 
    cue reuses cached transcription, normalization, and analysis, then rebuilds
-   the derived files and applies the current manifest. If `corrections.md` is
-   in the output directory or its parent, cue discovers it automatically.
+   the derived files and applies the current manifest. Without an explicit
+   flag, cue composes scoped `corrections.md` files from the current working
+   directory down through nearer ancestor folders and the output. A nearer
+   mapping wins a same-phrase conflict. Run from the intended project/course
+   root so that boundary is explicit.
 
    For an existing output that should not run through media processing, preview
    and rebuild it directly:
@@ -189,6 +205,27 @@ After applying, confirm the fixes actually landed:
 3. If a misheard variant remains, add it to the manifest and re-run
    `cue correct`.
 4. Report what you changed (old -> new), so the user can review.
+
+### Promote verified corrections
+
+Promotion is always a separate, deliberate action. Only promote when the user
+asked to reuse the correction or explicitly approved the destination scope:
+
+```bash
+cue lexicon promote <file>.cue \
+  --rule "open telemetry" \
+  --to /path/to/project-or-course \
+  --json
+```
+
+The command reads `corrections.applied.json`, verifies that its manifest and
+canonical-source hashes still match, and accepts only a rule that made at least
+one replacement. If files changed, rerun `cue correct` before promoting. The
+target directory must already exist. Promotion is idempotent and refuses to
+overwrite a conflicting mapping. Never silently promote every correction,
+choose a broader scope on the user's behalf, or edit the generated receipt.
+Use `--json` when a workflow needs to retain machine-readable evidence bound
+to the source receipt and resulting target lexicon.
 
 Keep the manifest available whenever you rerun the source. cue regenerates
 derived files from canonical JSON and reapplies the current manifest. Changing
@@ -264,9 +301,11 @@ order:
    See `references/context-file.md` in this skill for the full template.
    This file persists your context so every episode is corrected
    consistently, not just the one you transcribed first.
-3. **Write a shared corrections manifest.** After you have gathered enough
-   context (step 1-2), write one `corrections.md` for the folder capturing
-   the mishearings shared across episodes — speaker name, product terms:
+3. **Build the shared corrections manifest deliberately.** Start narrow,
+   apply and verify a correction, then promote it to the course directory when
+   the user approves that shared scope. You may write a shared manifest
+   directly when the supplied context already proves it applies across the
+   course:
 
    ```text
    # corrections.md — applied to every episode
@@ -274,30 +313,31 @@ order:
    open telemetry -> OpenTelemetry
    ```
 
-4. **Transcribe pending inputs with the shared manifest.** Use one cue
+4. **Transcribe pending inputs with the shared lexicon.** Run from the course
+   or project root so hierarchical discovery has an explicit boundary. Use one cue
    invocation for multiple explicit files, or cue's directory mode:
 
    ```bash
-   cue --corrections /absolute/path/to/corrections.md <first.mp4> <second.mp4>
-   cue --corrections /absolute/path/to/corrections.md --recursive <course-directory>
+   cue <first.mp4> <second.mp4>
+   cue --recursive <course-directory>
    ```
 
    Directory mode requires cue 0.5.0 or newer. cue discovers media, creates a
    sibling `<stem>.cue/` per source by default, and processes it sequentially.
-   Passing an explicit shared manifest is reliable for recursive inputs whose
-   outputs have different parents. A rerun safely reuses the pipeline cache
-   and reapplies that manifest.
+   Pass `--corrections /absolute/path/to/corrections.md` when deliberately
+   bypassing hierarchical discovery. A rerun safely reuses the pipeline cache
+   and reapplies the effective lexicon.
 
    Use `cue correct` against existing output directories when no media
    processing is needed:
 
    ```bash
-   cue correct <course-directory/episode.cue> --corrections /absolute/path/to/corrections.md
-   cue correct <course-directory/module/episode.cue> --corrections /absolute/path/to/corrections.md
+   cue correct <course-directory/episode.cue>
+   cue correct <course-directory/module/episode.cue>
    ```
 
-   For a flat batch whose outputs and manifest share one parent,
-   auto-discovery is sufficient for both processing and `cue correct`.
+   Run those commands from the course root. If the outputs are outside that
+   root, pass the shared manifest explicitly instead.
 
 5. Optionally, if the runs produced `analysis.json` per episode, summarize
    them into a course index (titles, topics, chapters) for the user.

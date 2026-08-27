@@ -57,6 +57,10 @@ pub enum Command {
     Skill(SkillArgs),
     /// Apply transcript corrections from a manifest to cue outputs
     Correct(CorrectArgs),
+    /// Manage reusable correction lexicons
+    Lexicon(LexiconArgs),
+    /// Review a canonical transcript for focused correction candidates
+    Review(ReviewArgs),
 }
 
 /// Transcribe files or directories
@@ -128,10 +132,53 @@ pub struct SkillArgs {
 pub struct CorrectArgs {
     /// A cue output directory (e.g. "video.cue/") or a media file whose
     /// sibling ".cue/" directory exists
-    pub output: String,
+    pub output: PathBuf,
     /// Preview what would change without writing any files
     #[usage(long)]
     pub dry_run: bool,
+}
+
+/// Manage reusable correction lexicons
+#[derive(Debug, Args)]
+pub struct LexiconArgs {
+    /// Which lexicon action to run
+    #[usage(subcommand)]
+    pub command: Option<LexiconCommand>,
+}
+
+#[derive(Debug, Subcommands)]
+pub enum LexiconCommand {
+    /// Promote an applied correction into a directory's corrections.md
+    Promote(LexiconPromoteArgs),
+}
+
+/// Promote a verified correction into a reusable scope
+#[derive(Debug, Args)]
+pub struct LexiconPromoteArgs {
+    /// A cue output directory or its source media file
+    pub output: PathBuf,
+    /// Applied correction phrase to promote
+    #[usage(long)]
+    pub rule: String,
+    /// Existing directory that should own corrections.md
+    #[usage(long)]
+    pub to: PathBuf,
+    /// Emit a machine-readable, source-bound promotion attestation
+    #[usage(long)]
+    pub json: bool,
+}
+
+/// Review a canonical transcript
+#[derive(Debug, Args)]
+pub struct ReviewArgs {
+    /// A cue output directory or its source media file
+    pub output: PathBuf,
+    /// Report words with confidence below this value
+    #[usage(long, default = "0.75")]
+    pub confidence_below: f32,
+    /// Emit a machine-readable JSON report
+    #[usage(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Subcommands)]
@@ -233,6 +280,52 @@ mod tests {
 
         let after = parse_args(&["cue", "correct", "lesson.cue", "--corrections", "lesson.md"]);
         assert_eq!(after.corrections, Some(PathBuf::from("lesson.md")));
+    }
+
+    #[test]
+    fn lexicon_promote_requires_an_explicit_rule_and_scope() {
+        let cli = parse_args(&[
+            "cue",
+            "lexicon",
+            "promote",
+            "lesson.cue",
+            "--rule",
+            "open telemetry",
+            "--to",
+            "course",
+            "--json",
+        ]);
+        match cli.command.unwrap() {
+            Command::Lexicon(args) => match args.command.unwrap() {
+                LexiconCommand::Promote(args) => {
+                    assert_eq!(args.output, PathBuf::from("lesson.cue"));
+                    assert_eq!(args.rule, "open telemetry");
+                    assert_eq!(args.to, PathBuf::from("course"));
+                    assert!(args.json);
+                }
+            },
+            other => panic!("wrong command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn review_supports_human_and_json_output() {
+        let cli = parse_args(&[
+            "cue",
+            "review",
+            "lesson.cue",
+            "--confidence-below",
+            "0.6",
+            "--json",
+        ]);
+        match cli.command.unwrap() {
+            Command::Review(args) => {
+                assert_eq!(args.output, PathBuf::from("lesson.cue"));
+                assert_eq!(args.confidence_below, 0.6);
+                assert!(args.json);
+            }
+            other => panic!("wrong command: {other:?}"),
+        }
     }
 
     #[test]

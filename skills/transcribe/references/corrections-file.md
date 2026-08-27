@@ -57,22 +57,58 @@ speaker, products, and terms from context.
   cue correct <file>.cue --corrections corrections.md
   ```
 
-- **Batch folders:** keep one shared `corrections.md` and pass it to the main
-  batch command with `--corrections`. This also works for recursive outputs
-  with different parents.
+- **Batch folders:** place one shared `corrections.md` at the course or
+  project scope and run cue from that directory, or pass it explicitly with
+  `--corrections`.
 
-Without an explicit flag, cue discovers `corrections.md` in the output
-directory and then its parent. An explicit manifest always takes precedence.
-The manifest remains authoritative: changing it replaces previous corrections
-from canonical data, while removing it restores uncorrected derived files on
-the next normal render.
+Without an explicit flag, outputs beneath the current working directory
+compose every `corrections.md` from that directory down through nearer folder
+scopes and the output directory. Broad rules apply first; the nearest mapping
+wins when scopes define the same phrase. Outputs outside the working directory
+use only their output-local and direct-parent files. An explicit manifest
+bypasses discovery. Manifests remain authoritative: changing them replaces
+previous corrections from canonical data, while removing all applicable
+manifests restores uncorrected derived files on the next normal render.
+
+## Review and promotion
+
+Run a focused, read-only review before inventing corrections:
+
+```bash
+cue review <file>.cue
+cue review <file>.cue --json
+```
+
+Review candidates include low-confidence words, possible fallback timing,
+unmatched rules, scoped mapping conflicts, and ambiguous speaker turns. They
+are leads to verify against context, not permission to guess.
+
+Promote a successfully applied rule only when the user has approved the
+destination scope:
+
+```bash
+cue lexicon promote <file>.cue \
+  --rule "open telemetry" \
+  --to /path/to/course \
+  --json
+```
+
+The target must be an existing directory. Promotion verifies that the receipt
+still matches its manifest and canonical sources, requires at least one
+recorded replacement, avoids duplicates, and refuses to replace a conflicting
+rule. If the sources changed, rerun `cue correct` before promoting. Never copy
+rules between scopes by assumption or silently promote every applied
+correction.
+`--json` emits a machine-readable attestation containing hashes of the source
+receipt and resulting target lexicon.
 
 ## What correction rendering touches
 
 - Reconstructs and rewrites: `transcript.txt`, cleaned text when
   `normalized.json` exists, and configured or existing SRT/VTT subtitles.
-- Writes `corrections.applied.json`, a versioned receipt with canonical source
-  hashes and per-rule application counts. Do not edit or reuse it as a
+- Writes `corrections.applied.json`, a versioned receipt with every
+  contributing manifest and hash, canonical source hashes, winning rule
+  provenance, and per-rule application counts. Do not edit or reuse it as a
   manifest.
 - Never modifies: `transcript.json`, `normalized.json`, or analysis outputs.
 - Overwrites manual edits in derived text and subtitle files because every

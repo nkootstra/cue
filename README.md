@@ -25,6 +25,9 @@ configured — summaries, descriptions, and chapters.
 - **Deterministic corrections.** Fix misheard names and terms by writing a
   plain-text corrections manifest. cue applies it during normal processing
   and cached reruns, never corrupting the raw archive.
+- **Reviewable vocabulary reuse.** Compose project, course, folder, and
+  source lexicons, inspect focused correction candidates, and explicitly
+  promote only corrections that a completed render proved useful.
 - **Fast reruns.** Content-addressed caching means a rerun skips completed
   extraction, transcription, normalization, and analysis.
 - **Replaceable providers.** faster-whisper, S1, and OpenAI-compatible
@@ -73,6 +76,8 @@ Ollama optional, for S1 transcript cleanup. After installing, run
 | `cue <path>...` | Process one or more media files or directories through the full pipeline |
 | `cue transcribe <path>...` | Process paths through the canonical transcript only (no subtitles/analysis) |
 | `cue correct <file>.cue` | Rebuild an existing output from canonical JSON and apply corrections |
+| `cue review <file>.cue [--json]` | Report focused correction candidates without changing files |
+| `cue lexicon promote <file>.cue --rule <phrase> --to <dir>` | Promote a verified applied rule into a reusable scope |
 | `cue doctor` | Check required and optional tools; `--fix` provisions the Python worker |
 | `cue models list/check/install s1` | Manage transcription/normalization models in Ollama |
 | `cue skill install [--local]` | Install the `transcribe` agent skill globally, or in the current project |
@@ -133,7 +138,7 @@ that render, including fully cached reruns.
 | `subtitles.srt` / `subtitles.vtt` | Subtitles from the canonical transcript |
 | `analysis.json` / `summary.md` / `description.md` | LLM analysis (when a gateway is configured) |
 | `corrections.md` | Optional manifest you write to fix misheard names/terms |
-| `corrections.applied.json` | Versioned receipt written when corrections are applied, recording source hashes and per-rule applications |
+| `corrections.applied.json` | Versioned receipt recording contributing lexicons, canonical source hashes, rule provenance, and per-artifact applications |
 
 ## Correcting transcripts
 
@@ -154,17 +159,24 @@ cue correct video.cue --corrections corrections.md            # rebuild and appl
 ```
 
 The global `--corrections` flag works with the default pipeline,
-`cue transcribe`, and `cue correct`. Without it, cue looks for
-`corrections.md` in the output directory and then its parent. The explicit
-flag takes precedence, followed by the output-directory manifest and the
-parent-directory manifest.
+`cue transcribe`, `cue correct`, and `cue review`. Passing it uses only that
+explicit manifest. Without it, cue composes scoped `corrections.md` files.
+For an output beneath the current working directory, discovery starts at the
+working directory and continues down through its ancestor folders to the
+output itself. Broader rules load first; a nearer scope wins when two files
+map the same phrase, while unrelated rules from every scope remain active.
+For an output outside the current working directory, discovery is deliberately
+limited to the output directory and its direct parent so cue never searches
+arbitrary filesystem ancestors.
 
-Normal processing applies the selected manifest after rendering, so cached
-reruns keep corrections. Each corrected render writes
-`corrections.applied.json`; this receipt records what was applied but is not a
-source of truth. Change the manifest and rerun to replace the old corrections
-from canonical data. Remove the manifest and rerun to restore uncorrected
-derived files and remove the stale receipt.
+Normal processing applies the effective lexicon after rendering, so cached
+reruns keep corrections. Each corrected render writes a schema-v2
+`corrections.applied.json` containing every contributing manifest, its hash,
+the winning source for each effective rule, and per-artifact application
+counts. The receipt proves a render; it is not a source of truth. Change a
+manifest and rerun to replace the old corrections from canonical data. Remove
+all applicable manifests and rerun to restore uncorrected derived files and
+remove the stale receipt.
 
 `cue correct` follows the same canonical model for an existing output: it
 reconstructs `transcript.txt`, cleaned text, and SRT/VTT files from
@@ -173,6 +185,42 @@ edits to those derived files are therefore overwritten. Corrections never
 modify `transcript.json`, `normalized.json`, or existing analysis outputs.
 Matching is case-insensitive and whole-phrase, so `dough` won't affect
 `doughnut`.
+
+### Review and promote corrections
+
+Use the focused review command instead of rereading an entire transcript:
+
+```bash
+cue review video.cue
+cue review video.cue --confidence-below 0.60 --json
+```
+
+The report is read-only. It identifies low-confidence words, words that may
+have segment-level fallback timing, effective rules that do not match the
+canonical transcript, conflicting scoped rules, and ambiguous speaker turns
+when speaker assignments exist. Diagnostic IDs are stable; `--json` emits a
+versioned report suitable for agents and scripts. Candidates are evidence to
+review, not automatic corrections—the correct spelling still requires known
+context.
+
+After applying and verifying a source-specific correction, promote it into an
+existing project, course, or folder directory so later files reuse it:
+
+```bash
+cue lexicon promote video.cue \
+  --rule "open telemetry" \
+  --to /path/to/course
+```
+
+Promotion reads `corrections.applied.json` and succeeds only when its manifest
+and canonical-source hashes still match the current files and the selected
+rule made at least one replacement. It appends the verified mapping to the
+target directory's `corrections.md`, is idempotent when the same mapping is
+already present, and refuses to overwrite a conflicting mapping. The target
+directory must be explicit and already exist. Cue never promotes or “learns”
+corrections without this command.
+Add `--json` when a workflow needs a machine-readable attestation bound to the
+source receipt and resulting target lexicon.
 
 ## Agent skill
 
@@ -188,9 +236,10 @@ npx --yes skills@1.5.9 add nkootstra/cue --global -y
 ```
 
 The skill teaches agents to install cue when missing, run the pipeline,
-gather speaker/domain context, write a corrections manifest, apply it during
-the main cue invocation or a safe cached rerun, and use `cue correct` for
-existing outputs. It also teaches agents to respect the privacy boundary:
+gather speaker/domain context, review focused candidates, write scoped
+correction manifests, apply them during the main cue invocation or a safe
+cached rerun, and explicitly promote verified rules when the user approves a
+target scope. It also teaches agents to respect the privacy boundary:
 media, audio, raw
 transcripts, and subtitles stay local; only normalized text may be sent to
 the configured analysis gateway. All examples in the skill use fictional
@@ -220,7 +269,8 @@ Work in progress.
 - [x] LLM analysis (OpenAI-compatible gateways: Ollama `/v1`, OpenRouter)
 - [x] Content-addressed caching for every stage; reruns skip completed work
 - [x] Pipeline event bus with TTY-aware rendering
-- [x] Durable deterministic transcript corrections and application receipts
+- [x] Durable scoped correction lexicons, focused review, explicit promotion,
+      and application receipts
 - [x] `transcribe` agent skill with evals
 - [ ] Incremental progress within stages (worker-level reporting)
 - [ ] Parallel file processing

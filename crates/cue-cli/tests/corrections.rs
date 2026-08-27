@@ -79,9 +79,9 @@ fn correct_writes_a_versioned_receipt_for_the_canonical_sources() {
     let receipt: serde_json::Value =
         serde_json::from_slice(&fs::read(output.join("corrections.applied.json")).unwrap())
             .unwrap();
-    assert_eq!(receipt["schema_version"], 1);
+    assert_eq!(receipt["schema_version"], 2);
     assert_eq!(
-        receipt["manifest_hash"],
+        receipt["manifests"][0]["hash"],
         cue_cache::bytes_hash(manifest_bytes)
     );
     assert_eq!(
@@ -89,7 +89,8 @@ fn correct_writes_a_versioned_receipt_for_the_canonical_sources() {
         cue_cache::bytes_hash(&transcript_bytes)
     );
     assert!(receipt["source_hashes"]["normalized"].is_null());
-    assert_eq!(receipt["manifest_source"], "explicit");
+    assert_eq!(receipt["manifests"][0]["source"], "explicit");
+    assert_eq!(receipt["rules"][0]["source_manifest"], 0);
     assert_eq!(receipt["rules"][0]["find"], "open telemetry");
     assert_eq!(receipt["rules"][0]["replace"], "OpenTelemetry");
     assert_eq!(
@@ -433,7 +434,10 @@ fn output_manifest_takes_precedence_over_parent_manifest() {
     let receipt: serde_json::Value =
         serde_json::from_slice(&fs::read(output.join("corrections.applied.json")).unwrap())
             .unwrap();
-    assert_eq!(receipt["manifest_source"], "output-directory");
+    assert_eq!(
+        receipt["manifests"].as_array().unwrap().last().unwrap()["source"],
+        "output-directory"
+    );
 }
 
 #[test]
@@ -461,7 +465,455 @@ fn parent_manifest_is_used_when_output_manifest_is_absent() {
     let receipt: serde_json::Value =
         serde_json::from_slice(&fs::read(output.join("corrections.applied.json")).unwrap())
             .unwrap();
-    assert_eq!(receipt["manifest_source"], "parent-directory");
+    assert_eq!(receipt["manifests"][0]["source"], "parent-directory");
+}
+
+#[test]
+fn discovered_lexicons_compose_from_project_to_source_with_nearest_rule_winning() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let course = project.join("course");
+    let output = course.join("lesson.cue");
+    fs::create_dir_all(&output).unwrap();
+    write_transcript(&output);
+    fs::write(
+        project.join("corrections.md"),
+        "open -> OPEN\ntelemetry -> ProjectTelemetry\n",
+    )
+    .unwrap();
+    fs::write(
+        course.join("corrections.md"),
+        "telemetry -> CourseTelemetry\n",
+    )
+    .unwrap();
+
+    let result = cue_command(temp.path())
+        .current_dir(&project)
+        .args(["correct", output.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(output.join("transcript.txt")).unwrap(),
+        "OPEN CourseTelemetry.\n"
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.join("corrections.applied.json")).unwrap())
+            .unwrap();
+    assert_eq!(receipt["schema_version"], 2);
+    assert_eq!(receipt["manifests"].as_array().unwrap().len(), 2);
+    assert_eq!(receipt["manifests"][0]["path"], "../../corrections.md");
+    assert_eq!(receipt["manifests"][1]["path"], "../corrections.md");
+    assert_eq!(receipt["rules"][0]["source_manifest"], 0);
+    assert_eq!(receipt["rules"][1]["source_manifest"], 1);
+}
+
+#[test]
+fn empty_broad_discovered_lexicon_does_not_hide_valid_nearer_lexicon() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let course = project.join("course");
+    let output = course.join("lesson.cue");
+    fs::create_dir_all(&output).unwrap();
+    write_transcript(&output);
+    fs::write(
+        project.join("corrections.md"),
+        "# no project-wide corrections yet\n",
+    )
+    .unwrap();
+    fs::write(
+        course.join("corrections.md"),
+        "open telemetry -> OpenTelemetry\n",
+    )
+    .unwrap();
+
+    let result = cue_command(temp.path())
+        .current_dir(&project)
+        .args(["correct", output.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(output.join("transcript.txt")).unwrap(),
+        "OpenTelemetry.\n"
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.join("corrections.applied.json")).unwrap())
+            .unwrap();
+    let manifests = receipt["manifests"].as_array().unwrap();
+    assert_eq!(manifests.len(), 1);
+    assert_eq!(manifests[0]["path"], "../corrections.md");
+}
+
+#[test]
+fn empty_discovered_lexicon_is_treated_as_no_manifest() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("lesson.cue");
+    fs::create_dir(&output).unwrap();
+    write_transcript(&output);
+    fs::write(
+        temp.path().join("corrections.md"),
+        "# no approved corrections yet\n",
+    )
+    .unwrap();
+
+    let result = cue_command(temp.path())
+        .args(["correct", output.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("no corrections manifest found"), "{stderr}");
+    assert!(!stderr.contains("manifest has no rules"), "{stderr}");
+    assert!(!output.join("corrections.applied.json").exists());
+}
+
+#[test]
+fn nearest_override_runs_at_its_near_scope_position() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let course = project.join("course");
+    let output = course.join("lesson.cue");
+    fs::create_dir_all(&output).unwrap();
+    write_transcript(&output);
+    fs::write(
+        project.join("corrections.md"),
+        "open -> Broad\ntelemetry -> open\n",
+    )
+    .unwrap();
+    fs::write(course.join("corrections.md"), "open -> Near\n").unwrap();
+
+    let result = cue_command(temp.path())
+        .current_dir(&project)
+        .args(["correct", output.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(result.status.success());
+    assert_eq!(
+        fs::read_to_string(output.join("transcript.txt")).unwrap(),
+        "Near Near.\n"
+    );
+}
+
+#[test]
+fn output_at_working_directory_does_not_discover_parent_lexicon() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("lesson.cue");
+    fs::create_dir(&output).unwrap();
+    write_transcript(&output);
+    fs::write(
+        temp.path().join("corrections.md"),
+        "open telemetry -> OutsideBoundary\n",
+    )
+    .unwrap();
+
+    let result = cue_command(temp.path())
+        .current_dir(&output)
+        .args(["correct", "."])
+        .output()
+        .unwrap();
+
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("no corrections manifest found"));
+}
+
+#[test]
+fn lexicon_promote_copies_an_applied_rule_to_an_explicit_scope() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let source = project.join("course");
+    let output = source.join("lesson.cue");
+    fs::create_dir_all(&output).unwrap();
+    write_transcript(&output);
+    fs::write(
+        source.join("corrections.md"),
+        "open telemetry -> OpenTelemetry\n",
+    )
+    .unwrap();
+    let corrected = cue_command(temp.path())
+        .current_dir(&project)
+        .args(["correct", output.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(corrected.status.success());
+
+    let promoted = cue_command(temp.path())
+        .current_dir(&project)
+        .args([
+            "lexicon",
+            "promote",
+            output.to_str().unwrap(),
+            "--rule",
+            "open telemetry",
+            "--to",
+            project.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        promoted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&promoted.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("corrections.md")).unwrap(),
+        "open telemetry -> OpenTelemetry\n"
+    );
+
+    let attestation = cue_command(temp.path())
+        .current_dir(&project)
+        .args([
+            "lexicon",
+            "promote",
+            output.to_str().unwrap(),
+            "--rule",
+            "open telemetry",
+            "--to",
+            project.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(attestation.status.success());
+    let attestation: serde_json::Value = serde_json::from_slice(&attestation.stdout).unwrap();
+    assert_eq!(attestation["schema_version"], 1);
+    assert_eq!(attestation["status"], "already-present");
+    assert_eq!(
+        attestation["source_receipt_hash"],
+        cue_cache::bytes_hash(&fs::read(output.join("corrections.applied.json")).unwrap())
+    );
+    assert_eq!(
+        attestation["target_lexicon_hash"],
+        cue_cache::bytes_hash(&fs::read(project.join("corrections.md")).unwrap())
+    );
+}
+
+#[test]
+fn lexicon_promote_rejects_a_rule_that_never_applied() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let output = project.join("lesson.cue");
+    fs::create_dir_all(&output).unwrap();
+    write_transcript(&output);
+    fs::write(
+        output.join("corrections.md"),
+        "missing phrase -> Better Phrase\n",
+    )
+    .unwrap();
+    let corrected = cue_command(temp.path())
+        .current_dir(&project)
+        .args(["correct", output.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(corrected.status.success());
+
+    let promoted = cue_command(temp.path())
+        .current_dir(&project)
+        .args([
+            "lexicon",
+            "promote",
+            output.to_str().unwrap(),
+            "--rule",
+            "missing phrase",
+            "--to",
+            project.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!promoted.status.success());
+    assert!(
+        String::from_utf8_lossy(&promoted.stderr).contains("did not match any rendered artifact")
+    );
+    assert!(!project.join("corrections.md").exists());
+}
+
+#[test]
+fn lexicon_promote_rejects_stale_receipt_provenance() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let output = project.join("lesson.cue");
+    fs::create_dir_all(&output).unwrap();
+    write_transcript(&output);
+    fs::write(
+        output.join("corrections.md"),
+        "open telemetry -> OpenTelemetry\n",
+    )
+    .unwrap();
+    assert!(
+        cue_command(temp.path())
+            .current_dir(&project)
+            .args(["correct", output.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(output.join("transcript.json"), "{}\n").unwrap();
+
+    let promoted = cue_command(temp.path())
+        .current_dir(&project)
+        .args([
+            "lexicon",
+            "promote",
+            output.to_str().unwrap(),
+            "--rule",
+            "open telemetry",
+            "--to",
+            project.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!promoted.status.success());
+    assert!(String::from_utf8_lossy(&promoted.stderr).contains("no longer matches"));
+    assert!(!project.join("corrections.md").exists());
+
+    write_transcript(&output);
+    assert!(
+        cue_command(temp.path())
+            .current_dir(&project)
+            .args(["correct", output.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(
+        output.join("corrections.md"),
+        "open telemetry -> ChangedAfterRender\n",
+    )
+    .unwrap();
+    let promoted = cue_command(temp.path())
+        .current_dir(&project)
+        .args([
+            "lexicon",
+            "promote",
+            output.to_str().unwrap(),
+            "--rule",
+            "open telemetry",
+            "--to",
+            project.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!promoted.status.success());
+    assert!(String::from_utf8_lossy(&promoted.stderr).contains("no longer matches"));
+    assert!(!project.join("corrections.md").exists());
+}
+
+#[test]
+fn lexicon_promote_rejects_a_receipt_owned_mapping() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let output = project.join("lesson.cue");
+    fs::create_dir_all(&output).unwrap();
+    write_transcript(&output);
+    fs::write(
+        output.join("corrections.md"),
+        "open telemetry -> OpenTelemetry\n",
+    )
+    .unwrap();
+    assert!(
+        cue_command(temp.path())
+            .current_dir(&project)
+            .args(["correct", output.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let receipt_path = output.join("corrections.applied.json");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    receipt["rules"][0]["replace"] = "Fabricated".into();
+    fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+
+    let promoted = cue_command(temp.path())
+        .current_dir(&project)
+        .args([
+            "lexicon",
+            "promote",
+            output.to_str().unwrap(),
+            "--rule",
+            "open telemetry",
+            "--to",
+            project.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!promoted.status.success());
+    assert!(String::from_utf8_lossy(&promoted.stderr).contains("did not match"));
+    assert!(!project.join("corrections.md").exists());
+}
+
+#[test]
+fn lexicon_promote_is_idempotent_and_does_not_overwrite_conflicts() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let source = project.join("source");
+    let output = source.join("lesson.cue");
+    fs::create_dir_all(&output).unwrap();
+    write_transcript(&output);
+    fs::write(
+        source.join("corrections.md"),
+        "open telemetry -> OpenTelemetry\n",
+    )
+    .unwrap();
+    assert!(
+        cue_command(temp.path())
+            .current_dir(&project)
+            .args(["correct", output.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let promote = || {
+        cue_command(temp.path())
+            .current_dir(&project)
+            .args([
+                "lexicon",
+                "promote",
+                output.to_str().unwrap(),
+                "--rule",
+                "open telemetry",
+                "--to",
+                project.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap()
+    };
+    assert!(promote().status.success());
+    assert!(promote().status.success());
+    assert_eq!(
+        fs::read_to_string(project.join("corrections.md")).unwrap(),
+        "open telemetry -> OpenTelemetry\n"
+    );
+
+    fs::write(
+        project.join("corrections.md"),
+        "open telemetry -> DifferentSpelling\n",
+    )
+    .unwrap();
+    let conflict = promote();
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("already maps"));
+    assert_eq!(
+        fs::read_to_string(project.join("corrections.md")).unwrap(),
+        "open telemetry -> DifferentSpelling\n"
+    );
 }
 
 #[test]
@@ -497,7 +949,7 @@ fn explicit_manifest_takes_precedence_over_discovered_manifests() {
     let receipt: serde_json::Value =
         serde_json::from_slice(&fs::read(output.join("corrections.applied.json")).unwrap())
             .unwrap();
-    assert_eq!(receipt["manifest_source"], "explicit");
+    assert_eq!(receipt["manifests"][0]["source"], "explicit");
 }
 
 #[test]
@@ -549,6 +1001,7 @@ fn correct_rejects_an_empty_manifest_without_changing_outputs() {
     );
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(stderr.contains("manifest has no rules"), "{stderr}");
+    assert!(stderr.contains(&manifest.display().to_string()), "{stderr}");
 }
 
 fn write_dummy_batch(root: &std::path::Path) -> [std::path::PathBuf; 2] {
@@ -641,6 +1094,7 @@ fn empty_explicit_manifest_fails_batch_before_media_inspection() {
     assert!(!result.status.success());
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(stderr.contains("manifest has no rules"), "{stderr}");
+    assert!(stderr.contains(&manifest.display().to_string()), "{stderr}");
     assert!(!stderr.contains("ffprobe"), "{stderr}");
     assert_batch_outputs_unchanged(temp.path());
 }
