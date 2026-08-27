@@ -48,17 +48,15 @@ fn run_inner(
 ) -> Result<()> {
     let output_dir = resolve_output_dir(&args.output)?;
     let plan = CorrectionPlan::require(&output_dir, corrections)?;
-    let outcome = plan
-        .render(&output_dir, config, CorrectionScope::Full, args.dry_run)?
-        .expect("required correction plans always render an outcome");
+    let outcome = plan.render(&output_dir, config, CorrectionScope::Full, args.dry_run)?;
 
     for (artifact, replacements) in &outcome.replacements {
         if *replacements > 0 {
             println_line(&format!("  {artifact}: {replacements} replacement(s)"));
         }
     }
-    if !outcome.changed_any() {
-        println_line("  no changes: no correctable files matched the manifest");
+    if !outcome.has_replacements() {
+        println_line("  no replacements; derived artifacts rebuilt from canonical sources");
     }
     if args.dry_run {
         println_line("\nDry run — nothing written. Re-run without --dry-run to apply.");

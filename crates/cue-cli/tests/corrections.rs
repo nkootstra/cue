@@ -197,7 +197,10 @@ fn valid_zero_match_manifest_still_rebuilds_and_records_the_render() {
 
     assert!(result.status.success());
     let stdout = String::from_utf8_lossy(&result.stdout);
-    assert!(stdout.contains("no changes"), "{stdout}");
+    assert!(
+        stdout.contains("no replacements; derived artifacts rebuilt from canonical sources"),
+        "{stdout}"
+    );
     assert_eq!(
         fs::read_to_string(output.join("transcript.txt")).unwrap(),
         "open telemetry.\n"

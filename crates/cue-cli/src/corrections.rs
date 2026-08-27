@@ -2,16 +2,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use cue_core::config::SubtitleFormat;
 use cue_core::{CueError, Result};
 
 const RECEIPT_FILE: &str = "corrections.applied.json";
-const CORRECTABLE_FILES: [&str; 4] = [
-    "transcript.txt",
-    "transcript.clean.txt",
-    "subtitles.srt",
-    "subtitles.vtt",
-];
 
 #[derive(Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -30,7 +26,7 @@ pub(crate) struct PreparedManifest {
 
 pub(crate) enum CorrectionPlan {
     None,
-    Apply(PreparedManifest),
+    Apply(Arc<PreparedManifest>),
 }
 
 impl CorrectionPlan {
@@ -40,7 +36,6 @@ impl CorrectionPlan {
         output_dirs: impl IntoIterator<Item = &'a Path>,
         explicit: Option<&Path>,
     ) -> Result<HashMap<PathBuf, Self>> {
-        let output_dirs = output_dirs.into_iter().collect::<Vec<_>>();
         if let Some(path) = explicit {
             if !path.exists() {
                 return Err(CueError::general(format!(
@@ -48,10 +43,10 @@ impl CorrectionPlan {
                     path.display()
                 )));
             }
-            let manifest = PreparedManifest::read(path, ManifestSource::Explicit)?;
+            let manifest = Arc::new(PreparedManifest::read(path, ManifestSource::Explicit)?);
             return Ok(output_dirs
                 .into_iter()
-                .map(|output_dir| (output_dir.to_path_buf(), Self::Apply(manifest.clone())))
+                .map(|output_dir| (output_dir.to_path_buf(), Self::Apply(Arc::clone(&manifest))))
                 .collect());
         }
 
@@ -70,7 +65,9 @@ impl CorrectionPlan {
         let Some((path, source)) = find_manifest(output_dir, explicit)? else {
             return Ok(Self::None);
         };
-        Ok(Self::Apply(PreparedManifest::read(&path, source)?))
+        Ok(Self::Apply(Arc::new(PreparedManifest::read(
+            &path, source,
+        )?)))
     }
 
     /// Resolve a manifest for the explicit correction command, where absence
@@ -91,7 +88,7 @@ impl CorrectionPlan {
         config: &cue_core::Config,
         scope: CorrectionScope,
         dry_run: bool,
-    ) -> Result<Option<RenderOutcome>> {
+    ) -> Result<RenderOutcome> {
         match self {
             Self::None => {
                 if !dry_run {
@@ -100,11 +97,9 @@ impl CorrectionPlan {
                     }
                     clear_receipt(output_dir)?;
                 }
-                Ok(None)
+                Ok(RenderOutcome::default())
             }
-            Self::Apply(manifest) => {
-                render_output(output_dir, manifest, config, scope, dry_run).map(Some)
-            }
+            Self::Apply(manifest) => render_output(output_dir, manifest, config, scope, dry_run),
         }
     }
 }
@@ -140,7 +135,7 @@ fn find_manifest(
 impl PreparedManifest {
     /// Read and validate a manifest without modifying its target output.
     /// Batch processing can prepare every manifest before media work begins.
-    pub(crate) fn read(path: &Path, source: ManifestSource) -> Result<Self> {
+    fn read(path: &Path, source: ManifestSource) -> Result<Self> {
         let bytes = std::fs::read(path).map_err(|e| {
             CueError::general(format!(
                 "could not read corrections manifest {}",
@@ -168,6 +163,7 @@ impl PreparedManifest {
     }
 }
 
+#[derive(Default)]
 pub(crate) struct RenderOutcome {
     pub(crate) replacements: Vec<(&'static str, usize)>,
 }
@@ -179,7 +175,7 @@ pub(crate) enum CorrectionScope {
 }
 
 impl RenderOutcome {
-    pub(crate) fn changed_any(&self) -> bool {
+    pub(crate) fn has_replacements(&self) -> bool {
         self.replacements.iter().any(|(_, count)| *count > 0)
     }
 }
@@ -221,7 +217,7 @@ struct PreparedArtifact {
 
 /// Rebuild correctable artifacts from canonical JSON and apply a prepared
 /// manifest. Canonical and analysis artifacts are read-only inputs.
-pub(crate) fn render_output(
+fn render_output(
     output_dir: &Path,
     manifest: &PreparedManifest,
     config: &cue_core::Config,
@@ -242,57 +238,46 @@ pub(crate) fn render_output(
         None
     };
 
-    let policy = cue_subtitles::SubtitlePolicy {
-        max_lines: config.subtitles.max_lines,
-        max_chars_per_line: config.subtitles.max_chars_per_line,
-        max_duration_ms: config.subtitles.max_duration_ms,
-    };
-    let subtitle_cues = cue_subtitles::build_cues(&transcript, &policy)?;
-
     // Build and validate the complete render before mutating any output.
-    let mut artifacts = Vec::new();
-    for name in CORRECTABLE_FILES {
-        let path = output_dir.join(name);
-        let configured_subtitle = match name {
-            "subtitles.srt" => config
-                .subtitles
-                .formats
-                .contains(&cue_core::config::SubtitleFormat::Srt),
-            "subtitles.vtt" => config
-                .subtitles
-                .formats
-                .contains(&cue_core::config::SubtitleFormat::Vtt),
-            _ => false,
-        };
-        let should_render = match name {
-            "transcript.txt" => true,
-            "transcript.clean.txt" => scope == CorrectionScope::Full && normalized.is_some(),
-            "subtitles.srt" | "subtitles.vtt" => {
-                scope == CorrectionScope::Full && (path.exists() || configured_subtitle)
-            }
-            _ => false,
-        };
-        if !should_render {
-            continue;
-        }
+    let mut artifacts = vec![prepare_artifact(
+        output_dir,
+        "transcript.txt",
+        transcript.plain_text(),
+        &manifest.rules,
+    )];
+    if scope == CorrectionScope::Full
+        && let Some((clean, _)) = &normalized
+    {
+        artifacts.push(prepare_artifact(
+            output_dir,
+            "transcript.clean.txt",
+            clean.plain_text(),
+            &manifest.rules,
+        ));
+    }
 
-        let raw = match name {
-            "transcript.txt" => transcript.plain_text(),
-            "transcript.clean.txt" => normalized
-                .as_ref()
-                .map(|(value, _)| value.plain_text())
-                .unwrap_or_default(),
-            "subtitles.srt" => cue_subtitles::render_srt(&subtitle_cues),
-            "subtitles.vtt" => cue_subtitles::render_vtt(&subtitle_cues),
-            _ => unreachable!("all correctable artifact names are covered"),
+    let subtitle_formats = [SubtitleFormat::Srt, SubtitleFormat::Vtt]
+        .into_iter()
+        .filter(|format| {
+            let path = output_dir.join(format!("subtitles.{}", format.extension()));
+            scope == CorrectionScope::Full
+                && (path.exists() || config.subtitles.formats.contains(format))
+        })
+        .collect::<Vec<_>>();
+    if !subtitle_formats.is_empty() {
+        let policy = cue_subtitles::SubtitlePolicy {
+            max_lines: config.subtitles.max_lines,
+            max_chars_per_line: config.subtitles.max_chars_per_line,
+            max_duration_ms: config.subtitles.max_duration_ms,
         };
-        let (content, counts) = cue_core::correct::apply_with_counts(&raw, &manifest.rules);
-        artifacts.push(PreparedArtifact {
-            name,
-            path,
-            content,
-            counts,
-        });
+        let cues = cue_subtitles::build_cues(&transcript, &policy)?;
+        for format in subtitle_formats {
+            let (name, raw) = match format {
+                SubtitleFormat::Srt => ("subtitles.srt", cue_subtitles::render_srt(&cues)),
+                SubtitleFormat::Vtt => ("subtitles.vtt", cue_subtitles::render_vtt(&cues)),
+            };
+            artifacts.push(prepare_artifact(output_dir, name, raw, &manifest.rules));
+        }
     }
 
     let receipt = Receipt {
@@ -365,8 +350,23 @@ pub(crate) fn render_output(
 
 /// Remove the marker for a corrected render when normal processing has no
 /// authoritative manifest. Missing receipts are already clean state.
-pub(crate) fn clear_receipt(output_dir: &Path) -> Result<()> {
+fn clear_receipt(output_dir: &Path) -> Result<()> {
     remove_if_present(&output_dir.join(RECEIPT_FILE), "stale corrections receipt")
+}
+
+fn prepare_artifact(
+    output_dir: &Path,
+    name: &'static str,
+    raw: String,
+    rules: &[cue_core::correct::Correction],
+) -> PreparedArtifact {
+    let (content, counts) = cue_core::correct::apply_with_counts(&raw, rules);
+    PreparedArtifact {
+        name,
+        path: output_dir.join(name),
+        content,
+        counts,
+    }
 }
 
 fn clear_non_transcript_artifacts(output_dir: &Path) -> Result<()> {
