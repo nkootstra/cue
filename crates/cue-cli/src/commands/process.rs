@@ -150,14 +150,10 @@ async fn run_inner(
     // Resolve the complete batch before starting any media work. This keeps
     // discovery and output collisions from producing partial batches.
     let plan = resolve_inputs(paths, cli.recursive, cli.output.as_deref().map(Path::new))?;
-    let corrections = plan
-        .inputs
-        .iter()
-        .map(|input| {
-            CorrectionPlan::prepare(&input.output, cli.corrections.as_deref())
-                .map(|correction| (input.output.clone(), correction))
-        })
-        .collect::<Result<HashMap<_, _>>>()?;
+    let corrections = CorrectionPlan::prepare_batch(
+        plan.inputs.iter().map(|input| input.output.as_path()),
+        cli.corrections.as_deref(),
+    )?;
 
     // Stage logic emits events; the renderer decides presentation. Core
     // pipeline behavior never depends on terminal output.

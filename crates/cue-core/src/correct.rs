@@ -28,6 +28,13 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Correction>, CueError> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+        if line.starts_with("->") {
+            return Err(CueError::general(format!(
+                "corrections manifest line {} phrase to find must not be empty",
+                index + 1
+            ))
+            .remedy("write a phrase before `->`"));
+        }
         // Split on the first ` ->` marker. `old -> new`, `old ->new`, and a
         // bare `old ->` (empty replacement, a deletion rule) all parse.
         let Some((old, new)) = line.split_once(" ->") else {
@@ -165,6 +172,17 @@ mod tests {
     fn missing_separator_is_an_error() {
         let err = parse_manifest("this is not a rule\n").unwrap_err();
         assert!(err.to_string().contains("old -> new"), "{err}");
+    }
+
+    #[test]
+    fn empty_find_phrase_is_an_error() {
+        let err = parse_manifest(" -> replacement\n").unwrap_err();
+        let rendered = err.to_string();
+        assert!(rendered.contains("line 1"), "{rendered}");
+        assert!(
+            rendered.contains("phrase to find must not be empty"),
+            "{rendered}"
+        );
     }
 
     #[test]

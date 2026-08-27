@@ -185,17 +185,19 @@ fn valid_zero_match_manifest_still_rebuilds_and_records_the_render() {
     let manifest = temp.path().join("corrections.md");
     fs::write(&manifest, "missing phrase -> Better Phrase\n").unwrap();
 
-    let status = cue_command(temp.path())
+    let result = cue_command(temp.path())
         .args([
             "correct",
             output.to_str().unwrap(),
             "--corrections",
             manifest.to_str().unwrap(),
         ])
-        .status()
+        .output()
         .unwrap();
 
-    assert!(status.success());
+    assert!(result.status.success());
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("no changes"), "{stdout}");
     assert_eq!(
         fs::read_to_string(output.join("transcript.txt")).unwrap(),
         "open telemetry.\n"
@@ -362,4 +364,269 @@ fn correct_removes_stale_clean_text_without_normalized_json() {
 
     assert!(status.success());
     assert!(!output.join("transcript.clean.txt").exists());
+}
+
+#[test]
+fn output_manifest_takes_precedence_over_parent_manifest() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("lesson.cue");
+    fs::create_dir(&output).unwrap();
+    write_transcript(&output);
+    fs::write(
+        temp.path().join("corrections.md"),
+        "open telemetry -> Parent\n",
+    )
+    .unwrap();
+    fs::write(output.join("corrections.md"), "open telemetry -> Output\n").unwrap();
+
+    let status = cue_command(temp.path())
+        .args(["correct", output.to_str().unwrap()])
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    assert_eq!(
+        fs::read_to_string(output.join("transcript.txt")).unwrap(),
+        "Output.\n"
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.join("corrections.applied.json")).unwrap())
+            .unwrap();
+    assert_eq!(receipt["manifest_source"], "output-directory");
+}
+
+#[test]
+fn parent_manifest_is_used_when_output_manifest_is_absent() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("lesson.cue");
+    fs::create_dir(&output).unwrap();
+    write_transcript(&output);
+    fs::write(
+        temp.path().join("corrections.md"),
+        "open telemetry -> Parent\n",
+    )
+    .unwrap();
+
+    let status = cue_command(temp.path())
+        .args(["correct", output.to_str().unwrap()])
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    assert_eq!(
+        fs::read_to_string(output.join("transcript.txt")).unwrap(),
+        "Parent.\n"
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.join("corrections.applied.json")).unwrap())
+            .unwrap();
+    assert_eq!(receipt["manifest_source"], "parent-directory");
+}
+
+#[test]
+fn explicit_manifest_takes_precedence_over_discovered_manifests() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("lesson.cue");
+    fs::create_dir(&output).unwrap();
+    write_transcript(&output);
+    fs::write(
+        temp.path().join("corrections.md"),
+        "open telemetry -> Parent\n",
+    )
+    .unwrap();
+    fs::write(output.join("corrections.md"), "open telemetry -> Output\n").unwrap();
+    let explicit = temp.path().join("explicit.md");
+    fs::write(&explicit, "open telemetry -> Explicit\n").unwrap();
+
+    let status = cue_command(temp.path())
+        .args([
+            "correct",
+            output.to_str().unwrap(),
+            "--corrections",
+            explicit.to_str().unwrap(),
+        ])
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    assert_eq!(
+        fs::read_to_string(output.join("transcript.txt")).unwrap(),
+        "Explicit.\n"
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.join("corrections.applied.json")).unwrap())
+            .unwrap();
+    assert_eq!(receipt["manifest_source"], "explicit");
+}
+
+#[test]
+fn correct_requires_a_manifest() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("lesson.cue");
+    fs::create_dir(&output).unwrap();
+    write_transcript(&output);
+    fs::write(output.join("transcript.txt"), "UNCHANGED\n").unwrap();
+
+    let result = cue_command(temp.path())
+        .args(["correct", output.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(!result.status.success());
+    assert_eq!(
+        fs::read_to_string(output.join("transcript.txt")).unwrap(),
+        "UNCHANGED\n"
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("no corrections manifest found"), "{stderr}");
+}
+
+#[test]
+fn correct_rejects_an_empty_manifest_without_changing_outputs() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("lesson.cue");
+    fs::create_dir(&output).unwrap();
+    write_transcript(&output);
+    fs::write(output.join("transcript.txt"), "UNCHANGED\n").unwrap();
+    let manifest = temp.path().join("empty.md");
+    fs::write(&manifest, "# no approved corrections yet\n\n").unwrap();
+
+    let result = cue_command(temp.path())
+        .args([
+            "correct",
+            output.to_str().unwrap(),
+            "--corrections",
+            manifest.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!result.status.success());
+    assert_eq!(
+        fs::read_to_string(output.join("transcript.txt")).unwrap(),
+        "UNCHANGED\n"
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("manifest has no rules"), "{stderr}");
+}
+
+fn write_dummy_batch(root: &std::path::Path) -> [std::path::PathBuf; 2] {
+    let first = root.join("first.mp4");
+    let second = root.join("second.mp4");
+    fs::write(&first, b"not media").unwrap();
+    fs::write(&second, b"not media").unwrap();
+    for name in ["first.cue", "second.cue"] {
+        let output = root.join(name);
+        fs::create_dir(&output).unwrap();
+        fs::write(output.join("sentinel"), b"UNCHANGED\n").unwrap();
+    }
+    [first, second]
+}
+
+fn assert_batch_outputs_unchanged(root: &std::path::Path) {
+    for name in ["first.cue", "second.cue"] {
+        assert_eq!(
+            fs::read(root.join(name).join("sentinel")).unwrap(),
+            b"UNCHANGED\n"
+        );
+    }
+}
+
+#[test]
+fn missing_explicit_manifest_fails_batch_before_media_inspection() {
+    let temp = tempfile::tempdir().unwrap();
+    let [first, second] = write_dummy_batch(temp.path());
+    let missing = temp.path().join("missing.md");
+
+    let result = cue_command(temp.path())
+        .args([
+            first.to_str().unwrap(),
+            second.to_str().unwrap(),
+            "--corrections",
+            missing.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("manifest"), "{stderr}");
+    assert!(stderr.contains("does not exist"), "{stderr}");
+    assert!(!stderr.contains("ffprobe"), "{stderr}");
+    assert_batch_outputs_unchanged(temp.path());
+}
+
+#[test]
+fn malformed_explicit_manifest_fails_batch_before_media_inspection() {
+    let temp = tempfile::tempdir().unwrap();
+    let [first, second] = write_dummy_batch(temp.path());
+    let manifest = temp.path().join("malformed.md");
+    fs::write(&manifest, "this is not a correction rule\n").unwrap();
+
+    let result = cue_command(temp.path())
+        .args([
+            first.to_str().unwrap(),
+            second.to_str().unwrap(),
+            "--corrections",
+            manifest.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("manifest line 1"), "{stderr}");
+    assert!(!stderr.contains("ffprobe"), "{stderr}");
+    assert_batch_outputs_unchanged(temp.path());
+}
+
+#[test]
+fn empty_explicit_manifest_fails_batch_before_media_inspection() {
+    let temp = tempfile::tempdir().unwrap();
+    let [first, second] = write_dummy_batch(temp.path());
+    let manifest = temp.path().join("empty.md");
+    fs::write(&manifest, "# no approved corrections yet\n").unwrap();
+
+    let result = cue_command(temp.path())
+        .args([
+            first.to_str().unwrap(),
+            second.to_str().unwrap(),
+            "--corrections",
+            manifest.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("manifest has no rules"), "{stderr}");
+    assert!(!stderr.contains("ffprobe"), "{stderr}");
+    assert_batch_outputs_unchanged(temp.path());
+}
+
+#[test]
+fn invalid_discovered_manifest_fails_the_whole_batch_before_media_inspection() {
+    let temp = tempfile::tempdir().unwrap();
+    let [first, second] = write_dummy_batch(temp.path());
+    fs::write(
+        temp.path().join("first.cue/corrections.md"),
+        "open telemetry -> OpenTelemetry\n",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("second.cue/corrections.md"),
+        "not a correction rule\n",
+    )
+    .unwrap();
+
+    let result = cue_command(temp.path())
+        .args([first.to_str().unwrap(), second.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("manifest line 1"), "{stderr}");
+    assert!(!stderr.contains("ffprobe"), "{stderr}");
+    assert_batch_outputs_unchanged(temp.path());
 }

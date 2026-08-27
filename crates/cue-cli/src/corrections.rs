@@ -1,5 +1,6 @@
 //! Durable correction rendering shared by `cue correct` and media processing.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use cue_core::{CueError, Result};
@@ -20,6 +21,7 @@ pub(crate) enum ManifestSource {
     ParentDirectory,
 }
 
+#[derive(Clone)]
 pub(crate) struct PreparedManifest {
     bytes: Vec<u8>,
     rules: Vec<cue_core::correct::Correction>,
@@ -32,6 +34,36 @@ pub(crate) enum CorrectionPlan {
 }
 
 impl CorrectionPlan {
+    /// Resolve and validate correction plans for a complete processing batch.
+    /// An explicit manifest is shared, so it is read and parsed exactly once.
+    pub(crate) fn prepare_batch<'a>(
+        output_dirs: impl IntoIterator<Item = &'a Path>,
+        explicit: Option<&Path>,
+    ) -> Result<HashMap<PathBuf, Self>> {
+        let output_dirs = output_dirs.into_iter().collect::<Vec<_>>();
+        if let Some(path) = explicit {
+            if !path.exists() {
+                return Err(CueError::general(format!(
+                    "corrections manifest {} does not exist",
+                    path.display()
+                )));
+            }
+            let manifest = PreparedManifest::read(path, ManifestSource::Explicit)?;
+            return Ok(output_dirs
+                .into_iter()
+                .map(|output_dir| (output_dir.to_path_buf(), Self::Apply(manifest.clone())))
+                .collect());
+        }
+
+        output_dirs
+            .into_iter()
+            .map(|output_dir| {
+                Self::prepare(output_dir, None)
+                    .map(|correction| (output_dir.to_path_buf(), correction))
+            })
+            .collect()
+    }
+
     /// Resolve and validate the manifest for one output directory. Absence is
     /// a valid plan for ordinary media processing.
     pub(crate) fn prepare(output_dir: &Path, explicit: Option<&Path>) -> Result<Self> {
@@ -63,6 +95,9 @@ impl CorrectionPlan {
         match self {
             Self::None => {
                 if !dry_run {
+                    if scope == CorrectionScope::TranscriptOnly {
+                        clear_non_transcript_artifacts(output_dir)?;
+                    }
                     clear_receipt(output_dir)?;
                 }
                 Ok(None)
@@ -304,6 +339,9 @@ pub(crate) fn render_output(
 
     let receipt_path = output_dir.join(RECEIPT_FILE);
     remove_if_present(&receipt_path, "stale corrections receipt")?;
+    if scope == CorrectionScope::TranscriptOnly {
+        clear_non_transcript_artifacts(output_dir)?;
+    }
     if scope == CorrectionScope::Full && normalized.is_none() {
         remove_if_present(
             &output_dir.join("transcript.clean.txt"),
@@ -331,6 +369,24 @@ pub(crate) fn clear_receipt(output_dir: &Path) -> Result<()> {
     remove_if_present(&output_dir.join(RECEIPT_FILE), "stale corrections receipt")
 }
 
+fn clear_non_transcript_artifacts(output_dir: &Path) -> Result<()> {
+    for name in [
+        "normalized.json",
+        "transcript.clean.txt",
+        "subtitles.srt",
+        "subtitles.vtt",
+        "analysis.json",
+        "summary.md",
+        "description.md",
+    ] {
+        remove_if_present(
+            &output_dir.join(name),
+            "artifact outside transcript-only scope",
+        )?;
+    }
+    Ok(())
+}
+
 fn read_file(path: &Path) -> Result<Vec<u8>> {
     std::fs::read(path).map_err(|e| {
         CueError::general(format!("could not read {}", path.display())).because(e.to_string())
@@ -352,5 +408,136 @@ fn remove_if_present(path: &Path, description: &str) -> Result<()> {
             path.display()
         ))
         .because(err.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_transcript(output: &Path) {
+        std::fs::write(
+            output.join("transcript.json"),
+            r#"{
+  "schema_version": 1,
+  "language": "en",
+  "duration_ms": 1000,
+  "words": [
+    {"text":"open","start_ms":0,"end_ms":300,"confidence":0.9,"speaker":null},
+    {"text":"telemetry.","start_ms":310,"end_ms":1000,"confidence":0.9,"speaker":null}
+  ],
+  "segments": [
+    {"start_ms":0,"end_ms":1000,"text":"open telemetry.","word_start":0,"word_end":2}
+  ]
+}"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn transcript_only_render_leaves_only_transcript_artifacts_and_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("lesson.cue");
+        std::fs::create_dir(&output).unwrap();
+        write_transcript(&output);
+        std::fs::write(output.join("transcript.txt"), "old render\n").unwrap();
+        for stale in [
+            "normalized.json",
+            "transcript.clean.txt",
+            "subtitles.srt",
+            "subtitles.vtt",
+            "analysis.json",
+            "summary.md",
+            "description.md",
+        ] {
+            std::fs::write(output.join(stale), "STALE\n").unwrap();
+        }
+        let manifest = temp.path().join("corrections.md");
+        std::fs::write(&manifest, "open telemetry -> OpenTelemetry\n").unwrap();
+
+        CorrectionPlan::prepare(&output, Some(&manifest))
+            .unwrap()
+            .render(
+                &output,
+                &cue_core::Config::default(),
+                CorrectionScope::TranscriptOnly,
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(output.join("transcript.txt")).unwrap(),
+            "OpenTelemetry.\n"
+        );
+        assert!(output.join("corrections.applied.json").exists());
+        for absent in [
+            "normalized.json",
+            "transcript.clean.txt",
+            "subtitles.srt",
+            "subtitles.vtt",
+            "analysis.json",
+            "summary.md",
+            "description.md",
+        ] {
+            assert!(!output.join(absent).exists(), "{absent} should be absent");
+        }
+    }
+
+    #[test]
+    fn transcript_only_render_without_manifest_clears_stale_correction_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("lesson.cue");
+        std::fs::create_dir(&output).unwrap();
+        write_transcript(&output);
+        std::fs::write(output.join("transcript.txt"), "open telemetry.\n").unwrap();
+        std::fs::write(output.join("corrections.applied.json"), "STALE\n").unwrap();
+        std::fs::write(output.join("subtitles.srt"), "STALE\n").unwrap();
+
+        CorrectionPlan::prepare(&output, None)
+            .unwrap()
+            .render(
+                &output,
+                &cue_core::Config::default(),
+                CorrectionScope::TranscriptOnly,
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(output.join("transcript.txt")).unwrap(),
+            "open telemetry.\n"
+        );
+        assert!(!output.join("corrections.applied.json").exists());
+        assert!(!output.join("subtitles.srt").exists());
+    }
+
+    #[test]
+    fn full_render_without_manifest_clears_only_the_stale_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("lesson.cue");
+        std::fs::create_dir(&output).unwrap();
+        std::fs::write(output.join("transcript.txt"), "open telemetry.\n").unwrap();
+        std::fs::write(output.join("analysis.json"), "ANALYSIS\n").unwrap();
+        std::fs::write(output.join("corrections.applied.json"), "STALE\n").unwrap();
+
+        CorrectionPlan::prepare(&output, None)
+            .unwrap()
+            .render(
+                &output,
+                &cue_core::Config::default(),
+                CorrectionScope::Full,
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(output.join("transcript.txt")).unwrap(),
+            "open telemetry.\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(output.join("analysis.json")).unwrap(),
+            "ANALYSIS\n"
+        );
+        assert!(!output.join("corrections.applied.json").exists());
     }
 }
