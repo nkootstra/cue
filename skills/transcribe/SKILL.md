@@ -69,10 +69,11 @@ write outputs. Outputs land in `<file>.cue/` next to the source (or `--output`):
 | File | Role |
 |---|---|
 | `transcript.json` | **Raw canonical transcript.** Timed words, the source of truth. Never edit this. |
-| `transcript.txt` | Plain text derived from the canonical transcript. This is the file you correct. |
+| `transcript.txt` | Plain text derived from the canonical transcript. Inspect this to identify corrections. |
 | `normalized.json` / `transcript.clean.txt` | S1-cleaned prose (present when Ollama has the S1 model). |
 | `subtitles.srt` / `subtitles.vtt` | Subtitles derived from the canonical transcript. |
 | `analysis.json` / `summary.md` / `description.md` | LLM analysis (present when a gateway is configured). |
+| `corrections.applied.json` | Receipt written after correction, showing which rules were applied to which derived files. |
 
 If the user only wants the plain transcript (no subtitles/analysis):
 
@@ -130,9 +131,9 @@ In this order, until you have enough:
 ### Apply corrections
 
 **Corrections are applied deterministically, not by editing files by hand.**
-Your job is to *identify* the corrections from context; `cue correct` applies
-them to every text artifact (transcript, subtitles) mechanically. This
-guarantees the fix lands everywhere and never corrupts the raw transcript.
+Your job is to *identify* corrections from context; cue applies them to every
+derived text artifact mechanically. Keeping the manifest lets cached reruns
+reapply the same decisions without changing the raw transcript.
 
 1. Read `transcript.txt` from the output directory.
 2. Identify **only** places where the text conflicts with known context —
@@ -143,15 +144,25 @@ guarantees the fix lands everywhere and never corrupts the raw transcript.
    per line in `phrase to find -> replacement` form:
 
    ```text
-   # corrections.md — applied by: cue correct <file>.cue
+   # corrections.md — applied by cue during rendering
    open telemetry -> OpenTelemetry
    John Dough -> John Doe
    ```
 
    See `references/corrections-file.md` in this skill for the full format.
-4. Preview and apply. The manifest is auto-discovered from the output
-   directory (or its parent), so no `--corrections` flag is needed when the
-   manifest sits next to the outputs:
+4. Apply the manifest. For media that should be processed or safely rerun,
+   pass the manifest during the main invocation:
+
+   ```bash
+   cue --corrections /path/to/corrections.md <file.mp4>
+   ```
+
+   cue reuses cached transcription, normalization, and analysis, then rebuilds
+   the derived files and applies the current manifest. If `corrections.md` is
+   in the output directory or its parent, cue discovers it automatically.
+
+   For an existing output that should not run through media processing, preview
+   and rebuild it directly:
 
    ```bash
    cue correct <file>.cue --dry-run
@@ -161,9 +172,10 @@ guarantees the fix lands everywhere and never corrupts the raw transcript.
    If the manifest lives elsewhere, pass it explicitly: `cue correct
    <file>.cue --corrections /path/to/corrections.md`.
 
-5. `cue correct` rewrites `transcript.txt`, `transcript.clean.txt`, and
-   `subtitles.srt`/`.vtt` in place, reports per-file replacement counts, and
-   **never touches `transcript.json`** (the raw archive) or analysis outputs.
+5. `cue correct` reconstructs `transcript.txt`, cleaned text, and SRT/VTT
+   files from canonical JSON before applying rules. It overwrites manual edits
+   in those derived files. It **never touches `transcript.json`,
+   `normalized.json`, or analysis outputs**.
 
 ### Verify corrections
 
@@ -171,16 +183,16 @@ After applying, confirm the fixes actually landed:
 
 1. Grep the corrected spelling in `transcript.txt` (and `subtitles.srt`) and
    confirm it is present.
-2. If a misheard variant remains, add it to the manifest and re-run
+2. Confirm `corrections.applied.json` exists. Treat the manifest, not this
+   generated receipt, as the durable source of correction rules.
+3. If a misheard variant remains, add it to the manifest and re-run
    `cue correct`.
-3. Report what you changed (old -> new), so the user can review.
+4. Report what you changed (old -> new), so the user can review.
 
-**Never re-run the processing pipeline for media whose `.cue` output has
-already been corrected.** A rerun regenerates `transcript.txt` and subtitles
-from `transcript.json`, silently discarding corrections. Do not pass `.cue`
-output directories as media inputs, and do not rerun an encompassing source
-directory after correcting any of its outputs. If re-transcription is needed,
-preserve the corrected text first (for example, copy it aside).
+Keep the manifest available whenever you rerun the source. cue regenerates
+derived files from canonical JSON and reapplies the current manifest. Changing
+the manifest replaces earlier corrections instead of compounding them;
+removing it restores uncorrected derived text and removes the receipt.
 
 ### Identity rule
 
@@ -209,9 +221,11 @@ John Dough -> John Doe
 open telemetry -> OpenTelemetry
 ```
 
-then run `cue correct 01-opening.cue --dry-run` (auto-discovers the manifest)
-and apply it. Do not add any other corrections unless they also conflict
-with known context.
+then run `cue --corrections corrections.md 01-opening.mp4`. If the media was
+already processed, the expensive stages come from cache. Use `cue correct
+01-opening.cue --dry-run` and `cue correct 01-opening.cue` when you only need
+to rebuild the existing output. Do not add any other corrections unless they
+also conflict with known context.
 
 ## 4. Batch / course mode
 
@@ -259,22 +273,22 @@ order:
    open telemetry -> OpenTelemetry
    ```
 
-4. **Transcribe pending inputs together, then apply.** Use one cue invocation
-   for multiple explicit files, or cue's directory mode for a new tree:
+4. **Transcribe pending inputs with the shared manifest.** Use one cue
+   invocation for multiple explicit files, or cue's directory mode:
 
    ```bash
-   cue <first.mp4> <second.mp4>
-   cue --recursive <course-directory>
+   cue --corrections /absolute/path/to/corrections.md <first.mp4> <second.mp4>
+   cue --corrections /absolute/path/to/corrections.md --recursive <course-directory>
    ```
 
    Directory mode requires cue 0.5.0 or newer. cue discovers media, creates a
    sibling `<stem>.cue/` per source by default, and processes it sequentially.
-   If the scan in step 1 found corrected outputs, do not rerun the encompassing
-   directory; pass only the unprocessed source files explicitly.
+   Passing an explicit shared manifest is reliable for recursive inputs whose
+   outputs have different parents. A rerun safely reuses the pipeline cache
+   and reapplies that manifest.
 
-   Then run `cue correct` against every new and existing output directory.
-   For recursive inputs, outputs can have different parents, so always pass
-   the shared manifest explicitly rather than relying on auto-discovery:
+   Use `cue correct` against existing output directories when no media
+   processing is needed:
 
    ```bash
    cue correct <course-directory/episode.cue> --corrections /absolute/path/to/corrections.md
@@ -282,7 +296,7 @@ order:
    ```
 
    For a flat batch whose outputs and manifest share one parent,
-   auto-discovery remains sufficient: `cue correct <file>.cue`.
+   auto-discovery is sufficient for both processing and `cue correct`.
 
 5. Optionally, if the runs produced `analysis.json` per episode, summarize
    them into a course index (titles, topics, chapters) for the user.
