@@ -368,10 +368,10 @@ self_test() {
 
   malformed_receipt="$temporary/malformed-receipt"
   cp -R "$success" "$malformed_receipt"
-  printf '{"schema_version":1}\n' \
-    > "$malformed_receipt/eval-context-correction/with_skill/outputs/corrections.applied.json"
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["schema_version"]=True; del d["source_hashes"]["normalized"]; open(p,"w").write(json.dumps(d))' \
+    "$malformed_receipt/eval-context-correction/with_skill/outputs/corrections.applied.json"
   if "$0" --grade "$malformed_receipt" >/dev/null 2>&1; then
-    echo "FAIL  grade accepted an incomplete correction receipt" >&2
+    echo "FAIL  grade accepted invalid receipt field types and omissions" >&2
     return 1
   fi
 

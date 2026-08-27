@@ -107,7 +107,7 @@ impl CorrectionPlan {
     /// Invalidate the commit marker before normal processing mutates any
     /// canonical or derived output.
     pub(crate) fn invalidate_receipt(&self, output_dir: &Path) -> Result<()> {
-        clear_receipt(output_dir)
+        clear_receipt(output_dir).map_err(|error| error.at_stage(cue_core::PipelineStage::Render))
     }
 }
 
@@ -570,6 +570,19 @@ mod tests {
             Ok(_) => panic!("render unexpectedly succeeded"),
             Err(error) => error,
         };
+
+        assert_eq!(error.stage(), Some(cue_core::PipelineStage::Render));
+    }
+
+    #[test]
+    fn receipt_invalidation_failures_are_attributed_to_render() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("lesson.cue");
+        std::fs::create_dir(&output).unwrap();
+        std::fs::create_dir(output.join("corrections.applied.json")).unwrap();
+        let plan = CorrectionPlan::prepare(&output, None).unwrap();
+
+        let error = plan.invalidate_receipt(&output).unwrap_err();
 
         assert_eq!(error.stage(), Some(cue_core::PipelineStage::Render));
     }

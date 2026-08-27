@@ -32,7 +32,11 @@ def is_correction_receipt(path: Path) -> bool:
         receipt = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return False
-    if not isinstance(receipt, dict) or receipt.get("schema_version") != 1:
+    if (
+        not isinstance(receipt, dict)
+        or type(receipt.get("schema_version")) is not int
+        or receipt["schema_version"] != 1
+    ):
         return False
     if not is_hash(receipt.get("manifest_hash")):
         return False
@@ -43,7 +47,11 @@ def is_correction_receipt(path: Path) -> bool:
     }:
         return False
     source_hashes = receipt.get("source_hashes")
-    if not isinstance(source_hashes, dict) or not is_hash(source_hashes.get("transcript")):
+    if (
+        not isinstance(source_hashes, dict)
+        or "normalized" not in source_hashes
+        or not is_hash(source_hashes.get("transcript"))
+    ):
         return False
     normalized_hash = source_hashes.get("normalized")
     if normalized_hash is not None and not is_hash(normalized_hash):
