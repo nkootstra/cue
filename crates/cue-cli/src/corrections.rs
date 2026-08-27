@@ -89,7 +89,7 @@ impl CorrectionPlan {
         scope: CorrectionScope,
         dry_run: bool,
     ) -> Result<RenderOutcome> {
-        match self {
+        let result = match self {
             Self::None => {
                 if !dry_run {
                     if scope == CorrectionScope::TranscriptOnly {
@@ -100,7 +100,14 @@ impl CorrectionPlan {
                 Ok(RenderOutcome::default())
             }
             Self::Apply(manifest) => render_output(output_dir, manifest, config, scope, dry_run),
-        }
+        };
+        result.map_err(|error| error.at_stage(cue_core::PipelineStage::Render))
+    }
+
+    /// Invalidate the commit marker before normal processing mutates any
+    /// canonical or derived output.
+    pub(crate) fn invalidate_receipt(&self, output_dir: &Path) -> Result<()> {
+        clear_receipt(output_dir)
     }
 }
 
@@ -539,5 +546,31 @@ mod tests {
             "ANALYSIS\n"
         );
         assert!(!output.join("corrections.applied.json").exists());
+    }
+
+    #[test]
+    fn correction_render_failures_are_attributed_to_render() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("lesson.cue");
+        std::fs::create_dir(&output).unwrap();
+        write_transcript(&output);
+        std::fs::create_dir(output.join("transcript.txt")).unwrap();
+        let manifest = temp.path().join("corrections.md");
+        std::fs::write(&manifest, "open telemetry -> OpenTelemetry\n").unwrap();
+
+        let result = CorrectionPlan::prepare(&output, Some(&manifest))
+            .unwrap()
+            .render(
+                &output,
+                &cue_core::Config::default(),
+                CorrectionScope::Full,
+                false,
+            );
+        let error = match result {
+            Ok(_) => panic!("render unexpectedly succeeded"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.stage(), Some(cue_core::PipelineStage::Render));
     }
 }

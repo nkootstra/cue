@@ -51,6 +51,13 @@ impl CueError {
         self.stage
     }
 
+    /// Attribute an error to the stage that owns the operation while
+    /// preserving its summary, cause, and remedy.
+    pub fn at_stage(mut self, stage: PipelineStage) -> Self {
+        self.stage = Some(stage);
+        self
+    }
+
     fn render(&self) -> String {
         let mut out = String::new();
         out.push_str(&self.summary);
@@ -111,6 +118,12 @@ mod tests {
         assert_eq!(CueError::general("boom").stage(), None);
         assert_eq!(
             CueError::new(PipelineStage::Render, "boom").stage(),
+            Some(PipelineStage::Render)
+        );
+        assert_eq!(
+            CueError::general("boom")
+                .at_stage(PipelineStage::Render)
+                .stage(),
             Some(PipelineStage::Render)
         );
     }

@@ -24,7 +24,7 @@
         {"name": "product uses OpenTelemetry", "type": "contains", "path": "eval-context-correction/with_skill/outputs/transcript.txt", "value": "OpenTelemetry", "case_insensitive": false},
         {"name": "split product spelling is absent", "type": "not_contains", "path": "eval-context-correction/with_skill/outputs/transcript.txt", "value": "open telemetry", "case_insensitive": true},
         {"name": "canonical transcript retains raw product wording", "type": "contains", "path": "eval-context-correction/with_skill/outputs/transcript.json", "value": "open telemetry", "case_insensitive": true},
-        {"name": "correction receipt exists", "type": "file_exists", "path": "eval-context-correction/with_skill/outputs/corrections.applied.json"}
+        {"name": "correction receipt is valid", "type": "correction_receipt", "path": "eval-context-correction/with_skill/outputs/corrections.applied.json"}
       ]
     },
     {
@@ -42,12 +42,12 @@
         {"name": "nested transcript is non-empty", "type": "file_nonempty", "path": "eval-recursive-context/with_skill/outputs/course/module-02/clip-02.cue/transcript.txt"},
         {"name": "top-level speaker uses Doe", "type": "contains", "path": "eval-recursive-context/with_skill/outputs/course/clip-01.cue/transcript.txt", "value": "John Doe", "case_insensitive": true},
         {"name": "top-level canonical transcript retains raw wording", "type": "contains", "path": "eval-recursive-context/with_skill/outputs/course/clip-01.cue/transcript.json", "value": "open telemetry", "case_insensitive": true},
-        {"name": "top-level correction receipt exists", "type": "file_exists", "path": "eval-recursive-context/with_skill/outputs/course/clip-01.cue/corrections.applied.json"},
+        {"name": "top-level correction receipt is valid", "type": "correction_receipt", "path": "eval-recursive-context/with_skill/outputs/course/clip-01.cue/corrections.applied.json"},
         {"name": "nested speaker uses Doe", "type": "contains", "path": "eval-recursive-context/with_skill/outputs/course/module-02/clip-02.cue/transcript.txt", "value": "John Doe", "case_insensitive": true},
         {"name": "nested product uses OpenTelemetry", "type": "contains", "path": "eval-recursive-context/with_skill/outputs/course/module-02/clip-02.cue/transcript.txt", "value": "OpenTelemetry", "case_insensitive": false},
         {"name": "nested split product spelling is absent", "type": "not_contains", "path": "eval-recursive-context/with_skill/outputs/course/module-02/clip-02.cue/transcript.txt", "value": "open telemetry", "case_insensitive": true},
         {"name": "nested canonical transcript retains raw wording", "type": "contains", "path": "eval-recursive-context/with_skill/outputs/course/module-02/clip-02.cue/transcript.json", "value": "open telemetry", "case_insensitive": true},
-        {"name": "nested correction receipt exists", "type": "file_exists", "path": "eval-recursive-context/with_skill/outputs/course/module-02/clip-02.cue/corrections.applied.json"}
+        {"name": "nested correction receipt is valid", "type": "correction_receipt", "path": "eval-recursive-context/with_skill/outputs/course/module-02/clip-02.cue/corrections.applied.json"}
       ]
     },
     {
@@ -66,7 +66,7 @@
         {"name": "manual derived sentinel is discarded", "type": "not_contains", "path": "eval-existing-correction/with_skill/outputs/1. welcome.cue/transcript.txt", "value": "PRE-EXISTING OUTPUT SENTINEL", "case_insensitive": false},
         {"name": "existing subtitles are corrected", "type": "contains", "path": "eval-existing-correction/with_skill/outputs/1. welcome.cue/subtitles.srt", "value": "OpenTelemetry", "case_insensitive": false},
         {"name": "canonical transcript is unchanged", "type": "files_equal", "path": "eval-existing-correction/with_skill/outputs/1. welcome.cue/transcript.json", "other_path": ".baselines/with_skill-transcript.json"},
-        {"name": "existing output correction receipt exists", "type": "file_exists", "path": "eval-existing-correction/with_skill/outputs/1. welcome.cue/corrections.applied.json"},
+        {"name": "existing output correction receipt is valid", "type": "correction_receipt", "path": "eval-existing-correction/with_skill/outputs/1. welcome.cue/corrections.applied.json"},
         {"name": "new clip transcript is non-empty", "type": "file_nonempty", "path": "eval-existing-correction/with_skill/outputs/2. what we cover.cue/transcript.txt"}
       ]
     },

@@ -382,7 +382,7 @@ async fn process_file(
     // `cue transcribe` stops here: canonical transcript only.
     if !mode.includes(PipelineStage::Normalize) {
         let _ = events.send(PipelineEvent::Started(PipelineStage::Render));
-        create_output_dir(out_dir)?;
+        begin_render(out_dir, correction)?;
         write_render_json(&out_dir.join("transcript.json"), &transcript)?;
         write_render_file(&out_dir.join("transcript.txt"), transcript.plain_text())?;
         correction.render(out_dir, config, CorrectionScope::TranscriptOnly, false)?;
@@ -535,7 +535,7 @@ async fn process_file(
 
     // ---- Render ---------------------------------------------------------
     let _ = events.send(PipelineEvent::Started(PipelineStage::Render));
-    create_output_dir(out_dir)?;
+    begin_render(out_dir, correction)?;
 
     write_render_json(&out_dir.join("transcript.json"), &transcript)?;
     write_render_file(&out_dir.join("transcript.txt"), transcript.plain_text())?;
@@ -594,6 +594,11 @@ fn require_tool(binary: &str, purpose: &str) -> Result<PathBuf> {
             .because(format!("{binary} was not found on PATH"))
             .remedy("install FFmpeg and verify with `cue doctor`")
     })
+}
+
+fn begin_render(output_dir: &Path, correction: &CorrectionPlan) -> Result<()> {
+    create_output_dir(output_dir)?;
+    correction.invalidate_receipt(output_dir)
 }
 
 fn capitalize(s: &str) -> String {
@@ -863,6 +868,26 @@ mod tests {
 
         assert_eq!(text_err.stage(), Some(cue_core::PipelineStage::Render));
         assert_eq!(json_err.stage(), Some(cue_core::PipelineStage::Render));
+    }
+
+    #[test]
+    fn render_setup_invalidates_a_stale_receipt_before_artifact_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("lesson.cue");
+        std::fs::create_dir(&output).unwrap();
+        std::fs::write(output.join("corrections.applied.json"), "STALE\n").unwrap();
+        std::fs::create_dir(output.join("transcript.json")).unwrap();
+        let correction = CorrectionPlan::prepare(&output, None).unwrap();
+
+        begin_render(&output, &correction).unwrap();
+        let error = write_render_json(
+            &output.join("transcript.json"),
+            &serde_json::json!({"text": "new render"}),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.stage(), Some(cue_core::PipelineStage::Render));
+        assert!(!output.join("corrections.applied.json").exists());
     }
 
     #[test]

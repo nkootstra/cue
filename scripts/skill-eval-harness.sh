@@ -220,6 +220,30 @@ write_synthetic_success() {
 EOF
   }
 
+  write_correction_receipt() {
+    local path="$1"
+    cat > "$path" <<'EOF'
+{
+  "schema_version": 1,
+  "manifest_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "manifest_source": "explicit",
+  "source_hashes": {
+    "transcript": "1111111111111111111111111111111111111111111111111111111111111111",
+    "normalized": null
+  },
+  "rules": [
+    {
+      "find": "open telemetry",
+      "replace": "OpenTelemetry",
+      "applications": [
+        {"artifact": "transcript.txt", "replacements": 1}
+      ]
+    }
+  ]
+}
+EOF
+  }
+
   output="$workspace/eval-basic-transcribe/with_skill/outputs"
   mkdir -p "$output"
   printf 'An observability welcome.\n' > "$output/transcript.txt"
@@ -230,7 +254,7 @@ EOF
   mkdir -p "$output"
   printf 'John Doe presents OpenTelemetry.\n' > "$output/transcript.txt"
   write_canonical_transcript "$output/transcript.json"
-  printf '{"schema_version":1}\n' > "$output/corrections.applied.json"
+  write_correction_receipt "$output/corrections.applied.json"
 
   output="$workspace/eval-recursive-context/with_skill/outputs"
   mkdir -p "$output"
@@ -240,14 +264,14 @@ EOF
   printf 'John Doe presents OpenTelemetry.\n' \
     > "$output/course/clip-01.cue/transcript.txt"
   write_canonical_transcript "$output/course/clip-01.cue/transcript.json"
-  printf '{"schema_version":1}\n' \
-    > "$output/course/clip-01.cue/corrections.applied.json"
+  write_correction_receipt \
+    "$output/course/clip-01.cue/corrections.applied.json"
   printf 'John Doe presents OpenTelemetry.\n' \
     > "$output/course/module-02/clip-02.cue/transcript.txt"
   write_canonical_transcript \
     "$output/course/module-02/clip-02.cue/transcript.json"
-  printf '{"schema_version":1}\n' \
-    > "$output/course/module-02/clip-02.cue/corrections.applied.json"
+  write_correction_receipt \
+    "$output/course/module-02/clip-02.cue/corrections.applied.json"
 
   output="$workspace/eval-existing-correction/with_skill/outputs"
   mkdir -p "$output/1. welcome.cue" "$output/2. what we cover.cue"
@@ -256,8 +280,8 @@ EOF
     > "$output/1. welcome.cue/transcript.txt"
   printf 'OpenTelemetry\n' > "$output/1. welcome.cue/subtitles.srt"
   write_canonical_transcript "$output/1. welcome.cue/transcript.json"
-  printf '{"schema_version":1}\n' \
-    > "$output/1. welcome.cue/corrections.applied.json"
+  write_correction_receipt \
+    "$output/1. welcome.cue/corrections.applied.json"
   mkdir -p "$workspace/.baselines"
   cp "$output/1. welcome.cue/transcript.json" \
     "$workspace/.baselines/with_skill-transcript.json"
@@ -271,7 +295,7 @@ EOF
 
 self_test() {
   local temporary success missing corrected_canonical missing_recursive_canonical
-  local manual_sentinel_existing missing_receipt nonempty
+  local manual_sentinel_existing malformed_receipt missing_receipt nonempty
   local before after canonical_before canonical_after
   local traversal_rubric other_path_rubric symlink_rubric outside
   local non_object_rubric non_object_eval_rubric grade_output grade_status
@@ -339,6 +363,15 @@ self_test() {
   rm "$missing_receipt/eval-context-correction/with_skill/outputs/corrections.applied.json"
   if "$0" --grade "$missing_receipt" >/dev/null 2>&1; then
     echo "FAIL  grade accepted a corrected transcript without a receipt" >&2
+    return 1
+  fi
+
+  malformed_receipt="$temporary/malformed-receipt"
+  cp -R "$success" "$malformed_receipt"
+  printf '{"schema_version":1}\n' \
+    > "$malformed_receipt/eval-context-correction/with_skill/outputs/corrections.applied.json"
+  if "$0" --grade "$malformed_receipt" >/dev/null 2>&1; then
+    echo "FAIL  grade accepted an incomplete correction receipt" >&2
     return 1
   fi
 
