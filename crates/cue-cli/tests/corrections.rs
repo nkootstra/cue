@@ -514,6 +514,72 @@ fn discovered_lexicons_compose_from_project_to_source_with_nearest_rule_winning(
 }
 
 #[test]
+fn empty_broad_discovered_lexicon_does_not_hide_valid_nearer_lexicon() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let course = project.join("course");
+    let output = course.join("lesson.cue");
+    fs::create_dir_all(&output).unwrap();
+    write_transcript(&output);
+    fs::write(
+        project.join("corrections.md"),
+        "# no project-wide corrections yet\n",
+    )
+    .unwrap();
+    fs::write(
+        course.join("corrections.md"),
+        "open telemetry -> OpenTelemetry\n",
+    )
+    .unwrap();
+
+    let result = cue_command(temp.path())
+        .current_dir(&project)
+        .args(["correct", output.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(output.join("transcript.txt")).unwrap(),
+        "OpenTelemetry.\n"
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.join("corrections.applied.json")).unwrap())
+            .unwrap();
+    let manifests = receipt["manifests"].as_array().unwrap();
+    assert_eq!(manifests.len(), 1);
+    assert_eq!(manifests[0]["path"], "../corrections.md");
+}
+
+#[test]
+fn empty_discovered_lexicon_is_treated_as_no_manifest() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("lesson.cue");
+    fs::create_dir(&output).unwrap();
+    write_transcript(&output);
+    fs::write(
+        temp.path().join("corrections.md"),
+        "# no approved corrections yet\n",
+    )
+    .unwrap();
+
+    let result = cue_command(temp.path())
+        .args(["correct", output.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("no corrections manifest found"), "{stderr}");
+    assert!(!stderr.contains("manifest has no rules"), "{stderr}");
+    assert!(!output.join("corrections.applied.json").exists());
+}
+
+#[test]
 fn nearest_override_runs_at_its_near_scope_position() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
@@ -935,6 +1001,7 @@ fn correct_rejects_an_empty_manifest_without_changing_outputs() {
     );
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(stderr.contains("manifest has no rules"), "{stderr}");
+    assert!(stderr.contains(&manifest.display().to_string()), "{stderr}");
 }
 
 fn write_dummy_batch(root: &std::path::Path) -> [std::path::PathBuf; 2] {
@@ -1027,6 +1094,7 @@ fn empty_explicit_manifest_fails_batch_before_media_inspection() {
     assert!(!result.status.success());
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(stderr.contains("manifest has no rules"), "{stderr}");
+    assert!(stderr.contains(&manifest.display().to_string()), "{stderr}");
     assert!(!stderr.contains("ffprobe"), "{stderr}");
     assert_batch_outputs_unchanged(temp.path());
 }

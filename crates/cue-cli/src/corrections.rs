@@ -70,7 +70,7 @@ impl CorrectionPlan {
                     path.display()
                 )));
             }
-            let manifest = PreparedManifest::read(path, ManifestSource::Explicit)?;
+            let manifest = PreparedManifest::read_required(path, ManifestSource::Explicit)?;
             let corrections = Arc::new(PreparedCorrections::from_manifests(vec![manifest]));
             return Ok(output_dirs
                 .into_iter()
@@ -114,13 +114,19 @@ impl CorrectionPlan {
                                 contents
                             }
                         };
-                        Ok(PreparedManifest {
+                        Ok(PreparedManifest::if_contributing(
                             contents,
-                            source: *source,
-                            path: path.clone(),
-                        })
+                            path.clone(),
+                            *source,
+                        ))
                     })
-                    .collect::<Result<Vec<_>>>()?;
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
+                if prepared.is_empty() {
+                    return Ok((output_dir.to_path_buf(), Self::None));
+                }
                 let corrections = Arc::new(PreparedCorrections::from_manifests(prepared));
                 plan_cache.insert(manifests, Arc::clone(&corrections));
                 Ok((output_dir.to_path_buf(), Self::Apply(corrections)))
@@ -135,9 +141,17 @@ impl CorrectionPlan {
         if manifests.is_empty() {
             return Ok(Self::None);
         }
-        Ok(Self::Apply(Arc::new(PreparedCorrections::read_all(
-            manifests,
-        )?)))
+        if explicit.is_some() {
+            let (path, source) = &manifests[0];
+            let manifest = PreparedManifest::read_required(path, *source)?;
+            return Ok(Self::Apply(Arc::new(PreparedCorrections::from_manifests(
+                vec![manifest],
+            ))));
+        }
+        Ok(match PreparedCorrections::read_all(manifests)? {
+            Some(corrections) => Self::Apply(Arc::new(corrections)),
+            None => Self::None,
+        })
     }
 
     /// Resolve a manifest for the explicit correction command, where absence
@@ -243,9 +257,17 @@ fn find_manifests(
 impl PreparedManifest {
     /// Read and validate a manifest without modifying its target output.
     /// Batch processing can prepare every manifest before media work begins.
-    fn read(path: &Path, source: ManifestSource) -> Result<Self> {
+    fn read_required(path: &Path, source: ManifestSource) -> Result<Self> {
+        let contents = Self::read_contents(path)?;
+        if contents.rules.is_empty() {
+            return Err(CueError::general(format!(
+                "corrections manifest has no rules: {}",
+                path.display()
+            ))
+            .remedy("add lines of the form `phrase to find -> replacement`"));
+        }
         Ok(Self {
-            contents: Self::read_contents(path)?,
+            contents,
             source,
             path: path.to_path_buf(),
         })
@@ -267,21 +289,35 @@ impl PreparedManifest {
             .because(e.to_string())
         })?;
         let rules = cue_core::correct::parse_manifest(text)?;
-        if rules.is_empty() {
-            return Err(CueError::general("corrections manifest has no rules")
-                .remedy("add lines of the form `phrase to find -> replacement`"));
-        }
         Ok(Arc::new(ManifestContents { bytes, rules }))
+    }
+
+    fn if_contributing(
+        contents: Arc<ManifestContents>,
+        path: PathBuf,
+        source: ManifestSource,
+    ) -> Option<Self> {
+        (!contents.rules.is_empty()).then_some(Self {
+            contents,
+            source,
+            path,
+        })
     }
 }
 
 impl PreparedCorrections {
-    fn read_all(manifests: Vec<(PathBuf, ManifestSource)>) -> Result<Self> {
+    fn read_all(manifests: Vec<(PathBuf, ManifestSource)>) -> Result<Option<Self>> {
         let prepared = manifests
             .into_iter()
-            .map(|(path, source)| PreparedManifest::read(&path, source))
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Self::from_manifests(prepared))
+            .map(|(path, source)| {
+                let contents = PreparedManifest::read_contents(&path)?;
+                Ok(PreparedManifest::if_contributing(contents, path, source))
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        Ok((!prepared.is_empty()).then(|| Self::from_manifests(prepared)))
     }
 
     fn from_manifests(manifests: Vec<PreparedManifest>) -> Self {
@@ -315,6 +351,14 @@ impl PreparedCorrections {
                 );
             }
         }
+
+        conflicts.retain_mut(|conflict| {
+            if let Some((_, _, winner)) = winners.get(&conflict.find.to_ascii_lowercase()) {
+                conflict.winner.clone_from(&winner.correction.new);
+                conflict.winner_manifest = winner.source_manifest;
+            }
+            conflict.winner != conflict.shadowed
+        });
 
         let mut rules = Vec::with_capacity(winners.len());
         for (manifest_index, manifest) in manifests.iter().enumerate() {
@@ -648,7 +692,7 @@ pub(crate) fn verified_rule_applies(
 ) -> Result<bool> {
     let manifests = manifest_paths
         .iter()
-        .map(|path| PreparedManifest::read(path, ManifestSource::Explicit))
+        .map(|path| PreparedManifest::read_required(path, ManifestSource::Explicit))
         .collect::<Result<Vec<_>>>()?;
     let prepared = PreparedCorrections::from_manifests(manifests);
     let rules = prepared
@@ -891,5 +935,94 @@ mod tests {
         let error = plan.invalidate_receipt(&output).unwrap_err();
 
         assert_eq!(error.stage(), Some(cue_core::PipelineStage::Render));
+    }
+
+    #[test]
+    fn batch_plans_filter_empty_discovered_manifests() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("course/lesson.cue");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(
+            temp.path().join("course/corrections.md"),
+            "# no course-wide corrections yet\n",
+        )
+        .unwrap();
+        let contributing = output.join("corrections.md");
+        std::fs::write(&contributing, "open telemetry -> OpenTelemetry\n").unwrap();
+
+        let plans = CorrectionPlan::prepare_batch([output.as_path()], None).unwrap();
+        let CorrectionPlan::Apply(plan) = plans.get(&output).unwrap() else {
+            panic!("expected a correction plan");
+        };
+
+        assert_eq!(plan.manifests.len(), 1);
+        assert_eq!(plan.manifests[0].path, contributing.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn all_empty_discovered_batch_plan_is_none() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("course/lesson.cue");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(
+            temp.path().join("course/corrections.md"),
+            "# no course-wide corrections yet\n",
+        )
+        .unwrap();
+
+        let plans = CorrectionPlan::prepare_batch([output.as_path()], None).unwrap();
+
+        assert!(matches!(plans.get(&output), Some(CorrectionPlan::None)));
+    }
+
+    #[test]
+    fn conflicts_report_the_final_effective_winner() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifests = ["x -> 1\n", "x -> 2\n", "x -> 3\n"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, contents)| {
+                let path = temp.path().join(format!("scope-{index}.md"));
+                std::fs::write(&path, contents).unwrap();
+                PreparedManifest::read_required(&path, ManifestSource::Explicit).unwrap()
+            })
+            .collect();
+
+        let prepared = PreparedCorrections::from_manifests(manifests);
+
+        assert_eq!(prepared.conflicts.len(), 2);
+        assert!(
+            prepared
+                .conflicts
+                .iter()
+                .all(|conflict| conflict.winner == "3" && conflict.winner_manifest == 2)
+        );
+        assert_eq!(prepared.conflicts[0].shadowed, "1");
+        assert_eq!(prepared.conflicts[0].shadowed_manifest, 0);
+        assert_eq!(prepared.conflicts[1].shadowed, "2");
+        assert_eq!(prepared.conflicts[1].shadowed_manifest, 1);
+    }
+
+    #[test]
+    fn conflicts_omit_shadowed_values_equal_to_the_final_winner() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifests = ["x -> 1\n", "x -> 2\n", "x -> 1\n"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, contents)| {
+                let path = temp.path().join(format!("scope-{index}.md"));
+                std::fs::write(&path, contents).unwrap();
+                PreparedManifest::read_required(&path, ManifestSource::Explicit).unwrap()
+            })
+            .collect();
+
+        let prepared = PreparedCorrections::from_manifests(manifests);
+
+        assert_eq!(prepared.conflicts.len(), 1);
+        let conflict = &prepared.conflicts[0];
+        assert_eq!(conflict.winner, "1");
+        assert_eq!(conflict.winner_manifest, 2);
+        assert_eq!(conflict.shadowed, "2");
+        assert_eq!(conflict.shadowed_manifest, 1);
     }
 }

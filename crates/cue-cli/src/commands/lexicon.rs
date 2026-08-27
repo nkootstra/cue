@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cue_core::{CueError, Result};
-use fs2::FileExt;
+use fs4::FileExt;
 
 use crate::cli::{LexiconArgs, LexiconCommand};
 use crate::render::println_line;
@@ -274,7 +274,7 @@ fn acquire_lexicon_lock(target_dir: &Path) -> Result<std::fs::File> {
             CueError::general(format!("could not open {}", lock_path.display()))
                 .because(error.to_string())
         })?;
-    file.lock_exclusive().map_err(|error| {
+    FileExt::lock(&file).map_err(|error| {
         CueError::general(format!("could not lock {}", lock_path.display()))
             .because(error.to_string())
     })?;

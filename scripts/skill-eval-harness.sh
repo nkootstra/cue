@@ -379,6 +379,7 @@ self_test() {
   local temporary success missing corrected_canonical missing_recursive_canonical
   local manual_sentinel_existing malformed_receipt missing_receipt nonempty
   local legacy_receipt stale_normalized tampered_rule malformed_review
+  local fabricated_attestation unapplied_attestation
   local before after canonical_before canonical_after
   local traversal_rubric other_path_rubric symlink_rubric outside
   local non_object_rubric non_object_eval_rubric grade_output grade_status
@@ -491,6 +492,50 @@ self_test() {
     > "$malformed_review/eval-lexicon-flywheel/with_skill/outputs/review.json"
   if "$0" --grade "$malformed_review" >/dev/null 2>&1; then
     echo "FAIL  grade accepted an incomplete review report" >&2
+    return 1
+  fi
+
+  fabricated_attestation="$temporary/fabricated-attestation"
+  cp -R "$success" "$fabricated_attestation"
+  python3 - "$fabricated_attestation/eval-lexicon-flywheel/with_skill/outputs" "$GRADER" <<'PY'
+import importlib.util, json, pathlib, sys
+output = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("grader", sys.argv[2])
+grader = importlib.util.module_from_spec(spec); spec.loader.exec_module(grader)
+lexicon = output / "corrections.md"
+lexicon.write_text(lexicon.read_text() + "fabricated -> Fabricated\n")
+attestation_path = output / "promotion.json"
+attestation = json.loads(attestation_path.read_text())
+attestation.update({
+    "target_lexicon_hash": grader.blake3_hash(lexicon.read_bytes()),
+    "find": "fabricated",
+    "replace": "Fabricated",
+})
+attestation_path.write_text(json.dumps(attestation))
+PY
+  if "$0" --grade "$fabricated_attestation" >/dev/null 2>&1; then
+    echo "FAIL  grade accepted an attestation for a rule absent from its receipt" >&2
+    return 1
+  fi
+
+  unapplied_attestation="$temporary/unapplied-attestation"
+  cp -R "$success" "$unapplied_attestation"
+  python3 - "$unapplied_attestation/eval-lexicon-flywheel/with_skill/outputs" "$GRADER" <<'PY'
+import importlib.util, json, pathlib, sys
+output = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("grader", sys.argv[2])
+grader = importlib.util.module_from_spec(spec); spec.loader.exec_module(grader)
+receipt_path = output / "lesson.cue" / "corrections.applied.json"
+receipt = json.loads(receipt_path.read_text())
+receipt["rules"][0]["applications"][0]["replacements"] = 0
+receipt_path.write_text(json.dumps(receipt))
+attestation_path = output / "promotion.json"
+attestation = json.loads(attestation_path.read_text())
+attestation["source_receipt_hash"] = grader.blake3_hash(receipt_path.read_bytes())
+attestation_path.write_text(json.dumps(attestation))
+PY
+  if "$0" --grade "$unapplied_attestation" >/dev/null 2>&1; then
+    echo "FAIL  grade accepted an attestation for a rule with no replacements" >&2
     return 1
   fi
 

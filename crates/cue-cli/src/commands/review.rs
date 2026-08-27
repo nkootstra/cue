@@ -241,3 +241,49 @@ fn review_output(
         diagnostics,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ReviewDiagnostic;
+
+    #[test]
+    fn serialized_diagnostic_ids_match_display_ids() {
+        let diagnostics = [
+            ReviewDiagnostic::LowConfidence {
+                word: "word".to_owned(),
+                word_index: 0,
+                confidence: 0.5,
+                start_ms: 0,
+                end_ms: 100,
+            },
+            ReviewDiagnostic::PossibleFallbackTiming {
+                word: "word".to_owned(),
+                word_index: 0,
+                start_ms: 0,
+                end_ms: 100,
+            },
+            ReviewDiagnostic::UnmatchedRule {
+                find: "old".to_owned(),
+                replace: "new".to_owned(),
+                manifest: "corrections.md".to_owned(),
+            },
+            ReviewDiagnostic::ScopeConflict {
+                find: "old".to_owned(),
+                winner: "near".to_owned(),
+                shadowed: "broad".to_owned(),
+                winner_manifest: "course/corrections.md".to_owned(),
+                shadowed_manifest: "corrections.md".to_owned(),
+            },
+            ReviewDiagnostic::AmbiguousSpeakerTurn {
+                segment_index: 0,
+                speakers: vec!["speaker-1".to_owned(), "speaker-2".to_owned()],
+                has_unassigned_words: false,
+            },
+        ];
+
+        for diagnostic in diagnostics {
+            let serialized = serde_json::to_value(&diagnostic).unwrap();
+            assert_eq!(serialized["id"], diagnostic.id());
+        }
+    }
+}

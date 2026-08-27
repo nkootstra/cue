@@ -205,7 +205,9 @@ def is_review_report(path: Path) -> bool:
     return all(valid_diagnostic(diagnostic) for diagnostic in report["diagnostics"])
 
 
-def is_promotion_attestation(path: Path, receipt_path: Path, lexicon_path: Path) -> bool:
+def is_promotion_attestation(
+    path: Path, receipt_path: Path, lexicon_path: Path, workspace: Path
+) -> bool:
     try:
         attestation = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
@@ -221,7 +223,7 @@ def is_promotion_attestation(path: Path, receipt_path: Path, lexicon_path: Path)
         or not isinstance(attestation.get("find"), str)
         or not attestation["find"]
         or not isinstance(attestation.get("replace"), str)
-        or not receipt_path.is_file()
+        or not is_correction_receipt(receipt_path, workspace)
         or not lexicon_path.is_file()
     ):
         return False
@@ -233,6 +235,14 @@ def is_promotion_attestation(path: Path, receipt_path: Path, lexicon_path: Path)
     if not attested_target.is_absolute():
         attested_target = path.parent / attested_target
     if attested_target.resolve() != lexicon_path:
+        return False
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if not any(
+        rule["find"].casefold() == attestation["find"].casefold()
+        and rule["replace"] == attestation["replace"]
+        and any(application["replacements"] > 0 for application in rule["applications"])
+        for rule in receipt["rules"]
+    ):
         return False
     rules = parse_manifest_rules(lexicon_path)
     return rules is not None and any(
@@ -422,7 +432,9 @@ def evaluate(check: dict[str, object], workspace: Path) -> bool:
     if check_type == "promotion_attestation":
         receipt_path = resolve(workspace, check["receipt_path"])
         lexicon_path = resolve(workspace, check["lexicon_path"])
-        return path.is_file() and is_promotion_attestation(path, receipt_path, lexicon_path)
+        return path.is_file() and is_promotion_attestation(
+            path, receipt_path, lexicon_path, workspace
+        )
     if check_type == "file_nonempty":
         return path.is_file() and path.stat().st_size > 0
     if check_type == "files_equal":
