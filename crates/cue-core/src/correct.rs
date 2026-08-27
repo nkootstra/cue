@@ -57,14 +57,21 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Correction>, CueError> {
 /// ASCII-only (byte offsets must stay stable), so phrases with non-ASCII
 /// letters must be written in the same case as the transcript.
 pub fn apply_counted(text: &str, rules: &[Correction]) -> (String, usize) {
+    let (out, counts) = apply_with_counts(text, rules);
+    (out, counts.into_iter().sum())
+}
+
+/// Apply correction rules in order and report the occurrence count for each
+/// rule. The returned count vector always has the same length as `rules`.
+pub fn apply_with_counts(text: &str, rules: &[Correction]) -> (String, Vec<usize>) {
     let mut out = text.to_string();
-    let mut replacements = 0usize;
+    let mut counts = Vec::with_capacity(rules.len());
     for rule in rules {
         let (replaced, count) = replace_phrase(&out, &rule.old, &rule.new);
         out = replaced;
-        replacements += count;
+        counts.push(count);
     }
-    (out, replacements)
+    (out, counts)
 }
 
 /// Apply the correction rules to `text` in order.
@@ -217,6 +224,23 @@ mod tests {
         let (out, count) = apply_counted("open telemetry and open telemetry.", &rules());
         assert_eq!(out, "OpenTelemetry and OpenTelemetry.");
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn apply_with_counts_reports_each_ordered_rule() {
+        let rules = [
+            Correction {
+                old: "foo".into(),
+                new: "X".into(),
+            },
+            Correction {
+                old: "X bar".into(),
+                new: "Z".into(),
+            },
+        ];
+        let (out, counts) = apply_with_counts("foo bar and foo", &rules);
+        assert_eq!(out, "Z and X");
+        assert_eq!(counts, vec![2, 1]);
     }
 
     #[test]
