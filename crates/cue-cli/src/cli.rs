@@ -29,6 +29,10 @@ pub struct Cue {
     #[usage(short = 'r', long, global)]
     pub recursive: bool,
 
+    /// Corrections manifest file
+    #[usage(long, global)]
+    pub corrections: Option<PathBuf>,
+
     /// Media files or directories to process
     pub paths: Vec<PathBuf>,
 
@@ -125,10 +129,6 @@ pub struct CorrectArgs {
     /// A cue output directory (e.g. "video.cue/") or a media file whose
     /// sibling ".cue/" directory exists
     pub output: String,
-    /// Corrections manifest file (default: corrections.md in the output
-    /// directory, then in its parent)
-    #[usage(long)]
-    pub corrections: Option<String>,
     /// Preview what would change without writing any files
     #[usage(long)]
     pub dry_run: bool,
@@ -220,6 +220,19 @@ mod tests {
             Command::Transcribe(args) => assert_eq!(args.paths, vec![PathBuf::from("a.mp4")]),
             other => panic!("wrong command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn corrections_manifest_is_global_before_or_after_commands() {
+        let default = parse_args(&["cue", "lesson.mp4", "--corrections", "shared.md"]);
+        assert_eq!(default.paths, [PathBuf::from("lesson.mp4")]);
+        assert_eq!(default.corrections, Some(PathBuf::from("shared.md")));
+
+        let before = parse_args(&["cue", "--corrections", "shared.md", "transcribe", "a.mp4"]);
+        assert_eq!(before.corrections, Some(PathBuf::from("shared.md")));
+
+        let after = parse_args(&["cue", "correct", "lesson.cue", "--corrections", "lesson.md"]);
+        assert_eq!(after.corrections, Some(PathBuf::from("lesson.md")));
     }
 
     #[test]

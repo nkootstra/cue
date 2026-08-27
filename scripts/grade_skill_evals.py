@@ -9,13 +9,185 @@ from pathlib import Path
 import sys
 
 
+_IV = [
+    0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
+    0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19,
+]
+_PERMUTATION = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8]
+_CHUNK_START, _CHUNK_END, _PARENT, _ROOT = 1, 2, 4, 8
+
+
+def _rotr(x: int, n: int) -> int:
+    return ((x >> n) | (x << (32 - n))) & 0xFFFFFFFF
+
+
+def _g(v: list[int], a: int, b: int, c: int, d: int, mx: int, my: int) -> None:
+    v[a] = (v[a] + v[b] + mx) & 0xFFFFFFFF
+    v[d] = _rotr(v[d] ^ v[a], 16)
+    v[c] = (v[c] + v[d]) & 0xFFFFFFFF
+    v[b] = _rotr(v[b] ^ v[c], 12)
+    v[a] = (v[a] + v[b] + my) & 0xFFFFFFFF
+    v[d] = _rotr(v[d] ^ v[a], 8)
+    v[c] = (v[c] + v[d]) & 0xFFFFFFFF
+    v[b] = _rotr(v[b] ^ v[c], 7)
+
+
+def _compress(cv: list[int], block: list[int], counter: int, length: int, flags: int) -> list[int]:
+    v = cv + _IV[:4] + [counter & 0xFFFFFFFF, counter >> 32, length, flags]
+    m = block[:]
+    for _ in range(7):
+        _g(v, 0, 4, 8, 12, m[0], m[1])
+        _g(v, 1, 5, 9, 13, m[2], m[3])
+        _g(v, 2, 6, 10, 14, m[4], m[5])
+        _g(v, 3, 7, 11, 15, m[6], m[7])
+        _g(v, 0, 5, 10, 15, m[8], m[9])
+        _g(v, 1, 6, 11, 12, m[10], m[11])
+        _g(v, 2, 7, 8, 13, m[12], m[13])
+        _g(v, 3, 4, 9, 14, m[14], m[15])
+        m = [m[i] for i in _PERMUTATION]
+    return [(v[i] ^ v[i + 8]) & 0xFFFFFFFF for i in range(8)] + [
+        (v[i + 8] ^ cv[i]) & 0xFFFFFFFF for i in range(8)
+    ]
+
+
+def _words(data: bytes) -> list[int]:
+    return [int.from_bytes(data[i:i + 4].ljust(4, b"\0"), "little") for i in range(0, 64, 4)]
+
+
+def _output(cv: list[int], block: bytes, counter: int, flags: int) -> tuple[list[int], list[int], bytes, int, int]:
+    return cv, _words(block), block, counter, flags
+
+
+def _output_cv(output: tuple[list[int], list[int], bytes, int, int]) -> list[int]:
+    cv, block, _, counter, flags = output
+    return _compress(cv, block, counter, len(output[2]), flags)[:8]
+
+
+def _root_bytes(output: tuple[list[int], list[int], bytes, int, int]) -> bytes:
+    cv, block, raw, _, flags = output
+    return b"".join(word.to_bytes(4, "little") for word in _compress(cv, block, 0, len(raw), flags | _ROOT))[:32]
+
+
+def blake3_hash(data: bytes) -> str:
+    chunks = []
+    for chunk_index, start in enumerate(range(0, len(data) or 1, 1024)):
+        chunk = data[start:start + 1024]
+        cv = _IV[:]
+        output = None
+        for block_index, block_start in enumerate(range(0, len(chunk) or 1, 64)):
+            block = chunk[block_start:block_start + 64]
+            flags = ( _CHUNK_START if block_index == 0 else 0) | (_CHUNK_END if block_start + 64 >= len(chunk) else 0)
+            output = _output(cv, block, chunk_index, flags)
+            cv = _output_cv(output)
+        chunks.append(output)
+    stack = []
+    for chunk_index, chunk in enumerate(chunks):
+        stack.append(chunk)
+        total_chunks = chunk_index + 1
+        while total_chunks & 1 == 0:
+            right = stack.pop()
+            left = stack.pop()
+            parent_block = b"".join(word.to_bytes(4, "little") for word in _output_cv(left) + _output_cv(right))
+            stack.append(_output(_IV[:], parent_block, 0, _PARENT))
+            total_chunks >>= 1
+    chunks = stack
+    while len(chunks) > 1:
+        left = chunks.pop(0)
+        right = chunks.pop(0)
+        parent_block = b"".join(word.to_bytes(4, "little") for word in _output_cv(left) + _output_cv(right))
+        chunks.append(_output(_IV[:], parent_block, 0, _PARENT))
+    return _root_bytes(chunks[0]).hex()
+
+
 SUPPORTED_CHECKS = {
+    "correction_receipt",
     "file_exists",
     "file_nonempty",
     "contains",
     "not_contains",
     "files_equal",
 }
+
+
+def is_hash(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def is_correction_receipt(path: Path) -> bool:
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if (
+        not isinstance(receipt, dict)
+        or type(receipt.get("schema_version")) is not int
+        or receipt["schema_version"] != 1
+    ):
+        return False
+    if not is_hash(receipt.get("manifest_hash")):
+        return False
+    manifest_ref = receipt.get("manifest_path")
+    if not isinstance(manifest_ref, str) or not manifest_ref or Path(manifest_ref).is_absolute():
+        return False
+    output_dir = path.parent.resolve()
+    manifest = (path.parent / manifest_ref).resolve()
+    allowed_root = output_dir.parent
+    if allowed_root not in manifest.parents and manifest != allowed_root:
+        return False
+    if not manifest.is_file() or receipt["manifest_hash"] != blake3_hash(manifest.read_bytes()):
+        return False
+    if receipt.get("manifest_source") not in {
+        "explicit",
+        "output-directory",
+        "parent-directory",
+    }:
+        return False
+    source_hashes = receipt.get("source_hashes")
+    if (
+        not isinstance(source_hashes, dict)
+        or "normalized" not in source_hashes
+        or not is_hash(source_hashes.get("transcript"))
+    ):
+        return False
+    transcript = path.parent / "transcript.json"
+    if not transcript.is_file() or source_hashes["transcript"] != blake3_hash(transcript.read_bytes()):
+        return False
+    normalized_hash = source_hashes.get("normalized")
+    if normalized_hash is not None and not is_hash(normalized_hash):
+        return False
+    normalized = path.parent / "normalized.json"
+    if normalized_hash is not None and (
+        not normalized.is_file() or normalized_hash != blake3_hash(normalized.read_bytes())
+    ):
+        return False
+    rules = receipt.get("rules")
+    if not isinstance(rules, list) or not rules:
+        return False
+    for rule in rules:
+        if not isinstance(rule, dict):
+            return False
+        if not isinstance(rule.get("find"), str) or not rule["find"]:
+            return False
+        if not isinstance(rule.get("replace"), str):
+            return False
+        applications = rule.get("applications")
+        if not isinstance(applications, list) or not applications:
+            return False
+        if any(
+            not isinstance(application, dict)
+            or not isinstance(application.get("artifact"), str)
+            or not application["artifact"]
+            or not isinstance(application.get("replacements"), int)
+            or isinstance(application.get("replacements"), bool)
+            or application["replacements"] < 0
+            for application in applications
+        ):
+            return False
+    return True
 
 
 def load_checks(rubric_path: Path) -> list[dict[str, object]]:
@@ -70,6 +242,8 @@ def evaluate(check: dict[str, object], workspace: Path) -> bool:
     check_type = check["type"]
     if check_type == "file_exists":
         return path.is_file()
+    if check_type == "correction_receipt":
+        return path.is_file() and is_correction_receipt(path)
     if check_type == "file_nonempty":
         return path.is_file() and path.stat().st_size > 0
     if check_type == "files_equal":

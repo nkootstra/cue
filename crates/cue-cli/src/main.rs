@@ -3,6 +3,7 @@
 
 mod cli;
 mod commands;
+mod corrections;
 mod events;
 mod logging;
 mod render;
@@ -55,7 +56,14 @@ async fn dispatch(mut cli: Cue) -> cue_core::Result<i32> {
         Some(Command::Config(args)) => Ok(commands::config_cmd::run(args)),
         Some(Command::Cache(args)) => Ok(commands::cache_cmd::run(args.command)),
         Some(Command::Skill(args)) => Ok(commands::skill::run(args).await),
-        Some(Command::Correct(args)) => Ok(commands::correct::run(args)),
+        Some(Command::Correct(args)) => {
+            let config = load_resolved_config()?;
+            Ok(commands::correct::run(
+                args,
+                cli.corrections.as_deref(),
+                &config,
+            ))
+        }
         None => {
             let config = load_resolved_config()?;
             Ok(commands::process::run(&cli, &config).await)

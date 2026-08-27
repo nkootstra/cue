@@ -8,6 +8,7 @@
 //!
 //! Subtitles, normalization, and analysis come online in later phases.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use cue_analysis::Analyzer as _;
@@ -18,6 +19,7 @@ use cue_transcription::Transcriber;
 
 use crate::cli::Cue;
 use crate::commands::inputs::{ResolvedInput, resolve_inputs};
+use crate::corrections::{CorrectionPlan, CorrectionScope};
 use crate::render::{human_duration, println_line};
 
 #[derive(serde::Serialize)]
@@ -148,6 +150,10 @@ async fn run_inner(
     // Resolve the complete batch before starting any media work. This keeps
     // discovery and output collisions from producing partial batches.
     let plan = resolve_inputs(paths, cli.recursive, cli.output.as_deref().map(Path::new))?;
+    let corrections = CorrectionPlan::prepare_batch(
+        plan.inputs.iter().map(|input| input.output.as_path()),
+        cli.corrections.as_deref(),
+    )?;
 
     // Stage logic emits events; the renderer decides presentation. Core
     // pipeline behavior never depends on terminal output.
@@ -159,6 +165,7 @@ async fn run_inner(
         config,
         events: &tx,
         mode,
+        corrections,
         s1_readiness: None,
     };
     let result =
@@ -209,18 +216,29 @@ struct PipelineProcessor<'a> {
     config: &'a cue_core::Config,
     events: &'a tokio::sync::mpsc::UnboundedSender<cue_core::PipelineEvent>,
     mode: ProcessMode,
+    corrections: HashMap<PathBuf, CorrectionPlan>,
     s1_readiness: Option<bool>,
 }
 
 impl MediaProcessor for PipelineProcessor<'_> {
     async fn process(&mut self, input: &ResolvedInput) -> Result<()> {
+        let correction = self.corrections.get(&input.output).ok_or_else(|| {
+            CueError::general(format!(
+                "no correction plan prepared for {}",
+                input.output.display()
+            ))
+        })?;
+        let context = FileContext {
+            cli: self.cli,
+            config: self.config,
+            events: self.events,
+            mode: self.mode,
+            correction,
+        };
         process_file(
             &input.source,
             &input.output,
-            self.cli,
-            self.config,
-            self.events,
-            self.mode,
+            &context,
             &mut self.s1_readiness,
         )
         .await
@@ -251,16 +269,27 @@ where
     Ok(outcome)
 }
 
+struct FileContext<'a> {
+    cli: &'a Cue,
+    config: &'a cue_core::Config,
+    events: &'a tokio::sync::mpsc::UnboundedSender<cue_core::PipelineEvent>,
+    mode: ProcessMode,
+    correction: &'a CorrectionPlan,
+}
+
 async fn process_file(
     path: &Path,
     out_dir: &Path,
-    cli: &Cue,
-    config: &cue_core::Config,
-    events: &tokio::sync::mpsc::UnboundedSender<cue_core::PipelineEvent>,
-    mode: ProcessMode,
+    context: &FileContext<'_>,
     s1_readiness: &mut Option<bool>,
 ) -> Result<()> {
     use cue_core::{PipelineEvent, PipelineStage};
+
+    let cli = context.cli;
+    let config = context.config;
+    let events = context.events;
+    let mode = context.mode;
+    let correction = context.correction;
 
     println_line(&format!("Processing {}...", path.display()));
 
@@ -353,9 +382,10 @@ async fn process_file(
     // `cue transcribe` stops here: canonical transcript only.
     if !mode.includes(PipelineStage::Normalize) {
         let _ = events.send(PipelineEvent::Started(PipelineStage::Render));
-        create_output_dir(out_dir)?;
+        begin_render(out_dir, correction)?;
         write_render_json(&out_dir.join("transcript.json"), &transcript)?;
         write_render_file(&out_dir.join("transcript.txt"), transcript.plain_text())?;
+        correction.render(out_dir, config, CorrectionScope::TranscriptOnly, false)?;
         let _ = events.send(PipelineEvent::Completed(PipelineStage::Render));
         println_line(&format!(
             "\nDone. Transcript written to {}/",
@@ -505,7 +535,7 @@ async fn process_file(
 
     // ---- Render ---------------------------------------------------------
     let _ = events.send(PipelineEvent::Started(PipelineStage::Render));
-    create_output_dir(out_dir)?;
+    begin_render(out_dir, correction)?;
 
     write_render_json(&out_dir.join("transcript.json"), &transcript)?;
     write_render_file(&out_dir.join("transcript.txt"), transcript.plain_text())?;
@@ -548,6 +578,8 @@ async fn process_file(
         write_render_file(&path, content)?;
     }
 
+    correction.render(out_dir, config, CorrectionScope::Full, false)?;
+
     let _ = events.send(PipelineEvent::Completed(PipelineStage::Render));
     println_line(&format!(
         "\nDone. Transcript and subtitles written to {}/",
@@ -562,6 +594,11 @@ fn require_tool(binary: &str, purpose: &str) -> Result<PathBuf> {
             .because(format!("{binary} was not found on PATH"))
             .remedy("install FFmpeg and verify with `cue doctor`")
     })
+}
+
+fn begin_render(output_dir: &Path, correction: &CorrectionPlan) -> Result<()> {
+    create_output_dir(output_dir)?;
+    correction.invalidate_receipt(output_dir)
 }
 
 fn capitalize(s: &str) -> String {
@@ -831,6 +868,26 @@ mod tests {
 
         assert_eq!(text_err.stage(), Some(cue_core::PipelineStage::Render));
         assert_eq!(json_err.stage(), Some(cue_core::PipelineStage::Render));
+    }
+
+    #[test]
+    fn render_setup_invalidates_a_stale_receipt_before_artifact_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("lesson.cue");
+        std::fs::create_dir(&output).unwrap();
+        std::fs::write(output.join("corrections.applied.json"), "STALE\n").unwrap();
+        std::fs::create_dir(output.join("transcript.json")).unwrap();
+        let correction = CorrectionPlan::prepare(&output, None).unwrap();
+
+        begin_render(&output, &correction).unwrap();
+        let error = write_render_json(
+            &output.join("transcript.json"),
+            &serde_json::json!({"text": "new render"}),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.stage(), Some(cue_core::PipelineStage::Render));
+        assert!(!output.join("corrections.applied.json").exists());
     }
 
     #[test]

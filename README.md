@@ -23,8 +23,8 @@ configured — summaries, descriptions, and chapters.
   (`transcript.json`) is never overwritten. Cleaned text, subtitles, and
   analysis all derive from it.
 - **Deterministic corrections.** Fix misheard names and terms by writing a
-  plain-text corrections manifest and running `cue correct` — applied
-  mechanically, never corrupting the raw archive.
+  plain-text corrections manifest. cue applies it during normal processing
+  and cached reruns, never corrupting the raw archive.
 - **Fast reruns.** Content-addressed caching means a rerun skips completed
   extraction, transcription, normalization, and analysis.
 - **Replaceable providers.** faster-whisper, S1, and OpenAI-compatible
@@ -72,7 +72,7 @@ Ollama optional, for S1 transcript cleanup. After installing, run
 |---|---|
 | `cue <path>...` | Process one or more media files or directories through the full pipeline |
 | `cue transcribe <path>...` | Process paths through the canonical transcript only (no subtitles/analysis) |
-| `cue correct <file>.cue` | Apply transcript corrections from a manifest deterministically |
+| `cue correct <file>.cue` | Rebuild an existing output from canonical JSON and apply corrections |
 | `cue doctor` | Check required and optional tools; `--fix` provisions the Python worker |
 | `cue models list/check/install s1` | Manage transcription/normalization models in Ollama |
 | `cue skill install [--local]` | Install the `transcribe` agent skill globally, or in the current project |
@@ -118,8 +118,8 @@ file's failure does not stop the rest; the final summary reports successes and
 failures, and any failure produces exit status 1.
 
 Processing a source again regenerates its derived text and subtitle artifacts.
-After correcting a `.cue/` output, do not include that source in a later batch
-unless you first preserve the corrected files.
+When a corrections manifest remains discoverable, cue reapplies it during
+that render, including fully cached reruns.
 
 ## Outputs
 
@@ -133,6 +133,7 @@ unless you first preserve the corrected files.
 | `subtitles.srt` / `subtitles.vtt` | Subtitles from the canonical transcript |
 | `analysis.json` / `summary.md` / `description.md` | LLM analysis (when a gateway is configured) |
 | `corrections.md` | Optional manifest you write to fix misheard names/terms |
+| `corrections.applied.json` | Versioned receipt written when corrections are applied, recording source hashes and per-rule applications |
 
 ## Correcting transcripts
 
@@ -147,16 +148,31 @@ open telemetry -> OpenTelemetry
 ```
 
 ```bash
+cue video.mp4 --corrections corrections.md                    # process and apply
 cue correct video.cue --corrections corrections.md --dry-run  # preview
-cue correct video.cue --corrections corrections.md            # apply
+cue correct video.cue --corrections corrections.md            # rebuild and apply
 ```
 
-`cue correct` rewrites `transcript.txt`, `transcript.clean.txt`, and
-`subtitles.srt`/`.vtt` in place (reporting per-file replacement counts),
-and never touches `transcript.json` or the analysis outputs. Matching is
-case-insensitive and whole-phrase, so `dough` won't affect `doughnut`.
-Without `--corrections`, cue looks for `corrections.md` in the output
-directory, then its parent.
+The global `--corrections` flag works with the default pipeline,
+`cue transcribe`, and `cue correct`. Without it, cue looks for
+`corrections.md` in the output directory and then its parent. The explicit
+flag takes precedence, followed by the output-directory manifest and the
+parent-directory manifest.
+
+Normal processing applies the selected manifest after rendering, so cached
+reruns keep corrections. Each corrected render writes
+`corrections.applied.json`; this receipt records what was applied but is not a
+source of truth. Change the manifest and rerun to replace the old corrections
+from canonical data. Remove the manifest and rerun to restore uncorrected
+derived files and remove the stale receipt.
+
+`cue correct` follows the same canonical model for an existing output: it
+reconstructs `transcript.txt`, cleaned text, and SRT/VTT files from
+`transcript.json` and `normalized.json`, then applies the manifest. Manual
+edits to those derived files are therefore overwritten. Corrections never
+modify `transcript.json`, `normalized.json`, or existing analysis outputs.
+Matching is case-insensitive and whole-phrase, so `dough` won't affect
+`doughnut`.
 
 ## Agent skill
 
@@ -172,9 +188,10 @@ npx --yes skills@1.5.9 add nkootstra/cue --global -y
 ```
 
 The skill teaches agents to install cue when missing, run the pipeline,
-gather speaker/domain context, write a corrections manifest, and apply it
-with `cue correct` (batch-processing course folders and correcting existing
-outputs too), and to respect the privacy boundary: media, audio, raw
+gather speaker/domain context, write a corrections manifest, apply it during
+the main cue invocation or a safe cached rerun, and use `cue correct` for
+existing outputs. It also teaches agents to respect the privacy boundary:
+media, audio, raw
 transcripts, and subtitles stay local; only normalized text may be sent to
 the configured analysis gateway. All examples in the skill use fictional
 identities.
@@ -203,7 +220,7 @@ Work in progress.
 - [x] LLM analysis (OpenAI-compatible gateways: Ollama `/v1`, OpenRouter)
 - [x] Content-addressed caching for every stage; reruns skip completed work
 - [x] Pipeline event bus with TTY-aware rendering
-- [x] Deterministic transcript corrections (`cue correct`)
+- [x] Durable deterministic transcript corrections and application receipts
 - [x] `transcribe` agent skill with evals
 - [ ] Incremental progress within stages (worker-level reporting)
 - [ ] Parallel file processing

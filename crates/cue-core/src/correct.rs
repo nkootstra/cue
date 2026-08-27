@@ -28,6 +28,13 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Correction>, CueError> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+        if line.starts_with("->") {
+            return Err(CueError::general(format!(
+                "corrections manifest line {} phrase to find must not be empty",
+                index + 1
+            ))
+            .remedy("write a phrase before `->`"));
+        }
         // Split on the first ` ->` marker. `old -> new`, `old ->new`, and a
         // bare `old ->` (empty replacement, a deletion rule) all parse.
         let Some((old, new)) = line.split_once(" ->") else {
@@ -57,14 +64,21 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Correction>, CueError> {
 /// ASCII-only (byte offsets must stay stable), so phrases with non-ASCII
 /// letters must be written in the same case as the transcript.
 pub fn apply_counted(text: &str, rules: &[Correction]) -> (String, usize) {
+    let (out, counts) = apply_with_counts(text, rules);
+    (out, counts.into_iter().sum())
+}
+
+/// Apply correction rules in order and report the occurrence count for each
+/// rule. The returned count vector always has the same length as `rules`.
+pub fn apply_with_counts(text: &str, rules: &[Correction]) -> (String, Vec<usize>) {
     let mut out = text.to_string();
-    let mut replacements = 0usize;
+    let mut counts = Vec::with_capacity(rules.len());
     for rule in rules {
         let (replaced, count) = replace_phrase(&out, &rule.old, &rule.new);
         out = replaced;
-        replacements += count;
+        counts.push(count);
     }
-    (out, replacements)
+    (out, counts)
 }
 
 /// Apply the correction rules to `text` in order.
@@ -161,6 +175,17 @@ mod tests {
     }
 
     #[test]
+    fn empty_find_phrase_is_an_error() {
+        let err = parse_manifest(" -> replacement\n").unwrap_err();
+        let rendered = err.to_string();
+        assert!(rendered.contains("line 1"), "{rendered}");
+        assert!(
+            rendered.contains("phrase to find must not be empty"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
     fn applies_case_insensitively() {
         let corrected = apply(
             "see open telemetry and Open Telemetry and OPEN TELEMETRY.",
@@ -217,6 +242,23 @@ mod tests {
         let (out, count) = apply_counted("open telemetry and open telemetry.", &rules());
         assert_eq!(out, "OpenTelemetry and OpenTelemetry.");
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn apply_with_counts_reports_each_ordered_rule() {
+        let rules = [
+            Correction {
+                old: "foo".into(),
+                new: "X".into(),
+            },
+            Correction {
+                old: "X bar".into(),
+                new: "Z".into(),
+            },
+        ];
+        let (out, counts) = apply_with_counts("foo bar and foo", &rules);
+        assert_eq!(out, "Z and X");
+        assert_eq!(counts, vec![2, 1]);
     }
 
     #[test]

@@ -11,18 +11,20 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CUE="$ROOT/target/debug/cue"
 MOCK="$ROOT/scripts/testdata/mock_gateway.py"
-CFG_DIR="/tmp/cue-verify-cfg"
-OUT="/tmp/cue-verify-out"
+VERIFY_TMP="$(mktemp -d "${TMPDIR:-/tmp}/cue-verify.XXXXXX")"
+CFG_DIR="$VERIFY_TMP/cfg"
+OUT="$VERIFY_TMP/out"
+SPEECH_MP3="$VERIFY_TMP/speech.mp3"
 FAILURES=0
 
 check() {
   local name="$1"; shift
-  if "$@" > /tmp/cue-verify-last.log 2>&1; then
+  if "$@" > "$VERIFY_TMP/last.log" 2>&1; then
     echo "PASS  $name"
   else
     echo "FAIL  $name"
     echo "------ last output:"
-    tail -20 /tmp/cue-verify-last.log
+    tail -20 "$VERIFY_TMP/last.log"
     FAILURES=$((FAILURES+1))
   fi
 }
@@ -30,7 +32,7 @@ check() {
 check_fail() {
   # A command that must exit non-zero.
   local name="$1"; shift
-  if "$@" > /tmp/cue-verify-last.log 2>&1; then
+  if "$@" > "$VERIFY_TMP/last.log" 2>&1; then
     echo "FAIL  $name (expected non-zero exit)"
     FAILURES=$((FAILURES+1))
   else
@@ -66,7 +68,7 @@ echo "== end-to-end pipeline (mock gateway) =="
 python3 "$MOCK" &
 GW=$!
 VERIFY_DIR=""
-trap 'kill $GW 2>/dev/null || true; rm -rf "$VERIFY_DIR" 2>/dev/null || true' EXIT
+trap 'kill "$GW" 2>/dev/null || true; rm -rf "$VERIFY_DIR" "$VERIFY_TMP" 2>/dev/null || true' EXIT
 sleep 1
 
 mkdir -p "$CFG_DIR"
@@ -83,12 +85,13 @@ model = "test-model"
 api_key_env = "CUE_TEST_KEY"
 EOF
 
-say -o /tmp/cue-verify-speech.aiff "Hello from the cue verification suite." \
+SPEECH_AIFF="$VERIFY_TMP/speech.aiff"
+say -o "$SPEECH_AIFF" "Hello from the cue verification suite." \
   || { echo "FAIL  speech fixture (macOS 'say' required)"; exit 1; }
-ffmpeg -y -v error -i /tmp/cue-verify-speech.aiff /tmp/cue-verify-speech.mp3
+ffmpeg -y -v error -i "$SPEECH_AIFF" "$SPEECH_MP3"
 rm -rf "$OUT"
 
-check "pipeline run" env CUE_CONFIG_DIR=$CFG_DIR $CUE /tmp/cue-verify-speech.mp3 --output $OUT
+check "pipeline run" env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" "$SPEECH_MP3" --output "$OUT"
 
 for f in transcript.json transcript.txt transcript.clean.txt normalized.json \
          subtitles.srt subtitles.vtt analysis.json summary.md description.md; do
@@ -107,17 +110,36 @@ echo
 echo "== cache behavior =="
 check "rerun fully cached" bash -c "env CUE_CONFIG_DIR=$CFG_DIR $CUE /tmp/cue-verify-speech.mp3 --output $OUT 2>&1 | grep -c cached | grep -q 4"
 
-check "doctor optional ok" bash -c "env CUE_CONFIG_DIR=$CFG_DIR $CUE doctor | grep -q 'S1.*ok.*ready'"
-check "models list"        bash -c "env CUE_CONFIG_DIR=$CFG_DIR $CUE models list | grep -q cue-s1-mini"
-check "models check ok"    bash -c "env CUE_CONFIG_DIR=$CFG_DIR $CUE models check"
+SOURCE_TERM=$(python3 -c "import json,re; d=json.load(open('$OUT/transcript.json')); m=re.search(r'[A-Za-z0-9]+', d['segments'][0]['text']); assert m; print(m.group(0))")
+PIPELINE_CANONICAL_HASH=$(shasum -a 256 "$OUT/transcript.json" "$OUT/analysis.json" "$OUT/normalized.json" | shasum | cut -d' ' -f1)
+printf '%s -> DurableFirst\n' "$SOURCE_TERM" > "$OUT/corrections.md"
+check "manifest applies on cached rerun" env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" "$SPEECH_MP3" --output "$OUT"
+check "corrected render uses first manifest" bash -c "grep -q 'DurableFirst' '$OUT/transcript.txt' && grep -q 'DurableFirst' '$OUT/subtitles.srt'"
+check "correction receipt is valid" bash -c "python3 -c \"import json; d=json.load(open('$OUT/corrections.applied.json')); assert d['schema_version']==1; assert d['manifest_source']=='output-directory'; assert d['source_hashes']['transcript']; assert d['rules'][0]['replace']=='DurableFirst'\""
+check "first corrected rerun keeps canonical data" bash -c "test '$PIPELINE_CANONICAL_HASH' = \"\$(shasum -a 256 '$OUT/transcript.json' '$OUT/analysis.json' '$OUT/normalized.json' | shasum | cut -d' ' -f1)\""
+
+printf '%s -> DurableSecond\n' "$SOURCE_TERM" > "$OUT/corrections.md"
+check "changed manifest reapplies from canonical" env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" "$SPEECH_MP3" --output "$OUT"
+check "changed manifest replaces prior correction" bash -c "grep -q 'DurableSecond' '$OUT/transcript.txt' && ! grep -q 'DurableFirst' '$OUT/transcript.txt'"
+
+rm "$OUT/corrections.md"
+check "manifest removal rerenders canonical text" env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" "$SPEECH_MP3" --output "$OUT"
+check "manifest removal restores raw-derived text" bash -c "grep -Fqi '$SOURCE_TERM' '$OUT/transcript.txt' && ! grep -q 'DurableFirst\|DurableSecond' '$OUT/transcript.txt'"
+check_fail "manifest removal clears receipt" test -e "$OUT/corrections.applied.json"
+check "correction lifecycle keeps canonical data" bash -c "test '$PIPELINE_CANONICAL_HASH' = \"\$(shasum -a 256 '$OUT/transcript.json' '$OUT/analysis.json' '$OUT/normalized.json' | shasum | cut -d' ' -f1)\""
+
+check "doctor optional ok" bash -c "env 'CUE_CONFIG_DIR=$CFG_DIR' '$CUE' doctor | grep -q 'S1.*ok.*ready'"
+check "models list"        bash -c "env 'CUE_CONFIG_DIR=$CFG_DIR' '$CUE' models list | grep -q cue-s1-mini"
+check "models check ok"    env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" models check
 
 echo
 echo "== transcribe subcommand =="
-rm -rf /tmp/cue-verify-trans
-check "transcribe runs" env CUE_CONFIG_DIR=$CFG_DIR $CUE transcribe /tmp/cue-verify-speech.mp3 --output /tmp/cue-verify-trans
-check "transcript exists"     test -s /tmp/cue-verify-trans/transcript.txt
-check_fail "no subtitles"     test -s /tmp/cue-verify-trans/subtitles.srt
-check_fail "no analysis"      test -s /tmp/cue-verify-trans/analysis.json
+TRANS_DIR="$VERIFY_TMP/trans"
+rm -rf "$TRANS_DIR"
+check "transcribe runs" env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" transcribe "$SPEECH_MP3" --output "$TRANS_DIR"
+check "transcript exists"     test -s "$TRANS_DIR/transcript.txt"
+check_fail "no subtitles"     test -s "$TRANS_DIR/subtitles.srt"
+check_fail "no analysis"      test -s "$TRANS_DIR/analysis.json"
 
 echo
 echo "== skill =="
@@ -129,20 +151,44 @@ check_fail "no real identifiers" bash -c "grep -riE 'eastham|dometrain' skills/t
 
 echo
 echo "== correct command =="
-VERIFY_DIR=$(mktemp -d /tmp/cue-verify-correct.XXXXXX)
+VERIFY_DIR=$(mktemp -d "$VERIFY_TMP/correct.XXXXXX")
 mkdir -p "$VERIFY_DIR/talk.cue"
 printf 'I am John Dough. See open telemetry.\n' > "$VERIFY_DIR/talk.cue/transcript.txt"
 printf 'open telemetry is key.\n' > "$VERIFY_DIR/talk.cue/subtitles.srt"
-printf '{"schema_version":1}\n' > "$VERIFY_DIR/talk.cue/transcript.json"
+cat > "$VERIFY_DIR/talk.cue/transcript.json" <<'EOF'
+{
+  "schema_version": 1,
+  "language": "en",
+  "duration_ms": 1600,
+  "words": [
+    {"text":"I","start_ms":0,"end_ms":100,"confidence":0.9,"speaker":null},
+    {"text":"am","start_ms":110,"end_ms":250,"confidence":0.9,"speaker":null},
+    {"text":"John","start_ms":260,"end_ms":450,"confidence":0.9,"speaker":null},
+    {"text":"Dough.","start_ms":460,"end_ms":700,"confidence":0.9,"speaker":null},
+    {"text":"See","start_ms":800,"end_ms":950,"confidence":0.9,"speaker":null},
+    {"text":"open","start_ms":960,"end_ms":1150,"confidence":0.9,"speaker":null},
+    {"text":"telemetry.","start_ms":1160,"end_ms":1600,"confidence":0.9,"speaker":null}
+  ],
+  "segments": [
+    {"start_ms":0,"end_ms":1600,"text":"I am John Dough. See open telemetry.","word_start":0,"word_end":7}
+  ]
+}
+EOF
+printf '{"analysis":"UNCHANGED"}\n' > "$VERIFY_DIR/talk.cue/analysis.json"
+printf '{"normalized":"UNCHANGED"}\n' > "$VERIFY_DIR/talk.cue/normalized.json"
+printf 'STALE RECEIPT\n' > "$VERIFY_DIR/talk.cue/corrections.applied.json"
 printf 'John Dough -> John Doe\nopen telemetry -> OpenTelemetry\n' > "$VERIFY_DIR/corrections.md"
-BEFORE=$(shasum -a 256 "$VERIFY_DIR/talk.cue/transcript.txt" "$VERIFY_DIR/talk.cue/subtitles.srt" "$VERIFY_DIR/talk.cue/transcript.json" | shasum | cut -d' ' -f1)
+BEFORE=$(shasum -a 256 "$VERIFY_DIR/talk.cue/transcript.txt" "$VERIFY_DIR/talk.cue/subtitles.srt" "$VERIFY_DIR/talk.cue/transcript.json" "$VERIFY_DIR/talk.cue/normalized.json" "$VERIFY_DIR/talk.cue/analysis.json" "$VERIFY_DIR/talk.cue/corrections.applied.json" | shasum | cut -d' ' -f1)
 check "correct dry-run writes nothing" bash -c "$CUE correct $VERIFY_DIR/talk.cue --dry-run 2>&1 | grep -q 'Dry run'"
-AFTER=$(shasum -a 256 "$VERIFY_DIR/talk.cue/transcript.txt" "$VERIFY_DIR/talk.cue/subtitles.srt" "$VERIFY_DIR/talk.cue/transcript.json" | shasum | cut -d' ' -f1)
+AFTER=$(shasum -a 256 "$VERIFY_DIR/talk.cue/transcript.txt" "$VERIFY_DIR/talk.cue/subtitles.srt" "$VERIFY_DIR/talk.cue/transcript.json" "$VERIFY_DIR/talk.cue/normalized.json" "$VERIFY_DIR/talk.cue/analysis.json" "$VERIFY_DIR/talk.cue/corrections.applied.json" | shasum | cut -d' ' -f1)
 check "correct dry-run leaves all artifacts unchanged" test "$BEFORE" = "$AFTER"
 check "correct applies"               bash -c "$CUE correct $VERIFY_DIR/talk.cue 2>&1 | grep -q 'replacement(s)'"
 check "correct fixed transcript"      bash -c "grep -q 'OpenTelemetry' $VERIFY_DIR/talk.cue/transcript.txt && ! grep -q 'John Dough' $VERIFY_DIR/talk.cue/transcript.txt"
 check "correct fixed subtitles"       bash -c "grep -q 'OpenTelemetry' $VERIFY_DIR/talk.cue/subtitles.srt"
-check "correct kept json"             bash -c "grep -q 'schema_version' $VERIFY_DIR/talk.cue/transcript.json"
+check "correct wrote receipt"          bash -c "python3 -c \"import json; d=json.load(open('$VERIFY_DIR/talk.cue/corrections.applied.json')); assert d['schema_version']==1; assert len(d['rules'])==2\""
+check "correct kept canonical json"   bash -c "grep -q 'John Dough' $VERIFY_DIR/talk.cue/transcript.json"
+check "correct kept normalized"        bash -c "grep -q 'UNCHANGED' '$VERIFY_DIR/talk.cue/normalized.json'"
+check "correct kept analysis"         bash -c "grep -q 'UNCHANGED' $VERIFY_DIR/talk.cue/analysis.json"
 
 kill $GW 2>/dev/null || true
 

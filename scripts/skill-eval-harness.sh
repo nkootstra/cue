@@ -169,7 +169,7 @@ print_prompts() {
 
 [existing-correction] with_skill
   Prompt: There are two media files, but "1. welcome.mp3" already has a
-  corrected output folder ("1. welcome.cue") in the current directory.
+  pre-existing output folder ("1. welcome.cue") in the current directory.
   Transcribe only the new clip, "2. what we cover.mp3", then write a
   corrections.md manifest for the misheard term and apply it with
   cue correct to the existing folder.
@@ -199,6 +199,62 @@ EOF
 write_synthetic_success() {
   local workspace="$1" output
 
+  write_canonical_transcript() {
+    local path="$1"
+    cat > "$path" <<'EOF'
+{
+  "schema_version": 1,
+  "language": "en",
+  "duration_ms": 1000,
+  "words": [
+    {"text":"John","start_ms":0,"end_ms":200,"confidence":0.9,"speaker":null},
+    {"text":"Doe","start_ms":210,"end_ms":400,"confidence":0.9,"speaker":null},
+    {"text":"presents","start_ms":410,"end_ms":600,"confidence":0.9,"speaker":null},
+    {"text":"open","start_ms":610,"end_ms":750,"confidence":0.9,"speaker":null},
+    {"text":"telemetry.","start_ms":760,"end_ms":1000,"confidence":0.9,"speaker":null}
+  ],
+  "segments": [
+    {"start_ms":0,"end_ms":1000,"text":"John Doe presents open telemetry.","word_start":0,"word_end":5}
+  ]
+}
+EOF
+  }
+
+  write_correction_receipt() {
+    local path="$1"
+    local output_dir manifest
+    output_dir="$(dirname "$path")"
+    manifest="$output_dir/corrections.md"
+    printf 'open telemetry -> OpenTelemetry\n' > "$manifest"
+  local manifest_hash transcript_hash
+    manifest_hash="$(python3 - "$manifest" "$GRADER" <<'PY'
+import importlib.util, pathlib, sys
+spec = importlib.util.spec_from_file_location("grader", sys.argv[2])
+grader = importlib.util.module_from_spec(spec); spec.loader.exec_module(grader)
+print(grader.blake3_hash(pathlib.Path(sys.argv[1]).read_bytes()))
+PY
+    )"
+    transcript_hash="$(python3 - "$output_dir/transcript.json" "$GRADER" <<'PY'
+import importlib.util, pathlib, sys
+spec = importlib.util.spec_from_file_location("grader", sys.argv[2])
+grader = importlib.util.module_from_spec(spec); spec.loader.exec_module(grader)
+print(grader.blake3_hash(pathlib.Path(sys.argv[1]).read_bytes()))
+PY
+    )"
+    MANIFEST_HASH="$manifest_hash" TRANSCRIPT_HASH="$transcript_hash" python3 - "$path" <<'PY'
+import json, os, pathlib, sys
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+  "schema_version": 1,
+  "manifest_hash": os.environ["MANIFEST_HASH"],
+  "manifest_path": "corrections.md",
+  "manifest_source": "explicit",
+  "source_hashes": {"transcript": os.environ["TRANSCRIPT_HASH"], "normalized": None},
+  "rules": [{"find": "open telemetry", "replace": "OpenTelemetry", "applications": [{"artifact": "transcript.txt", "replacements": 1}] }]
+}, indent=2) + "\n")
+PY
+    return
+  }
+
   output="$workspace/eval-basic-transcribe/with_skill/outputs"
   mkdir -p "$output"
   printf 'An observability welcome.\n' > "$output/transcript.txt"
@@ -208,7 +264,8 @@ write_synthetic_success() {
   output="$workspace/eval-context-correction/with_skill/outputs"
   mkdir -p "$output"
   printf 'John Doe presents OpenTelemetry.\n' > "$output/transcript.txt"
-  printf '{"text":"John Doe presents open telemetry."}\n' > "$output/transcript.json"
+  write_canonical_transcript "$output/transcript.json"
+  write_correction_receipt "$output/corrections.applied.json"
 
   output="$workspace/eval-recursive-context/with_skill/outputs"
   mkdir -p "$output"
@@ -217,20 +274,25 @@ write_synthetic_success() {
     "$output/course/module-02/clip-02.cue"
   printf 'John Doe presents OpenTelemetry.\n' \
     > "$output/course/clip-01.cue/transcript.txt"
-  printf '{"text":"John Doe presents open telemetry."}\n' \
-    > "$output/course/clip-01.cue/transcript.json"
+  write_canonical_transcript "$output/course/clip-01.cue/transcript.json"
+  write_correction_receipt \
+    "$output/course/clip-01.cue/corrections.applied.json"
   printf 'John Doe presents OpenTelemetry.\n' \
     > "$output/course/module-02/clip-02.cue/transcript.txt"
-  printf '{"text":"John Doe presents open telemetry."}\n' \
-    > "$output/course/module-02/clip-02.cue/transcript.json"
+  write_canonical_transcript \
+    "$output/course/module-02/clip-02.cue/transcript.json"
+  write_correction_receipt \
+    "$output/course/module-02/clip-02.cue/corrections.applied.json"
 
   output="$workspace/eval-existing-correction/with_skill/outputs"
   mkdir -p "$output/1. welcome.cue" "$output/2. what we cover.cue"
   printf 'open telemetry -> OpenTelemetry\n' > "$output/corrections.md"
-  printf 'OpenTelemetry\nPRE-EXISTING OUTPUT SENTINEL\n' \
+  printf 'John Doe presents OpenTelemetry.\n' \
     > "$output/1. welcome.cue/transcript.txt"
   printf 'OpenTelemetry\n' > "$output/1. welcome.cue/subtitles.srt"
-  printf '{"schema_version":1}\n' > "$output/1. welcome.cue/transcript.json"
+  write_canonical_transcript "$output/1. welcome.cue/transcript.json"
+  write_correction_receipt \
+    "$output/1. welcome.cue/corrections.applied.json"
   mkdir -p "$workspace/.baselines"
   cp "$output/1. welcome.cue/transcript.json" \
     "$workspace/.baselines/with_skill-transcript.json"
@@ -244,7 +306,7 @@ write_synthetic_success() {
 
 self_test() {
   local temporary success missing corrected_canonical missing_recursive_canonical
-  local rerendered_existing nonempty
+  local manual_sentinel_existing malformed_receipt missing_receipt nonempty
   local before after canonical_before canonical_after
   local traversal_rubric other_path_rubric symlink_rubric outside
   local non_object_rubric non_object_eval_rubric grade_output grade_status
@@ -298,12 +360,29 @@ self_test() {
     return 1
   fi
 
-  rerendered_existing="$temporary/rerendered-existing"
-  cp -R "$success" "$rerendered_existing"
-  printf 'OpenTelemetry\n' \
-    > "$rerendered_existing/eval-existing-correction/with_skill/outputs/1. welcome.cue/transcript.txt"
-  if "$0" --grade "$rerendered_existing" >/dev/null 2>&1; then
-    echo "FAIL  grade accepted a rerendered existing transcript" >&2
+  manual_sentinel_existing="$temporary/manual-sentinel-existing"
+  cp -R "$success" "$manual_sentinel_existing"
+  printf 'PRE-EXISTING OUTPUT SENTINEL\n' \
+    >> "$manual_sentinel_existing/eval-existing-correction/with_skill/outputs/1. welcome.cue/transcript.txt"
+  if "$0" --grade "$manual_sentinel_existing" >/dev/null 2>&1; then
+    echo "FAIL  grade accepted a manual derived-file sentinel" >&2
+    return 1
+  fi
+
+  missing_receipt="$temporary/missing-receipt"
+  cp -R "$success" "$missing_receipt"
+  rm "$missing_receipt/eval-context-correction/with_skill/outputs/corrections.applied.json"
+  if "$0" --grade "$missing_receipt" >/dev/null 2>&1; then
+    echo "FAIL  grade accepted a corrected transcript without a receipt" >&2
+    return 1
+  fi
+
+  malformed_receipt="$temporary/malformed-receipt"
+  cp -R "$success" "$malformed_receipt"
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["schema_version"]=True; del d["source_hashes"]["normalized"]; open(p,"w").write(json.dumps(d))' \
+    "$malformed_receipt/eval-context-correction/with_skill/outputs/corrections.applied.json"
+  if "$0" --grade "$malformed_receipt" >/dev/null 2>&1; then
+    echo "FAIL  grade accepted invalid receipt field types and omissions" >&2
     return 1
   fi
 
