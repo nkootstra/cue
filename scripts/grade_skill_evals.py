@@ -36,10 +36,14 @@ def _compress(cv: list[int], block: list[int], counter: int, length: int, flags:
     v = cv + _IV[:4] + [counter & 0xFFFFFFFF, counter >> 32, length, flags]
     m = block[:]
     for _ in range(7):
-        _g(v, 0, 4, 8, 12, m[0], m[1]); _g(v, 1, 5, 9, 13, m[2], m[3])
-        _g(v, 2, 6, 10, 14, m[4], m[5]); _g(v, 3, 7, 11, 15, m[6], m[7])
-        _g(v, 0, 5, 10, 15, m[8], m[9]); _g(v, 1, 6, 11, 12, m[10], m[11])
-        _g(v, 2, 7, 8, 13, m[12], m[13]); _g(v, 3, 4, 9, 14, m[14], m[15])
+        _g(v, 0, 4, 8, 12, m[0], m[1])
+        _g(v, 1, 5, 9, 13, m[2], m[3])
+        _g(v, 2, 6, 10, 14, m[4], m[5])
+        _g(v, 3, 7, 11, 15, m[6], m[7])
+        _g(v, 0, 5, 10, 15, m[8], m[9])
+        _g(v, 1, 6, 11, 12, m[10], m[11])
+        _g(v, 2, 7, 8, 13, m[12], m[13])
+        _g(v, 3, 4, 9, 14, m[14], m[15])
         m = [m[i] for i in _PERMUTATION]
     return [(v[i] ^ v[i + 8]) & 0xFFFFFFFF for i in range(8)] + [
         (v[i + 8] ^ cv[i]) & 0xFFFFFFFF for i in range(8)
@@ -76,9 +80,20 @@ def blake3_hash(data: bytes) -> str:
             output = _output(cv, block, chunk_index, flags)
             cv = _output_cv(output)
         chunks.append(output)
+    stack = []
+    for chunk_index, chunk in enumerate(chunks):
+        stack.append(chunk)
+        total_chunks = chunk_index + 1
+        while total_chunks & 1 == 0:
+            right = stack.pop()
+            left = stack.pop()
+            parent_block = b"".join(word.to_bytes(4, "little") for word in _output_cv(left) + _output_cv(right))
+            stack.append(_output(_IV[:], parent_block, 0, _PARENT))
+            total_chunks >>= 1
+    chunks = stack
     while len(chunks) > 1:
-        right = chunks.pop()
-        left = chunks.pop()
+        left = chunks.pop(0)
+        right = chunks.pop(0)
         parent_block = b"".join(word.to_bytes(4, "little") for word in _output_cv(left) + _output_cv(right))
         chunks.append(_output(_IV[:], parent_block, 0, _PARENT))
     return _root_bytes(chunks[0]).hex()
@@ -115,7 +130,14 @@ def is_correction_receipt(path: Path) -> bool:
         return False
     if not is_hash(receipt.get("manifest_hash")):
         return False
-    manifest = path.parent / "corrections.md"
+    manifest_ref = receipt.get("manifest_path")
+    if not isinstance(manifest_ref, str) or not manifest_ref or Path(manifest_ref).is_absolute():
+        return False
+    output_dir = path.parent.resolve()
+    manifest = (path.parent / manifest_ref).resolve()
+    allowed_root = output_dir.parent
+    if allowed_root not in manifest.parents and manifest != allowed_root:
+        return False
     if not manifest.is_file() or receipt["manifest_hash"] != blake3_hash(manifest.read_bytes()):
         return False
     if receipt.get("manifest_source") not in {

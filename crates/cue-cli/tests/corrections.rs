@@ -177,6 +177,43 @@ fn correct_regenerates_subtitles_from_the_canonical_transcript() {
 }
 
 #[test]
+fn subtitle_corrections_can_span_cue_boundaries() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("lesson.cue");
+    fs::create_dir(&output).unwrap();
+    write_transcript(&output);
+    let transcript_path = output.join("transcript.json");
+    let transcript = fs::read_to_string(&transcript_path)
+        .unwrap()
+        .replace("\"duration_ms\": 1000", "\"duration_ms\": 2000")
+        .replace(
+            "\"start_ms\":310,\"end_ms\":1000",
+            "\"start_ms\":1000,\"end_ms\":2000",
+        );
+    fs::write(transcript_path, transcript).unwrap();
+    let manifest = temp.path().join("corrections.md");
+    fs::write(&manifest, "open telemetry -> OpenTelemetry\n").unwrap();
+
+    let status = cue_command(temp.path())
+        .args([
+            "correct",
+            output.to_str().unwrap(),
+            "--corrections",
+            manifest.to_str().unwrap(),
+        ])
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    let srt = fs::read_to_string(output.join("subtitles.srt")).unwrap();
+    let vtt = fs::read_to_string(output.join("subtitles.vtt")).unwrap();
+    assert!(srt.contains("OpenTelemetry"), "{srt}");
+    assert!(vtt.contains("OpenTelemetry"), "{vtt}");
+    assert!(!srt.contains("open\ntelemetry"), "{srt}");
+    assert!(!vtt.contains("open\ntelemetry"), "{vtt}");
+}
+
+#[test]
 fn valid_zero_match_manifest_still_rebuilds_and_records_the_render() {
     let temp = tempfile::tempdir().unwrap();
     let output = temp.path().join("lesson.cue");

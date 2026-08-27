@@ -22,6 +22,7 @@ pub(crate) struct PreparedManifest {
     bytes: Vec<u8>,
     rules: Vec<cue_core::correct::Correction>,
     source: ManifestSource,
+    path: PathBuf,
 }
 
 pub(crate) enum CorrectionPlan {
@@ -166,6 +167,7 @@ impl PreparedManifest {
             bytes,
             rules,
             source,
+            path: path.to_path_buf(),
         })
     }
 }
@@ -191,6 +193,7 @@ impl RenderOutcome {
 struct Receipt<'a> {
     schema_version: u8,
     manifest_hash: String,
+    manifest_path: String,
     manifest_source: ManifestSource,
     source_hashes: SourceHashes,
     rules: Vec<AppliedRule<'a>>,
@@ -277,14 +280,24 @@ fn render_output(
             max_chars_per_line: config.subtitles.max_chars_per_line,
             max_duration_ms: config.subtitles.max_duration_ms,
         };
-        let cues = cue_subtitles::build_cues(&transcript, &policy)?;
+        let mut corrected_transcript = transcript.clone();
+        let mut subtitle_counts = vec![0; manifest.rules.len()];
+        apply_rules_across_words(
+            &mut corrected_transcript.words,
+            &manifest.rules,
+            &mut subtitle_counts,
+        );
+        let cues = cue_subtitles::build_cues(&corrected_transcript, &policy)?;
         for format in subtitle_formats {
-            let (name, content, counts) = prepare_subtitle_artifact(format, &cues, &manifest.rules);
+            let (name, content) = match format {
+                SubtitleFormat::Srt => ("subtitles.srt", cue_subtitles::render_srt(&cues)),
+                SubtitleFormat::Vtt => ("subtitles.vtt", cue_subtitles::render_vtt(&cues)),
+            };
             artifacts.push(PreparedArtifact {
                 name,
                 path: output_dir.join(name),
                 content,
-                counts,
+                counts: subtitle_counts.clone(),
             });
         }
     }
@@ -292,6 +305,7 @@ fn render_output(
     let receipt = Receipt {
         schema_version: 1,
         manifest_hash: cue_cache::bytes_hash(&manifest.bytes),
+        manifest_path: manifest_reference(output_dir, &manifest.path),
         manifest_source: manifest.source,
         source_hashes: SourceHashes {
             transcript: cue_cache::bytes_hash(&transcript_bytes),
@@ -378,25 +392,53 @@ fn prepare_artifact(
     }
 }
 
-fn prepare_subtitle_artifact(
-    format: SubtitleFormat,
-    cues: &[cue_subtitles::Cue],
+fn apply_rules_across_words(
+    words: &mut [cue_core::Word],
     rules: &[cue_core::correct::Correction],
-) -> (&'static str, String, Vec<usize>) {
-    let mut corrected_cues = cues.to_vec();
-    let mut counts = vec![0; rules.len()];
-    for cue in &mut corrected_cues {
-        let (text, cue_counts) = cue_core::correct::apply_with_counts(&cue.text, rules);
-        cue.text = text;
-        for (total, count) in counts.iter_mut().zip(cue_counts) {
-            *total += count;
+    counts: &mut [usize],
+) {
+    for (rule_index, rule) in rules.iter().enumerate() {
+        let mut start = 0;
+        while start < words.len() {
+            let mut matched = None;
+            for end in start..words.len() {
+                let candidate = words[start..=end]
+                    .iter()
+                    .map(|word| word.text.trim())
+                    .filter(|text| !text.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if candidate.contains(&rule.old) {
+                    matched = Some((end, candidate));
+                    break;
+                }
+            }
+            let Some((end, candidate)) = matched else {
+                start += 1;
+                continue;
+            };
+            let applications = candidate.matches(&rule.old).count();
+            let replacement = candidate.replace(&rule.old, &rule.new);
+            let end_ms = words[end].end_ms;
+            words[start].text = replacement;
+            words[start].end_ms = end_ms;
+            for word in &mut words[start + 1..=end] {
+                word.text.clear();
+            }
+            counts[rule_index] += applications;
+            start = end + 1;
         }
     }
-    let (name, content) = match format {
-        SubtitleFormat::Srt => ("subtitles.srt", cue_subtitles::render_srt(&corrected_cues)),
-        SubtitleFormat::Vtt => ("subtitles.vtt", cue_subtitles::render_vtt(&corrected_cues)),
-    };
-    (name, content, counts)
+}
+
+fn manifest_reference(output_dir: &Path, manifest_path: &Path) -> String {
+    if let Ok(path) = manifest_path.strip_prefix(output_dir) {
+        return path.to_string_lossy().into_owned();
+    }
+    if let Ok(path) = manifest_path.strip_prefix(output_dir.parent().unwrap_or(output_dir)) {
+        return format!("../{}", path.to_string_lossy());
+    }
+    manifest_path.to_string_lossy().into_owned()
 }
 
 fn clear_non_transcript_artifacts(output_dir: &Path) -> Result<()> {

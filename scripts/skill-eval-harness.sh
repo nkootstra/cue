@@ -226,7 +226,7 @@ EOF
     output_dir="$(dirname "$path")"
     manifest="$output_dir/corrections.md"
     printf 'open telemetry -> OpenTelemetry\n' > "$manifest"
-    local manifest_hash transcript_hash
+  local manifest_hash transcript_hash
     manifest_hash="$(python3 - "$manifest" "$GRADER" <<'PY'
 import importlib.util, pathlib, sys
 spec = importlib.util.spec_from_file_location("grader", sys.argv[2])
@@ -246,6 +246,7 @@ import json, os, pathlib, sys
 pathlib.Path(sys.argv[1]).write_text(json.dumps({
   "schema_version": 1,
   "manifest_hash": os.environ["MANIFEST_HASH"],
+  "manifest_path": "corrections.md",
   "manifest_source": "explicit",
   "source_hashes": {"transcript": os.environ["TRANSCRIPT_HASH"], "normalized": None},
   "rules": [{"find": "open telemetry", "replace": "OpenTelemetry", "applications": [{"artifact": "transcript.txt", "replacements": 1}] }]
