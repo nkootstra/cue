@@ -10,8 +10,7 @@ use crate::render::println_line;
 
 /// Resolve the output directory: a `.cue/` dir directly, or the sibling
 /// `.cue/` of a media file.
-fn resolve_output_dir(output: &str) -> Result<PathBuf> {
-    let path = Path::new(output);
+pub(crate) fn resolve_output_dir(path: &Path) -> Result<PathBuf> {
     if path.is_dir() {
         return Ok(path.to_path_buf());
     }
@@ -46,7 +45,7 @@ fn run_inner(
     corrections: Option<&Path>,
     config: &cue_core::Config,
 ) -> Result<()> {
-    let output_dir = resolve_output_dir(&args.output)?;
+    let output_dir = resolve_output_dir(args.output.as_path())?;
     let plan = CorrectionPlan::require(&output_dir, corrections)?;
     let outcome = plan.render(&output_dir, config, CorrectionScope::Full, args.dry_run)?;
 

@@ -103,9 +103,19 @@ SUPPORTED_CHECKS = {
     "correction_receipt",
     "file_exists",
     "file_nonempty",
+    "promotion_attestation",
+    "review_report",
     "contains",
     "not_contains",
     "files_equal",
+}
+
+REVIEW_DIAGNOSTICS = {
+    "CUE-REVIEW-LOW-CONFIDENCE",
+    "CUE-REVIEW-POSSIBLE-FALLBACK-TIMING",
+    "CUE-REVIEW-UNMATCHED-RULE",
+    "CUE-REVIEW-SCOPE-CONFLICT",
+    "CUE-REVIEW-AMBIGUOUS-SPEAKER-TURN",
 }
 
 
@@ -117,34 +127,168 @@ def is_hash(value: object) -> bool:
     )
 
 
-def is_correction_receipt(path: Path) -> bool:
+def parse_manifest_rules(path: Path) -> list[tuple[str, str]] | None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    rules = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if " ->" not in line:
+            return None
+        find, replace = line.split(" ->", 1)
+        find = find.strip()
+        if not find:
+            return None
+        rules.append((find, replace.strip()))
+    return rules or None
+
+
+def is_review_report(path: Path) -> bool:
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if (
+        not isinstance(report, dict)
+        or type(report.get("schema_version")) is not int
+        or report["schema_version"] != 1
+        or not isinstance(report.get("output"), str)
+        or not report["output"]
+        or not isinstance(report.get("confidence_below"), (int, float))
+        or isinstance(report.get("confidence_below"), bool)
+        or not 0 <= report["confidence_below"] <= 1
+        or not isinstance(report.get("diagnostics"), list)
+    ):
+        return False
+    def is_int(value: object) -> bool:
+        return type(value) is int and value >= 0
+
+    def valid_diagnostic(diagnostic: object) -> bool:
+        if not isinstance(diagnostic, dict) or diagnostic.get("id") not in REVIEW_DIAGNOSTICS:
+            return False
+        diagnostic_id = diagnostic["id"]
+        if diagnostic_id == "CUE-REVIEW-LOW-CONFIDENCE":
+            return (
+                isinstance(diagnostic.get("word"), str)
+                and is_int(diagnostic.get("word_index"))
+                and isinstance(diagnostic.get("confidence"), (int, float))
+                and not isinstance(diagnostic.get("confidence"), bool)
+                and 0 <= diagnostic["confidence"] <= 1
+                and is_int(diagnostic.get("start_ms"))
+                and is_int(diagnostic.get("end_ms"))
+            )
+        if diagnostic_id == "CUE-REVIEW-POSSIBLE-FALLBACK-TIMING":
+            return (
+                isinstance(diagnostic.get("word"), str)
+                and is_int(diagnostic.get("word_index"))
+                and is_int(diagnostic.get("start_ms"))
+                and is_int(diagnostic.get("end_ms"))
+            )
+        if diagnostic_id == "CUE-REVIEW-UNMATCHED-RULE":
+            return all(isinstance(diagnostic.get(field), str) for field in ("find", "replace", "manifest"))
+        if diagnostic_id == "CUE-REVIEW-SCOPE-CONFLICT":
+            return all(
+                isinstance(diagnostic.get(field), str)
+                for field in ("find", "winner", "shadowed", "winner_manifest", "shadowed_manifest")
+            )
+        return (
+            is_int(diagnostic.get("segment_index"))
+            and isinstance(diagnostic.get("speakers"), list)
+            and all(isinstance(speaker, str) for speaker in diagnostic["speakers"])
+            and type(diagnostic.get("has_unassigned_words")) is bool
+        )
+
+    return all(valid_diagnostic(diagnostic) for diagnostic in report["diagnostics"])
+
+
+def is_promotion_attestation(path: Path, receipt_path: Path, lexicon_path: Path) -> bool:
+    try:
+        attestation = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if (
+        not isinstance(attestation, dict)
+        or type(attestation.get("schema_version")) is not int
+        or attestation["schema_version"] != 1
+        or attestation.get("status") != "promoted"
+        or not is_hash(attestation.get("source_receipt_hash"))
+        or not is_hash(attestation.get("target_lexicon_hash"))
+        or not isinstance(attestation.get("target_lexicon"), str)
+        or not isinstance(attestation.get("find"), str)
+        or not attestation["find"]
+        or not isinstance(attestation.get("replace"), str)
+        or not receipt_path.is_file()
+        or not lexicon_path.is_file()
+    ):
+        return False
+    if attestation["source_receipt_hash"] != blake3_hash(receipt_path.read_bytes()):
+        return False
+    if attestation["target_lexicon_hash"] != blake3_hash(lexicon_path.read_bytes()):
+        return False
+    attested_target = Path(attestation["target_lexicon"])
+    if not attested_target.is_absolute():
+        attested_target = path.parent / attested_target
+    if attested_target.resolve() != lexicon_path:
+        return False
+    rules = parse_manifest_rules(lexicon_path)
+    return rules is not None and any(
+        find.casefold() == attestation["find"].casefold() and replace == attestation["replace"]
+        for find, replace in rules
+    )
+
+
+def is_correction_receipt(path: Path, workspace: Path) -> bool:
     try:
         receipt = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return False
-    if (
-        not isinstance(receipt, dict)
-        or type(receipt.get("schema_version")) is not int
-        or receipt["schema_version"] != 1
-    ):
+    if not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int:
         return False
-    if not is_hash(receipt.get("manifest_hash")):
+    schema_version = receipt["schema_version"]
+    if schema_version not in {1, 2}:
         return False
-    manifest_ref = receipt.get("manifest_path")
-    if not isinstance(manifest_ref, str) or not manifest_ref or Path(manifest_ref).is_absolute():
-        return False
-    output_dir = path.parent.resolve()
-    manifest = (path.parent / manifest_ref).resolve()
-    allowed_root = output_dir.parent
-    if allowed_root not in manifest.parents and manifest != allowed_root:
-        return False
-    if not manifest.is_file() or receipt["manifest_hash"] != blake3_hash(manifest.read_bytes()):
-        return False
-    if receipt.get("manifest_source") not in {
-        "explicit",
-        "output-directory",
-        "parent-directory",
-    }:
+    manifest_paths: list[Path] = []
+
+    def valid_manifest(manifest: object) -> bool:
+        if not isinstance(manifest, dict) or not is_hash(manifest.get("hash")):
+            return False
+        manifest_ref = manifest.get("path")
+        if (
+            not isinstance(manifest_ref, str)
+            or not manifest_ref
+            or Path(manifest_ref).is_absolute()
+        ):
+            return False
+        manifest_path = (path.parent / manifest_ref).resolve()
+        if workspace not in manifest_path.parents and manifest_path != workspace:
+            return False
+        if (
+            not manifest_path.is_file()
+            or manifest["hash"] != blake3_hash(manifest_path.read_bytes())
+        ):
+            return False
+        manifest_paths.append(manifest_path)
+        return manifest.get("source") in {
+            "explicit",
+            "output-directory",
+            "parent-directory",
+        }
+
+    if schema_version == 1:
+        manifests = [{
+            "hash": receipt.get("manifest_hash"),
+            "path": receipt.get("manifest_path"),
+            "source": receipt.get("manifest_source"),
+        }]
+    else:
+        manifests = receipt.get("manifests")
+        if not isinstance(manifests, list) or not manifests:
+            return False
+    if any(not valid_manifest(manifest) for manifest in manifests):
         return False
     source_hashes = receipt.get("source_hashes")
     if (
@@ -160,6 +304,8 @@ def is_correction_receipt(path: Path) -> bool:
     if normalized_hash is not None and not is_hash(normalized_hash):
         return False
     normalized = path.parent / "normalized.json"
+    if normalized_hash is None and normalized.exists():
+        return False
     if normalized_hash is not None and (
         not normalized.is_file() or normalized_hash != blake3_hash(normalized.read_bytes())
     ):
@@ -174,6 +320,11 @@ def is_correction_receipt(path: Path) -> bool:
             return False
         if not isinstance(rule.get("replace"), str):
             return False
+        if schema_version == 2 and (
+            type(rule.get("source_manifest")) is not int
+            or not 0 <= rule["source_manifest"] < len(manifests)
+        ):
+            return False
         applications = rule.get("applications")
         if not isinstance(applications, list) or not applications:
             return False
@@ -186,6 +337,21 @@ def is_correction_receipt(path: Path) -> bool:
             or application["replacements"] < 0
             for application in applications
         ):
+            return False
+    effective: dict[str, tuple[int, int, str, str]] = {}
+    for manifest_index, manifest_path in enumerate(manifest_paths):
+        manifest_rules = parse_manifest_rules(manifest_path)
+        if manifest_rules is None:
+            return False
+        for rule_index, (find, replace) in enumerate(manifest_rules):
+            effective[find.casefold()] = (manifest_index, rule_index, find, replace)
+    ordered_effective = sorted(effective.values(), key=lambda rule: (rule[0], rule[1]))
+    if len(rules) != len(ordered_effective):
+        return False
+    for receipt_rule, (manifest_index, _, find, replace) in zip(rules, ordered_effective):
+        if receipt_rule["find"].casefold() != find.casefold() or receipt_rule["replace"] != replace:
+            return False
+        if schema_version == 2 and receipt_rule["source_manifest"] != manifest_index:
             return False
     return True
 
@@ -224,6 +390,13 @@ def load_checks(rubric_path: Path) -> list[dict[str, object]]:
                 raise ValueError(f"eval {eval_id} {check_type} check needs a string value")
             if check_type == "files_equal" and not isinstance(check.get("other_path"), str):
                 raise ValueError(f"eval {eval_id} files_equal check needs other_path")
+            if check_type == "promotion_attestation" and (
+                not isinstance(check.get("receipt_path"), str)
+                or not isinstance(check.get("lexicon_path"), str)
+            ):
+                raise ValueError(
+                    f"eval {eval_id} promotion_attestation check needs receipt_path and lexicon_path"
+                )
             checks.append({**check, "eval_id": eval_id})
     return checks
 
@@ -243,7 +416,13 @@ def evaluate(check: dict[str, object], workspace: Path) -> bool:
     if check_type == "file_exists":
         return path.is_file()
     if check_type == "correction_receipt":
-        return path.is_file() and is_correction_receipt(path)
+        return path.is_file() and is_correction_receipt(path, workspace)
+    if check_type == "review_report":
+        return path.is_file() and is_review_report(path)
+    if check_type == "promotion_attestation":
+        receipt_path = resolve(workspace, check["receipt_path"])
+        lexicon_path = resolve(workspace, check["lexicon_path"])
+        return path.is_file() and is_promotion_attestation(path, receipt_path, lexicon_path)
     if check_type == "file_nonempty":
         return path.is_file() and path.stat().st_size > 0
     if check_type == "files_equal":

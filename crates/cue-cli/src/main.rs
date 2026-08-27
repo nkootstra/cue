@@ -64,6 +64,8 @@ async fn dispatch(mut cli: Cue) -> cue_core::Result<i32> {
                 &config,
             ))
         }
+        Some(Command::Lexicon(args)) => Ok(commands::lexicon::run(args)),
+        Some(Command::Review(args)) => Ok(commands::review::run(args, cli.corrections.as_deref())),
         None => {
             let config = load_resolved_config()?;
             Ok(commands::process::run(&cli, &config).await)
