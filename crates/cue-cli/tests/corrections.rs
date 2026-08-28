@@ -180,6 +180,43 @@ fn correct_regenerates_subtitles_from_the_canonical_transcript() {
 }
 
 #[test]
+fn correct_refuses_to_overwrite_a_configured_unowned_subtitle() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("lesson.mp4");
+    fs::write(&source, "media placeholder").unwrap();
+    let output = temp.path().join(".cue/lesson");
+    fs::create_dir_all(&output).unwrap();
+    write_transcript(&output);
+    let published = temp.path().join("lesson.srt");
+    fs::write(&published, "UNOWNED SUBTITLE\n").unwrap();
+    let manifest = temp.path().join("corrections.md");
+    fs::write(&manifest, "open telemetry -> OpenTelemetry\n").unwrap();
+
+    let result = cue_command(temp.path())
+        .args([
+            "correct",
+            source.to_str().unwrap(),
+            "--corrections",
+            manifest.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("already exists and is not owned by cue"),
+        "{stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(&published).unwrap(),
+        "UNOWNED SUBTITLE\n"
+    );
+    assert!(!output.join("subtitles.srt").exists());
+    assert!(!output.join("transcript.txt").exists());
+}
+
+#[test]
 fn subtitle_corrections_can_span_cue_boundaries() {
     let temp = tempfile::tempdir().unwrap();
     let output = temp.path().join("lesson.cue");

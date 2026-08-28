@@ -47,12 +47,13 @@ fn run_inner(
 ) -> Result<()> {
     let layout = resolve_output_layout(args.output.as_path(), output_root)?;
     let output_dir = layout.workspace.clone();
-    let subtitle_formats = [
-        cue_core::config::SubtitleFormat::Srt,
-        cue_core::config::SubtitleFormat::Vtt,
-    ];
+    let subtitle_formats = correction_subtitle_formats(&output_dir, config);
     if !args.dry_run {
-        crate::commands::output::preflight_subtitles(&layout, subtitle_formats, true)?;
+        crate::commands::output::preflight_subtitles(
+            &layout,
+            subtitle_formats.iter().copied(),
+            false,
+        )?;
     }
     let plan = CorrectionPlan::require(&output_dir, corrections)?;
     let _output_lock = if args.dry_run {
@@ -65,7 +66,11 @@ fn run_inner(
     }
     let outcome = plan.render(&output_dir, config, CorrectionScope::Full, args.dry_run)?;
     if !args.dry_run {
-        crate::commands::output::publish_subtitles(&layout, subtitle_formats, true)?;
+        crate::commands::output::publish_subtitles(
+            &layout,
+            subtitle_formats.iter().copied(),
+            false,
+        )?;
     }
 
     for (artifact, replacements) in &outcome.replacements {
@@ -82,4 +87,22 @@ fn run_inner(
         println_line("\nApplied. transcript.json and analysis outputs were left untouched.");
     }
     Ok(())
+}
+
+fn correction_subtitle_formats(
+    output_dir: &Path,
+    config: &cue_core::Config,
+) -> Vec<cue_core::config::SubtitleFormat> {
+    [
+        cue_core::config::SubtitleFormat::Srt,
+        cue_core::config::SubtitleFormat::Vtt,
+    ]
+    .into_iter()
+    .filter(|format| {
+        output_dir
+            .join(format!("subtitles.{}", format.extension()))
+            .exists()
+            || config.subtitles.formats.contains(format)
+    })
+    .collect()
 }

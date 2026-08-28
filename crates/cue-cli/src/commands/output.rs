@@ -46,13 +46,13 @@ pub(super) fn source_layout(source: &Path, root: Option<&Path>) -> Result<Output
 pub(super) fn existing_source_layout(source: &Path, root: Option<&Path>) -> Result<OutputLayout> {
     if let Some(root) = root {
         let layout = source_layout(source, Some(root))?;
-        if layout.workspace.is_dir() {
-            return Ok(layout);
-        }
         let source = std::fs::canonicalize(source).map_err(|error| {
             CueError::general(format!("could not resolve source {}", source.display()))
                 .because(error.to_string())
         })?;
+        if layout.workspace.is_dir() && workspace_refers_to_source(&layout.workspace, &source) {
+            return Ok(layout);
+        }
         let mut matches = Vec::new();
         find_source_workspaces(&root.join(".cue"), &source, &mut matches)?;
         match matches.as_slice() {
@@ -156,21 +156,27 @@ fn find_source_workspaces(root: &Path, source: &Path, matches: &mut Vec<PathBuf>
         if !file_type.is_dir() {
             continue;
         }
-        let descriptor_path = path.join(WORKSPACE_FILE);
-        if descriptor_path.is_file()
-            && let Ok(bytes) = std::fs::read(&descriptor_path)
-            && let Ok(descriptor) = serde_json::from_slice::<WorkspaceDescriptor>(&bytes)
-            && descriptor.schema_version == 1
-            && std::fs::canonicalize(path.join(descriptor.source))
-                .ok()
-                .as_deref()
-                == Some(source)
-        {
+        if workspace_refers_to_source(&path, source) {
             matches.push(path.clone());
         }
         find_source_workspaces(&path, source, matches)?;
     }
     Ok(())
+}
+
+fn workspace_refers_to_source(workspace: &Path, source: &Path) -> bool {
+    let descriptor_path = workspace.join(WORKSPACE_FILE);
+    descriptor_path.is_file()
+        && std::fs::read(descriptor_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<WorkspaceDescriptor>(&bytes).ok())
+            .is_some_and(|descriptor| {
+                descriptor.schema_version == 1
+                    && std::fs::canonicalize(workspace.join(descriptor.source))
+                        .ok()
+                        .as_deref()
+                        == Some(source)
+            })
 }
 
 fn select_workspace(source: &Path, legacy: &Path, hidden: &Path) -> Result<PathBuf> {
@@ -376,6 +382,31 @@ mod tests {
 
         assert_eq!(layout.workspace, workspace);
         assert_eq!(layout.published_base, root.join("module/lesson"));
+    }
+
+    #[test]
+    fn explicit_output_root_rejects_a_direct_workspace_for_a_different_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let first_source = temp.path().join("first/lesson.mp4");
+        let requested_source = temp.path().join("second/lesson.mp4");
+        let root = temp.path().join("out");
+        let workspace = root.join(".cue/lesson");
+        std::fs::create_dir_all(first_source.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(requested_source.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(&first_source, b"first media").unwrap();
+        std::fs::write(&requested_source, b"second media").unwrap();
+        write_workspace_descriptor(&workspace, &first_source).unwrap();
+
+        let error = existing_source_layout(&requested_source, Some(&root))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("no cue workspace beneath"), "{error}");
+        assert!(
+            error.contains(&requested_source.display().to_string()),
+            "{error}"
+        );
     }
 
     #[test]
