@@ -3,6 +3,7 @@
 //! This struct is the single source of truth for parsing, help, and (via
 //! the emitted usage spec) completions and docs.
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use usage::{Args, Cli, Subcommands};
 
@@ -28,6 +29,10 @@ pub struct Cue {
     /// Search directory inputs recursively
     #[usage(short = 'r', long, global)]
     pub recursive: bool,
+
+    /// Maximum number of media files to process concurrently
+    #[usage(short = 'j', long, global, default = "1")]
+    pub jobs: NonZeroUsize,
 
     /// Corrections manifest file
     #[usage(long, global)]
@@ -438,6 +443,22 @@ mod tests {
     }
 
     #[test]
+    fn jobs_is_a_positive_global_processing_limit() {
+        let default = parse_args(&["cue", "clip.mp4"]);
+        assert_eq!(default.jobs.get(), 1);
+
+        let configured = parse_args(&["cue", "--jobs", "3", "transcribe", "clip.mp4"]);
+        assert_eq!(configured.jobs.get(), 3);
+
+        let zero = ["cue", "--jobs", "0", "clip.mp4"]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        let zero_refs = zero.iter().map(OsString::as_os_str).collect::<Vec<_>>();
+        assert!(Cue::try_parse_from(&zero_refs).is_err());
+    }
+
+    #[test]
     fn empty_invocation_is_valid() {
         // All fields optional so we can print our own help.
         let cli = parse_args(&["cue"]);
@@ -463,10 +484,11 @@ mod tests {
     }
 
     #[test]
-    fn emitted_spec_names_paths_and_recursive() {
+    fn emitted_spec_names_batch_processing_options() {
         let kdl = Cue::to_kdl();
         assert!(kdl.contains("[PATHS]"), "{kdl}");
         assert!(kdl.contains("flag \"-r --recursive\""), "{kdl}");
+        assert!(kdl.contains("flag \"-j --jobs\""), "{kdl}");
     }
 
     #[test]

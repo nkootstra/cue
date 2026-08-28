@@ -190,6 +190,7 @@ dependencies = [
  "cue-subtitles",
  "cue-transcription",
  "fs4",
+ "futures",
  "indicatif",
  "serde",
  "serde_json",
