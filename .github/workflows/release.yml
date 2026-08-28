@@ -12,7 +12,7 @@ jobs:
     name: validate release tag
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Require tag to match workspace version
         run: |
@@ -48,7 +48,7 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -78,7 +78,7 @@ jobs:
             > "cue-${{ matrix.target }}.tar.gz.sha256"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cue-${{ matrix.target }}
           path: |
@@ -90,10 +90,10 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           merge-multiple: true
 
@@ -101,7 +101,7 @@ jobs:
         run: shasum -a 256 cue-*.tar.gz > sha256sums.txt
 
       - name: Upload combined checksums
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: release-checksums
           path: sha256sums.txt
@@ -120,10 +120,10 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Download checksums
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: release-checksums
           path: release-checksums
