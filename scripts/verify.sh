@@ -94,7 +94,8 @@ rm -rf "$OUT"
 check "pipeline run" env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" "$SPEECH_MP3" --output "$OUT"
 
 for f in transcript.json transcript.txt transcript.clean.txt normalized.json \
-         subtitles.srt subtitles.vtt analysis.json summary.md description.md; do
+         subtitles.srt subtitles.vtt analysis.json summary.md description.md \
+         cue.run.json; do
   check "output exists: $f" test -s "$OUT/$f"
 done
 
@@ -105,6 +106,12 @@ check "vtt has header"           bash -c "head -1 '$OUT/subtitles.vtt' | grep -q
 check "analysis schema version"  bash -c "grep -q '\"schema_version\": 1' '$OUT/analysis.json'"
 check "summary mentions title"   bash -c "grep -q 'Cue Pipeline Test' '$OUT/summary.md'"
 check "description has chapters" bash -c "grep -q 'Chapters' '$OUT/description.md'"
+check "run receipt contract" bash -c "python3 -c \"import json; d=json.load(open('$OUT/cue.run.json')); assert d['schema_version']==1; assert d['mode']=='full'; assert d['source']['digest']['algorithm']=='blake3'; assert len(d['source']['digest']['value'])==64; assert d['remote_data_usage']['normalized_text_sent_to_remote_in_current_run'] is None; assert {a['path'] for a in d['artifacts']} == {'transcript.json','transcript.txt','transcript.clean.txt','normalized.json','subtitles.srt','subtitles.vtt','analysis.json','summary.md','description.md'}; assert {s['stage'] for s in d['stages']} >= {'inspect','extract','transcribe','normalize','analyze','render'}\""
+check "verify accepts intact output" "$CUE" verify "$OUT"
+printf 'tampered\n' >> "$OUT/transcript.txt"
+check_fail "verify detects artifact drift" "$CUE" verify "$OUT"
+check "rerun restores attested output" env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" "$SPEECH_MP3" --output "$OUT"
+check "verify accepts restored output" "$CUE" verify "$OUT"
 
 echo
 echo "== cache behavior =="
@@ -138,6 +145,9 @@ TRANS_DIR="$VERIFY_TMP/trans"
 rm -rf "$TRANS_DIR"
 check "transcribe runs" env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" transcribe "$SPEECH_MP3" --output "$TRANS_DIR"
 check "transcript exists"     test -s "$TRANS_DIR/transcript.txt"
+check "transcribe receipt exists" test -s "$TRANS_DIR/cue.run.json"
+check "transcribe receipt mode" bash -c "python3 -c \"import json; d=json.load(open('$TRANS_DIR/cue.run.json')); assert d['mode']=='transcript-only'; assert {a['path'] for a in d['artifacts']} == {'transcript.json','transcript.txt'}\""
+check "verify accepts transcript-only output" "$CUE" verify "$TRANS_DIR"
 check_fail "no subtitles"     test -s "$TRANS_DIR/subtitles.srt"
 check_fail "no analysis"      test -s "$TRANS_DIR/analysis.json"
 
@@ -177,12 +187,15 @@ EOF
 printf '{"analysis":"UNCHANGED"}\n' > "$VERIFY_DIR/talk.cue/analysis.json"
 printf '{"schema_version":1,"chunks":[{"start_ms":0,"end_ms":1600,"text":"UNCHANGED"}]}\n' > "$VERIFY_DIR/talk.cue/normalized.json"
 printf 'STALE RECEIPT\n' > "$VERIFY_DIR/talk.cue/corrections.applied.json"
+printf '{}\n' > "$VERIFY_DIR/talk.cue/cue.run.json"
 printf 'John Dough -> John Doe\nopen telemetry -> OpenTelemetry\n' > "$VERIFY_DIR/corrections.md"
 BEFORE=$(shasum -a 256 "$VERIFY_DIR/talk.cue/transcript.txt" "$VERIFY_DIR/talk.cue/subtitles.srt" "$VERIFY_DIR/talk.cue/transcript.json" "$VERIFY_DIR/talk.cue/normalized.json" "$VERIFY_DIR/talk.cue/analysis.json" "$VERIFY_DIR/talk.cue/corrections.applied.json" | shasum | cut -d' ' -f1)
 check "correct dry-run writes nothing" bash -c "$CUE correct $VERIFY_DIR/talk.cue --dry-run 2>&1 | grep -q 'Dry run'"
 AFTER=$(shasum -a 256 "$VERIFY_DIR/talk.cue/transcript.txt" "$VERIFY_DIR/talk.cue/subtitles.srt" "$VERIFY_DIR/talk.cue/transcript.json" "$VERIFY_DIR/talk.cue/normalized.json" "$VERIFY_DIR/talk.cue/analysis.json" "$VERIFY_DIR/talk.cue/corrections.applied.json" | shasum | cut -d' ' -f1)
 check "correct dry-run leaves all artifacts unchanged" test "$BEFORE" = "$AFTER"
+check "correct dry-run keeps run receipt" test -s "$VERIFY_DIR/talk.cue/cue.run.json"
 check "correct applies"               bash -c "$CUE correct $VERIFY_DIR/talk.cue 2>&1 | grep -q 'replacement(s)'"
+check_fail "correct invalidates run receipt" test -e "$VERIFY_DIR/talk.cue/cue.run.json"
 check "correct fixed transcript"      bash -c "grep -q 'OpenTelemetry' $VERIFY_DIR/talk.cue/transcript.txt && ! grep -q 'John Dough' $VERIFY_DIR/talk.cue/transcript.txt"
 check "correct fixed subtitles"       bash -c "grep -q 'OpenTelemetry' $VERIFY_DIR/talk.cue/subtitles.srt"
 check "correct wrote receipt"          bash -c "python3 -c \"import json; d=json.load(open('$VERIFY_DIR/talk.cue/corrections.applied.json')); assert d['schema_version']==2; assert len(d['manifests'])==1; assert len(d['rules'])==2\""

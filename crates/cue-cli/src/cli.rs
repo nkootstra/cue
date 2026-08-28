@@ -63,6 +63,8 @@ pub enum Command {
     Review(ReviewArgs),
     /// Check generated subtitle cues against a measurable policy
     Subtitles(SubtitlesArgs),
+    /// Verify a completed cue output against its run receipt
+    Verify(VerifyArgs),
 }
 
 /// Transcribe files or directories
@@ -203,6 +205,16 @@ pub struct SubtitlesCheckArgs {
     /// A cue output directory or its source media file
     pub output: PathBuf,
     /// Emit a machine-readable JSON report
+    #[usage(long)]
+    pub json: bool,
+}
+
+/// Verify a completed cue output
+#[derive(Debug, Args)]
+pub struct VerifyArgs {
+    /// A cue output directory or its source media file
+    pub output: PathBuf,
+    /// Emit a machine-readable verification report
     #[usage(long)]
     pub json: bool,
 }

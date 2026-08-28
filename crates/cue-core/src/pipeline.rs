@@ -1,9 +1,9 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// The ordered stages of the cue processing pipeline.
 ///
 /// Each stage is independently cacheable and restartable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PipelineStage {
     Inspect,

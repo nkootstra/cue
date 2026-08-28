@@ -21,6 +21,10 @@ use crate::cli::Cue;
 use crate::commands::inputs::{ResolvedInput, resolve_inputs};
 use crate::corrections::{CorrectionPlan, CorrectionScope};
 use crate::render::{human_duration, println_line};
+use crate::run_contract::{
+    ProcessModeName, ProviderIdentity, RemoteDataUsage, RunReceipt, StageRecord, StageStatus,
+    TrackedFile,
+};
 
 #[derive(serde::Serialize)]
 struct TranscriptionCacheKey<'a> {
@@ -43,6 +47,10 @@ struct NormalizationCacheKey<'a> {
 }
 
 const NORMALIZATION_CACHE_VERSION: u8 = 3;
+
+fn public_normalization_skip_reason(_internal_reason: &str) -> &'static str {
+    "normalization unavailable; check the configured Ollama service and S1 model setup"
+}
 
 #[derive(serde::Serialize)]
 struct AnalysisCacheKey<'a> {
@@ -112,6 +120,13 @@ impl ProcessMode {
                     | PipelineStage::Transcribe
                     | PipelineStage::Render
             ),
+        }
+    }
+
+    fn receipt_name(self) -> ProcessModeName {
+        match self {
+            Self::Full => ProcessModeName::Full,
+            Self::TranscriptOnly => ProcessModeName::TranscriptOnly,
         }
     }
 }
@@ -277,6 +292,87 @@ struct FileContext<'a> {
     correction: &'a CorrectionPlan,
 }
 
+fn initial_run_receipt(
+    source: &Path,
+    output_dir: &Path,
+    source_hash: String,
+    context: &FileContext<'_>,
+) -> Result<RunReceipt> {
+    let FileContext {
+        cli,
+        config,
+        mode,
+        correction,
+        ..
+    } = context;
+    let mut providers = vec![
+        ProviderIdentity {
+            stage: cue_core::PipelineStage::Inspect,
+            provider: "ffprobe".into(),
+            model: None,
+            endpoint: None,
+        },
+        ProviderIdentity {
+            stage: cue_core::PipelineStage::Extract,
+            provider: "ffmpeg".into(),
+            model: None,
+            endpoint: None,
+        },
+        ProviderIdentity {
+            stage: cue_core::PipelineStage::Transcribe,
+            provider: "faster-whisper".into(),
+            model: Some(config.transcription.model.clone()),
+            endpoint: None,
+        },
+    ];
+    if *mode == ProcessMode::Full {
+        providers.push(ProviderIdentity {
+            stage: cue_core::PipelineStage::Normalize,
+            provider: config.normalization.provider.clone(),
+            model: Some(cue_normalization::S1_MODEL_NAME.into()),
+            endpoint: Some(crate::run_contract::sanitize_endpoint(
+                &config.normalization.ollama_url,
+            )),
+        });
+        if let Some(llm) = &config.llm {
+            providers.push(ProviderIdentity {
+                stage: cue_core::PipelineStage::Analyze,
+                provider: "openai-compatible".into(),
+                model: Some(llm.model.clone()),
+                endpoint: Some(crate::run_contract::sanitize_endpoint(&llm.base_url)),
+            });
+        }
+    }
+    Ok(RunReceipt {
+        schema_version: crate::run_contract::SCHEMA_VERSION,
+        cue_version: env!("CARGO_PKG_VERSION").into(),
+        mode: mode.receipt_name(),
+        source: TrackedFile::from_digest(
+            crate::run_contract::tracked_reference(output_dir, source)?,
+            source_hash,
+        ),
+        configuration: crate::run_contract::configuration_snapshot(config, cli.language.as_deref()),
+        providers,
+        stages: vec![StageRecord::new(
+            cue_core::PipelineStage::Inspect,
+            StageStatus::Executed,
+            None,
+        )],
+        warnings: Vec::new(),
+        remote_data_usage: RemoteDataUsage {
+            normalized_text_sent_to_remote_in_current_run: None,
+        },
+        corrections: correction.attested_manifests(output_dir)?,
+        artifacts: Vec::new(),
+    })
+}
+
+fn include_if_present(output_dir: &Path, names: &mut Vec<String>, name: &str) {
+    if output_dir.join(name).is_file() {
+        names.push(name.into());
+    }
+}
+
 async fn process_file(
     path: &Path,
     out_dir: &Path,
@@ -310,6 +406,7 @@ async fn process_file(
 
     // Content cache layout keyed by the media bytes themselves.
     let media_hash = cue_cache::file_hash(path)?;
+    let mut run_receipt = initial_run_receipt(path, out_dir, media_hash.clone(), context)?;
     let cache_root = cue_cache::cache_dir().ok_or_else(|| {
         CueError::general("could not determine a cache directory")
             .remedy("set CUE_CACHE_DIR to a writable directory")
@@ -327,10 +424,20 @@ async fn process_file(
     let wav_path = stage_dir.join("audio.wav");
     if wav_path.exists() {
         let _ = events.send(PipelineEvent::Cached(PipelineStage::Extract));
+        run_receipt.stages.push(StageRecord::new(
+            PipelineStage::Extract,
+            StageStatus::Cached,
+            None,
+        ));
     } else {
         let _ = events.send(PipelineEvent::Started(PipelineStage::Extract));
         extract_audio(&ffmpeg, path, &wav_path).await?;
         let _ = events.send(PipelineEvent::Completed(PipelineStage::Extract));
+        run_receipt.stages.push(StageRecord::new(
+            PipelineStage::Extract,
+            StageStatus::Executed,
+            None,
+        ));
     }
 
     // ---- Transcribe -----------------------------------------------------
@@ -364,6 +471,11 @@ async fn process_file(
     let transcript = match cached_transcript {
         Some(cached) => {
             let _ = events.send(PipelineEvent::Cached(PipelineStage::Transcribe));
+            run_receipt.stages.push(StageRecord::new(
+                PipelineStage::Transcribe,
+                StageStatus::Cached,
+                None,
+            ));
             cached
         }
         None => {
@@ -375,6 +487,11 @@ async fn process_file(
             fresh.validate()?;
             store_cached(&transcript_cache, &transcript_cache_key, &fresh);
             let _ = events.send(PipelineEvent::Completed(PipelineStage::Transcribe));
+            run_receipt.stages.push(StageRecord::new(
+                PipelineStage::Transcribe,
+                StageStatus::Executed,
+                None,
+            ));
             fresh
         }
     };
@@ -382,10 +499,19 @@ async fn process_file(
     // `cue transcribe` stops here: canonical transcript only.
     if !mode.includes(PipelineStage::Normalize) {
         let _ = events.send(PipelineEvent::Started(PipelineStage::Render));
+        let _output_lock = crate::run_contract::OutputLock::acquire(out_dir)?;
         begin_render(out_dir, correction)?;
         write_render_json(&out_dir.join("transcript.json"), &transcript)?;
         write_render_file(&out_dir.join("transcript.txt"), transcript.plain_text())?;
         correction.render(out_dir, config, CorrectionScope::TranscriptOnly, false)?;
+        run_receipt.stages.push(StageRecord::new(
+            PipelineStage::Render,
+            StageStatus::Executed,
+            None,
+        ));
+        let mut artifacts = vec!["transcript.json".into(), "transcript.txt".into()];
+        include_if_present(out_dir, &mut artifacts, "corrections.applied.json");
+        run_receipt.publish(out_dir, &artifacts)?;
         let _ = events.send(PipelineEvent::Completed(PipelineStage::Render));
         println_line(&format!(
             "\nDone. Transcript written to {}/",
@@ -422,6 +548,11 @@ async fn process_file(
     let normalized = match load_cached(&normalized_cache, &normalization_key) {
         Some(cached) => {
             let _ = events.send(PipelineEvent::Cached(PipelineStage::Normalize));
+            run_receipt.stages.push(StageRecord::new(
+                PipelineStage::Normalize,
+                StageStatus::Cached,
+                None,
+            ));
             Some(cached)
         }
         None => {
@@ -460,10 +591,24 @@ async fn process_file(
                 cue_normalization::NormalizationOutcome::Done(clean) => {
                     store_cached(&normalized_cache, &normalization_key, &clean);
                     let _ = events.send(PipelineEvent::Completed(PipelineStage::Normalize));
+                    run_receipt.stages.push(StageRecord::new(
+                        PipelineStage::Normalize,
+                        StageStatus::Executed,
+                        None,
+                    ));
                     Some(clean)
                 }
                 cue_normalization::NormalizationOutcome::Skipped(reason) => {
-                    tracing::info!(reason, "normalization skipped");
+                    let public_reason = public_normalization_skip_reason(&reason);
+                    tracing::info!(reason = public_reason, "normalization skipped");
+                    run_receipt.stages.push(StageRecord::new(
+                        PipelineStage::Normalize,
+                        StageStatus::Skipped,
+                        Some(public_reason.into()),
+                    ));
+                    run_receipt
+                        .warnings
+                        .push(format!("normalization skipped: {public_reason}"));
                     None
                 }
             }
@@ -493,10 +638,21 @@ async fn process_file(
             match load_cached(&analysis_cache, &analysis_key) {
                 Some(cached) => {
                     let _ = events.send(PipelineEvent::Cached(PipelineStage::Analyze));
+                    run_receipt.stages.push(StageRecord::new(
+                        PipelineStage::Analyze,
+                        StageStatus::Cached,
+                        None,
+                    ));
                     Some(cached)
                 }
                 None => {
                     let _ = events.send(PipelineEvent::Started(PipelineStage::Analyze));
+                    if crate::run_contract::endpoint_is_remote(&llm.base_url) {
+                        run_receipt
+                            .remote_data_usage
+                            .normalized_text_sent_to_remote_in_current_run =
+                            Some(crate::run_contract::sanitize_endpoint(&llm.base_url));
+                    }
                     let client = cue_llm::ChatClient::new(llm.base_url.clone(), llm.api_key());
                     let analyzer = cue_analysis::GatewayAnalyzer::new(client, &llm.model);
                     match analyzer
@@ -509,6 +665,11 @@ async fn process_file(
                         Ok(a) => {
                             store_cached(&analysis_cache, &analysis_key, &a);
                             let _ = events.send(PipelineEvent::Completed(PipelineStage::Analyze));
+                            run_receipt.stages.push(StageRecord::new(
+                                PipelineStage::Analyze,
+                                StageStatus::Executed,
+                                None,
+                            ));
                             Some(a)
                         }
                         Err(err) => {
@@ -517,6 +678,14 @@ async fn process_file(
                                 error: err.to_string(),
                             });
                             tracing::warn!(error = %err, "analysis failed");
+                            run_receipt.stages.push(StageRecord::new(
+                                PipelineStage::Analyze,
+                                StageStatus::Degraded,
+                                Some("analysis request failed; see run logs".into()),
+                            ));
+                            run_receipt
+                                .warnings
+                                .push("analysis failed; see run logs".into());
                             None
                         }
                     }
@@ -525,16 +694,27 @@ async fn process_file(
         }
         (None, _) => {
             tracing::info!("analysis skipped: no LLM gateway configured");
+            run_receipt.stages.push(StageRecord::new(
+                PipelineStage::Analyze,
+                StageStatus::Skipped,
+                Some("no LLM gateway configured".into()),
+            ));
             None
         }
         (Some(_), None) => {
             tracing::info!("analysis skipped: no cleaned text (S1 unavailable)");
+            run_receipt.stages.push(StageRecord::new(
+                PipelineStage::Analyze,
+                StageStatus::Skipped,
+                Some("no cleaned text (S1 unavailable)".into()),
+            ));
             None
         }
     };
 
     // ---- Render ---------------------------------------------------------
     let _ = events.send(PipelineEvent::Started(PipelineStage::Render));
+    let _output_lock = crate::run_contract::OutputLock::acquire(out_dir)?;
     begin_render(out_dir, correction)?;
 
     write_render_json(&out_dir.join("transcript.json"), &transcript)?;
@@ -569,6 +749,15 @@ async fn process_file(
         max_duration_ms: config.subtitles.max_duration_ms,
     };
     let cues = cue_subtitles::build_cues(&transcript, &policy)?;
+    for format in [
+        cue_core::config::SubtitleFormat::Srt,
+        cue_core::config::SubtitleFormat::Vtt,
+    ] {
+        if !config.subtitles.formats.contains(&format) {
+            let name = format!("subtitles.{}", format.extension());
+            remove_stale_artifacts(out_dir, &[&name])?;
+        }
+    }
     for format in &config.subtitles.formats {
         let path = out_dir.join(format!("subtitles.{}", format.extension()));
         let content = match format {
@@ -579,6 +768,28 @@ async fn process_file(
     }
 
     correction.render(out_dir, config, CorrectionScope::Full, false)?;
+
+    run_receipt.stages.push(StageRecord::new(
+        PipelineStage::Render,
+        StageStatus::Executed,
+        None,
+    ));
+    let mut artifacts = vec!["transcript.json".into(), "transcript.txt".into()];
+    if normalized.is_some() {
+        artifacts.extend(["normalized.json".into(), "transcript.clean.txt".into()]);
+    }
+    if analysis.is_some() {
+        artifacts.extend([
+            "analysis.json".into(),
+            "summary.md".into(),
+            "description.md".into(),
+        ]);
+    }
+    for format in &config.subtitles.formats {
+        artifacts.push(format!("subtitles.{}", format.extension()));
+    }
+    include_if_present(out_dir, &mut artifacts, "corrections.applied.json");
+    run_receipt.publish(out_dir, &artifacts)?;
 
     let _ = events.send(PipelineEvent::Completed(PipelineStage::Render));
     println_line(&format!(
@@ -598,6 +809,7 @@ fn require_tool(binary: &str, purpose: &str) -> Result<PathBuf> {
 
 fn begin_render(output_dir: &Path, correction: &CorrectionPlan) -> Result<()> {
     create_output_dir(output_dir)?;
+    crate::run_contract::invalidate(output_dir)?;
     correction.invalidate_receipt(output_dir)
 }
 
@@ -876,6 +1088,7 @@ mod tests {
         let output = dir.path().join("lesson.cue");
         std::fs::create_dir(&output).unwrap();
         std::fs::write(output.join("corrections.applied.json"), "STALE\n").unwrap();
+        std::fs::write(output.join(crate::run_contract::RECEIPT_FILE), "STALE\n").unwrap();
         std::fs::create_dir(output.join("transcript.json")).unwrap();
         let correction = CorrectionPlan::prepare(&output, None).unwrap();
 
@@ -888,6 +1101,7 @@ mod tests {
 
         assert_eq!(error.stage(), Some(cue_core::PipelineStage::Render));
         assert!(!output.join("corrections.applied.json").exists());
+        assert!(!output.join(crate::run_contract::RECEIPT_FILE).exists());
     }
 
     #[test]
@@ -979,6 +1193,22 @@ mod tests {
             serde_json::to_vec(&current).unwrap(),
             serde_json::to_vec(&legacy).unwrap()
         );
+    }
+
+    #[test]
+    fn normalization_skip_reason_does_not_expose_transport_details() {
+        let internal_reason =
+            "request failed for https://admin:secret@example.test/api/normalize?token=credential";
+
+        let public_reason = public_normalization_skip_reason(internal_reason);
+
+        assert_eq!(
+            public_reason,
+            "normalization unavailable; check the configured Ollama service and S1 model setup"
+        );
+        assert!(!public_reason.contains("admin:secret"));
+        assert!(!public_reason.contains("example.test"));
+        assert!(!public_reason.contains("credential"));
     }
 
     #[test]

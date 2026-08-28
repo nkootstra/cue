@@ -7,6 +7,7 @@ mod corrections;
 mod events;
 mod logging;
 mod render;
+mod run_contract;
 
 use std::process::ExitCode;
 
@@ -77,6 +78,7 @@ async fn dispatch(mut cli: Cue) -> cue_core::Result<i32> {
             }
             None => Ok(commands::subtitles::print_help()),
         },
+        Some(Command::Verify(args)) => Ok(commands::verify::run(args)),
         None => {
             let config = load_resolved_config()?;
             Ok(commands::process::run(&cli, &config).await)

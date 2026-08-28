@@ -60,6 +60,7 @@ fn correct_writes_a_versioned_receipt_for_the_canonical_sources() {
     fs::create_dir(&output).unwrap();
     write_transcript(&output);
     fs::write(output.join("transcript.txt"), "old render\n").unwrap();
+    fs::write(output.join("cue.run.json"), "STALE RUN RECEIPT\n").unwrap();
     let manifest = temp.path().join("corrections.md");
     let manifest_bytes = b"open telemetry -> OpenTelemetry\n";
     fs::write(&manifest, manifest_bytes).unwrap();
@@ -98,6 +99,7 @@ fn correct_writes_a_versioned_receipt_for_the_canonical_sources() {
         "transcript.txt"
     );
     assert_eq!(receipt["rules"][0]["applications"][0]["replacements"], 1);
+    assert!(!output.join("cue.run.json").exists());
 }
 
 #[test]

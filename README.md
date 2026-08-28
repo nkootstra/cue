@@ -77,6 +77,7 @@ Ollama optional, for S1 transcript cleanup. After installing, run
 | `cue transcribe <path>...` | Process paths through the canonical transcript only (no subtitles/analysis) |
 | `cue correct <file>.cue` | Rebuild an existing output from canonical JSON and apply corrections |
 | `cue review <file>.cue [--json]` | Report focused correction candidates without changing files |
+| `cue verify <file>.cue [--json]` | Verify a completed output against its source, corrections, and artifact hashes |
 | `cue lexicon promote <file>.cue --rule <phrase> --to <dir>` | Promote a verified applied rule into a reusable scope |
 | `cue subtitles check <file>.cue [--json]` | Check generated subtitle cues and report source-linked policy findings |
 | `cue doctor` | Check required and optional tools; `--fix` provisions the Python worker |
@@ -140,6 +141,35 @@ that render, including fully cached reruns.
 | `analysis.json` / `summary.md` / `description.md` | LLM analysis (when a gateway is configured) |
 | `corrections.md` | Optional manifest you write to fix misheard names/terms |
 | `corrections.applied.json` | Versioned receipt recording contributing lexicons, canonical source hashes, rule provenance, and per-artifact applications |
+| `cue.run.json` | Completion receipt recording the source, effective configuration, providers, stage/cache outcomes, warnings, remote-data use, corrections, and final artifact hashes |
+
+## Verifying completed outputs
+
+A successful render publishes `cue.run.json` last, so its presence marks a
+completed run rather than a partially written output. Verify the source,
+correction manifests, and every recorded artifact at any time:
+
+```bash
+cue verify video.cue
+cue verify video.cue --json
+```
+
+Exit status 0 means all recorded files still match. Exit status 1 means a file
+is missing, unreadable, or has changed, or the receipt itself cannot be read.
+The JSON form provides stable diagnostic IDs for automation. The receipt never
+contains API keys; URL credentials, query strings, and fragments are removed
+from recorded provider endpoints. Remote-data metadata describes only transfers
+performed by the current run; cached artifacts do not claim the provider
+lineage of the run that originally created them.
+
+The receipt is an integrity record, not a cryptographic signature: it proves
+that the recorded files still agree with one another, but not who produced or
+approved them. Only trust receipts from a source you trust.
+
+`cue correct` deliberately invalidates `cue.run.json` before changing derived
+files because the old run no longer attests to them. Rerun the source with its
+correction manifest (cached stages are reused) to publish a new receipt after
+the corrections have been applied.
 
 ## Correcting transcripts
 
@@ -296,6 +326,7 @@ Work in progress.
 - [x] Durable scoped correction lexicons, focused review, explicit promotion,
       and application receipts
 - [x] Source-linked subtitle policy checks with human and JSON diagnostics
+- [x] Attested run receipts and source/artifact verification
 - [x] `transcribe` agent skill with evals
 - [ ] Incremental progress within stages (worker-level reporting)
 - [ ] Parallel file processing
