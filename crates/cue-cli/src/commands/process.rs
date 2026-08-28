@@ -21,7 +21,7 @@ use crate::cli::Cue;
 use crate::commands::batch::{KeyedLocks, MediaProcessor, process_inputs};
 use crate::commands::inputs::{ResolvedInput, resolve_inputs};
 use crate::corrections::{CorrectionPlan, CorrectionScope};
-use crate::events::{FileEvents, FilePipelineEvent};
+use crate::events::{FileEvents, FilePipelineEvent, RendererEvent};
 use crate::render::{human_duration, println_line};
 use crate::run_contract::{
     ProcessModeName, ProviderIdentity, RemoteDataUsage, RunReceipt, StageRecord, StageStatus,
@@ -181,10 +181,10 @@ async fn run_inner(
 
             let _ = tx.send(FilePipelineEvent {
                 source: failure.input.source.clone(),
-                event: PipelineEvent::Failed {
+                event: RendererEvent::Pipeline(PipelineEvent::Failed {
                     stage: failure.error.stage().unwrap_or(PipelineStage::Inspect),
                     error: failure.error.to_string(),
-                },
+                }),
             });
         }
     }
@@ -340,13 +340,15 @@ async fn process_file(
     let mode = context.mode;
     let correction = context.correction;
 
-    println_line(&format!("Processing {}...", path.display()));
+    events.processing();
 
     // ---- Inspect --------------------------------------------------------
     let ffprobe = require_tool("ffprobe", "inspect media files")?;
     events.send(PipelineEvent::Started(PipelineStage::Inspect));
     let media = cue_media::probe::inspect(&ffprobe, path).await?;
-    print_media_summary(&media);
+    for line in media_summary(&media) {
+        events.message(line);
+    }
     events.send(PipelineEvent::Completed(PipelineStage::Inspect));
 
     if !media.has_audio() {
@@ -482,7 +484,7 @@ async fn process_file(
         include_if_present(out_dir, &mut artifacts, "corrections.applied.json");
         run_receipt.publish(out_dir, &artifacts)?;
         events.send(PipelineEvent::Completed(PipelineStage::Render));
-        println_line(&format!(
+        events.message(format!(
             "\nDone. Transcript written to {}/",
             out_dir.display()
         ));
@@ -759,7 +761,7 @@ async fn process_file(
     run_receipt.publish(out_dir, &artifacts)?;
 
     events.send(PipelineEvent::Completed(PipelineStage::Render));
-    println_line(&format!(
+    events.message(format!(
         "\nDone. Transcript and subtitles written to {}/",
         out_dir.display()
     ));
@@ -862,30 +864,31 @@ fn print_usage_hint() {
     println_line("    cache     Manage the processing cache");
 }
 
-fn print_media_summary(media: &Media) {
-    println_line(&format!("  format:     {}", media.format));
-    println_line(&format!(
-        "  duration:   {}",
-        human_duration(media.duration_ms)
-    ));
+fn media_summary(media: &Media) -> Vec<String> {
+    let mut lines = vec![
+        format!("  format:     {}", media.format),
+        format!("  duration:   {}", human_duration(media.duration_ms)),
+    ];
 
     if media.has_video() {
         for stream in &media.video_streams {
-            println_line(&format!(
+            lines.push(format!(
                 "  video:      #{} {} ({}x{} @ {})",
                 stream.index, stream.codec, stream.width, stream.height, stream.frame_rate
             ));
         }
     } else {
-        println_line("  video:      none");
+        lines.push("  video:      none".into());
     }
 
     for stream in &media.audio_streams {
-        println_line(&format!(
+        lines.push(format!(
             "  audio:      #{} {} ({} Hz, {} ch)",
             stream.index, stream.codec, stream.sample_rate_hz, stream.channels
         ));
     }
+
+    lines
 }
 
 #[cfg(test)]

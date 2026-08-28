@@ -14,7 +14,14 @@ use cue_core::{PipelineEvent, PipelineStage};
 #[derive(Debug, Clone, PartialEq)]
 pub struct FilePipelineEvent {
     pub source: PathBuf,
-    pub event: PipelineEvent,
+    pub event: RendererEvent,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RendererEvent {
+    Pipeline(PipelineEvent),
+    Processing,
+    Message(String),
 }
 
 #[derive(Clone)]
@@ -34,7 +41,21 @@ impl FileEvents {
     pub fn send(&self, event: PipelineEvent) {
         let _ = self.sender.send(FilePipelineEvent {
             source: self.source.clone(),
-            event,
+            event: RendererEvent::Pipeline(event),
+        });
+    }
+
+    pub fn processing(&self) {
+        let _ = self.sender.send(FilePipelineEvent {
+            source: self.source.clone(),
+            event: RendererEvent::Processing,
+        });
+    }
+
+    pub fn message(&self, message: impl Into<String>) {
+        let _ = self.sender.send(FilePipelineEvent {
+            source: self.source.clone(),
+            event: RendererEvent::Message(message.into()),
         });
     }
 }
@@ -53,12 +74,21 @@ pub fn render_event(event: &PipelineEvent) -> String {
 }
 
 pub fn render_file_event(event: &FilePipelineEvent, is_batch: bool) -> String {
-    let rendered = render_event(&event.event);
-    if !is_batch || rendered.is_empty() {
-        return rendered;
+    match &event.event {
+        RendererEvent::Pipeline(pipeline_event) => {
+            let rendered = render_event(pipeline_event);
+            if !is_batch || rendered.is_empty() {
+                rendered
+            } else {
+                prefix_source(&rendered, &event.source, true)
+            }
+        }
+        RendererEvent::Processing if is_batch => {
+            prefix_source("Processing...", &event.source, true)
+        }
+        RendererEvent::Processing => format!("Processing {}...", event.source.display()),
+        RendererEvent::Message(message) => prefix_source(message, &event.source, is_batch),
     }
-    let source = source_label(&event.source);
-    format!("  [{source}] {}", rendered.trim_start())
 }
 
 /// The human-facing name shown while a stage runs.
@@ -98,7 +128,15 @@ async fn run_linear_renderer(
     let mut open_spinner: Option<indicatif::ProgressBar> = None;
 
     while let Some(file_event) = rx.recv().await {
-        let event = &file_event.event;
+        let RendererEvent::Pipeline(event) = &file_event.event else {
+            let message = render_file_event(&file_event, is_batch);
+            if let Some(spinner) = &open_spinner {
+                spinner.println(message);
+            } else {
+                println!("{message}");
+            }
+            continue;
+        };
         match (event, interactive) {
             // Interactive: replace the spinner line as stages change.
             (PipelineEvent::Started(stage), true) => {
@@ -173,19 +211,25 @@ async fn run_batch_renderer(mut rx: tokio::sync::mpsc::UnboundedReceiver<FilePip
     while let Some(file_event) = rx.recv().await {
         let source = &file_event.source;
         match &file_event.event {
-            PipelineEvent::Started(stage) => {
+            RendererEvent::Pipeline(PipelineEvent::Started(stage)) => {
                 finish_spinner(&mut spinners, source);
                 let spinner = progress.add(spinner(batch_label(source, *stage, None)));
                 spinners.insert(source.clone(), spinner);
             }
-            PipelineEvent::Progress { stage, percent } => {
+            RendererEvent::Pipeline(PipelineEvent::Progress { stage, percent }) => {
                 if let Some(spinner) = spinners.get(source) {
                     spinner.set_message(batch_label(source, *stage, Some(*percent)));
                 }
             }
-            PipelineEvent::Completed(_) => finish_spinner(&mut spinners, source),
-            PipelineEvent::Cached(_) | PipelineEvent::Failed { .. } => {
+            RendererEvent::Pipeline(PipelineEvent::Completed(_)) => {
+                finish_spinner(&mut spinners, source)
+            }
+            RendererEvent::Pipeline(PipelineEvent::Cached(_))
+            | RendererEvent::Pipeline(PipelineEvent::Failed { .. }) => {
                 finish_spinner(&mut spinners, source);
+                let _ = progress.println(render_file_event(&file_event, true));
+            }
+            RendererEvent::Processing | RendererEvent::Message(_) => {
                 let _ = progress.println(render_file_event(&file_event, true));
             }
         }
@@ -288,7 +332,7 @@ mod tests {
     fn batch_event_lines_identify_the_source_file() {
         let event = FilePipelineEvent {
             source: PathBuf::from("course/lesson-one.mp4"),
-            event: PipelineEvent::Started(PipelineStage::Transcribe),
+            event: RendererEvent::Pipeline(PipelineEvent::Started(PipelineStage::Transcribe)),
         };
 
         assert_eq!(
@@ -296,6 +340,32 @@ mod tests {
             "  [course/lesson-one.mp4] [transcribe] running"
         );
         assert_eq!(render_file_event(&event, false), "  [transcribe] running");
+    }
+
+    #[test]
+    fn renderer_messages_are_source_qualified_only_for_batches() {
+        let processing = FilePipelineEvent {
+            source: PathBuf::from("course/lesson-one.mp4"),
+            event: RendererEvent::Processing,
+        };
+        assert_eq!(
+            render_file_event(&processing, false),
+            "Processing course/lesson-one.mp4..."
+        );
+        assert_eq!(
+            render_file_event(&processing, true),
+            "  [course/lesson-one.mp4] Processing..."
+        );
+
+        let message = FilePipelineEvent {
+            source: PathBuf::from("course/lesson-one.mp4"),
+            event: RendererEvent::Message("  duration:   4.5s".into()),
+        };
+        assert_eq!(render_file_event(&message, false), "  duration:   4.5s");
+        assert_eq!(
+            render_file_event(&message, true),
+            "  [course/lesson-one.mp4] duration:   4.5s"
+        );
     }
 
     #[test]
@@ -309,7 +379,7 @@ mod tests {
             rx.try_recv().unwrap(),
             FilePipelineEvent {
                 source: PathBuf::from("course/lesson.mp4"),
-                event: PipelineEvent::Cached(PipelineStage::Extract),
+                event: RendererEvent::Pipeline(PipelineEvent::Cached(PipelineStage::Extract)),
             }
         );
     }

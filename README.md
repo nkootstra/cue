@@ -123,12 +123,14 @@ files, and never traverses directory symlinks; pass the real directory instead
 of an explicit directory symlink. Destination-name collisions are rejected
 before processing begins. Batch files are processed sequentially by default.
 Set `--jobs <N>` to process at most N files concurrently; start conservatively
-because transcription and local model stages can be memory intensive. Each
-file keeps its own progress row and output receipt. One file's failure does not
-stop the rest; failures are reported in input order, the final summary reports
-successes and failures, and any failure produces exit status 1. Inputs with
-identical content safely share cached work without writing that cache
-concurrently.
+because transcription and local model stages can be memory intensive. The
+`--jobs` option requires cue 0.10.0 or newer; upgrade an older binary if it
+rejects the option. TTY output shows one progress row per file, while piped
+output uses source-labelled messages. Each file keeps its own output receipt.
+One file's failure does not stop the rest; failures are reported in input order,
+the final summary reports successes and failures, and any failure produces exit
+status 1. Inputs with identical content safely share cached work without writing
+that cache concurrently.
 
 Processing a source again regenerates its derived text and subtitle artifacts.
 When a corrections manifest remains discoverable, cue reapplies it during
