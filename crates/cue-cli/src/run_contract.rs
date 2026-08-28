@@ -215,6 +215,7 @@ struct LlmSnapshot {
 pub(crate) enum ReceiptReadError {
     Missing { path: PathBuf },
     Unreadable { path: PathBuf, reason: String },
+    Unsafe { path: PathBuf },
     Malformed { path: PathBuf, reason: String },
     UnsupportedSchema { version: u32 },
     Invalid { reason: String },
@@ -225,6 +226,7 @@ impl ReceiptReadError {
         match self {
             Self::Missing { .. } => "CUE-VERIFY-RECEIPT-MISSING",
             Self::Unreadable { .. } => "CUE-VERIFY-RECEIPT-UNREADABLE",
+            Self::Unsafe { .. } => "CUE-VERIFY-RECEIPT-UNSAFE",
             Self::Malformed { .. } => "CUE-VERIFY-RECEIPT-MALFORMED",
             Self::UnsupportedSchema { .. } => "CUE-VERIFY-SCHEMA-UNSUPPORTED",
             Self::Invalid { .. } => "CUE-VERIFY-RECEIPT-INVALID",
@@ -236,6 +238,9 @@ impl ReceiptReadError {
             Self::Missing { path } => format!("run receipt {} is missing", path.display()),
             Self::Unreadable { path, reason } => {
                 format!("could not read {}: {reason}", path.display())
+            }
+            Self::Unsafe { path } => {
+                format!("run receipt {} is not a regular file", path.display())
             }
             Self::Malformed { path, reason } => {
                 format!("could not parse {}: {reason}", path.display())
@@ -253,6 +258,19 @@ impl RunReceipt {
         output_dir: &Path,
     ) -> std::result::Result<Self, ReceiptReadError> {
         let path = output_dir.join(RECEIPT_FILE);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Ok(_) => return Err(ReceiptReadError::Unsafe { path }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ReceiptReadError::Missing { path });
+            }
+            Err(error) => {
+                return Err(ReceiptReadError::Unreadable {
+                    path,
+                    reason: error.to_string(),
+                });
+            }
+        }
         let file = std::fs::File::open(&path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 ReceiptReadError::Missing { path: path.clone() }

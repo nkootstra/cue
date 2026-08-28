@@ -235,6 +235,28 @@ fn verify_json_reports_missing_and_malformed_receipts() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn verify_rejects_a_symlinked_run_receipt() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = fixture();
+    let receipt = fixture.output.join("cue.run.json");
+    let external = fixture.output.parent().unwrap().join("external-run.json");
+    std::fs::rename(&receipt, &external).unwrap();
+    symlink(&external, &receipt).unwrap();
+
+    let result = cue()
+        .args(["verify", fixture.output.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    assert!(result.stderr.is_empty(), "{result:?}");
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["diagnostics"][0]["id"], "CUE-VERIFY-RECEIPT-UNSAFE");
+}
+
 #[test]
 fn verify_json_reports_unsupported_receipt_schemas() {
     let fixture = fixture();

@@ -48,6 +48,10 @@ struct NormalizationCacheKey<'a> {
 
 const NORMALIZATION_CACHE_VERSION: u8 = 3;
 
+fn public_normalization_skip_reason(_internal_reason: &str) -> &'static str {
+    "normalization unavailable; check the configured Ollama service and S1 model setup"
+}
+
 #[derive(serde::Serialize)]
 struct AnalysisCacheKey<'a> {
     version: u8,
@@ -595,15 +599,16 @@ async fn process_file(
                     Some(clean)
                 }
                 cue_normalization::NormalizationOutcome::Skipped(reason) => {
-                    tracing::info!(reason, "normalization skipped");
+                    let public_reason = public_normalization_skip_reason(&reason);
+                    tracing::info!(reason = public_reason, "normalization skipped");
                     run_receipt.stages.push(StageRecord::new(
                         PipelineStage::Normalize,
                         StageStatus::Skipped,
-                        Some(reason.clone()),
+                        Some(public_reason.into()),
                     ));
                     run_receipt
                         .warnings
-                        .push(format!("normalization skipped: {reason}"));
+                        .push(format!("normalization skipped: {public_reason}"));
                     None
                 }
             }
@@ -1188,6 +1193,22 @@ mod tests {
             serde_json::to_vec(&current).unwrap(),
             serde_json::to_vec(&legacy).unwrap()
         );
+    }
+
+    #[test]
+    fn normalization_skip_reason_does_not_expose_transport_details() {
+        let internal_reason =
+            "request failed for https://admin:secret@example.test/api/normalize?token=credential";
+
+        let public_reason = public_normalization_skip_reason(internal_reason);
+
+        assert_eq!(
+            public_reason,
+            "normalization unavailable; check the configured Ollama service and S1 model setup"
+        );
+        assert!(!public_reason.contains("admin:secret"));
+        assert!(!public_reason.contains("example.test"));
+        assert!(!public_reason.contains("credential"));
     }
 
     #[test]
