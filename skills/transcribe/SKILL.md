@@ -52,6 +52,10 @@ Subtitle validation requires `cue subtitles` to appear in `cue --help`.
 Upgrade cue before claiming subtitle-policy evidence when the command is
 absent; visually inspecting SRT/VTT is useful but is not an equivalent check.
 
+Attested output verification requires `cue verify` to appear in `cue --help`.
+Upgrade cue before claiming that generated files still match their completed
+run receipt when that command is absent.
+
 If the required tools are fine but the Python worker is missing, provision it:
 
 ```bash
@@ -82,6 +86,22 @@ write outputs. Outputs land in `<file>.cue/` next to the source (or `--output`):
 | `subtitles.srt` / `subtitles.vtt` | Subtitles derived from the canonical transcript. |
 | `analysis.json` / `summary.md` / `description.md` | LLM analysis (present when a gateway is configured). |
 | `corrections.applied.json` | Receipt written after correction, showing which rules were applied to `transcript.txt`, optional `transcript.clean.txt`, and subtitles. |
+| `cue.run.json` | Completion receipt binding the source, effective configuration, providers, correction manifests, and final artifact hashes. |
+
+After processing, verify the completed output before reporting success:
+
+```bash
+cue verify <file>.cue
+cue verify <file>.cue --json  # when another agent or script consumes the result
+```
+
+Exit status 0 means the source, corrections, and artifacts still match the
+receipt. Inspect status-1 output: it can mean drift, a missing file, or an
+unreadable receipt. Do not edit `cue.run.json` by hand. Treat the receipt as an
+integrity record, not a signature or proof of authorship, and only trust
+receipts from a trusted source. Its remote-data field describes transfers made
+by the current run only; cached artifacts do not establish earlier provider
+lineage.
 
 If the user only wants the plain transcript (no subtitles/analysis):
 
@@ -202,11 +222,16 @@ reapply the same decisions without changing the raw transcript.
 
 After applying, confirm the fixes actually landed:
 
-1. Grep the corrected spelling in `transcript.txt` (and `subtitles.srt`) and
+1. When the correction was applied by processing the source, run `cue verify
+   <file>.cue`. A direct `cue correct` intentionally removes `cue.run.json`
+   because the previous run no longer attests to the changed files; rerun the
+   source with the manifest to create a fresh receipt when attestation is
+   required.
+2. Grep the corrected spelling in `transcript.txt` (and `subtitles.srt`) and
    confirm it is present.
-2. Confirm `corrections.applied.json` exists. Treat the manifest, not this
+3. Confirm `corrections.applied.json` exists. Treat the manifest, not this
    generated receipt, as the durable source of correction rules.
-3. Check the rebuilt subtitle cues:
+4. Check the rebuilt subtitle cues:
 
    ```bash
    cue subtitles check <file>.cue
@@ -219,9 +244,9 @@ After applying, confirm the fixes actually landed:
    operational error, so inspect the output rather than treating every status
    1 as a failed invocation. Use JSON when another agent or script consumes
    the diagnostics.
-4. If a misheard variant remains, add it to the manifest and re-run
+5. If a misheard variant remains, add it to the manifest and re-run
    `cue correct`.
-5. Report what you changed (old -> new) and any remaining subtitle findings,
+6. Report what you changed (old -> new) and any remaining subtitle findings,
    so the user can review.
 
 ### Promote verified corrections

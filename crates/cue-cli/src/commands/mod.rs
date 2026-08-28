@@ -9,3 +9,4 @@ pub mod process;
 pub mod review;
 pub mod skill;
 pub mod subtitles;
+pub mod verify;

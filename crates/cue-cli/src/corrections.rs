@@ -211,6 +211,25 @@ impl CorrectionPlan {
         }
         sources
     }
+
+    pub(crate) fn attested_manifests(
+        &self,
+        output_dir: &Path,
+    ) -> Result<Vec<crate::run_contract::TrackedFile>> {
+        match self {
+            Self::None => Ok(Vec::new()),
+            Self::Apply(corrections) => corrections
+                .manifests
+                .iter()
+                .map(|manifest| {
+                    Ok(crate::run_contract::TrackedFile::from_digest(
+                        crate::run_contract::tracked_reference(output_dir, &manifest.path)?,
+                        cue_cache::bytes_hash(&manifest.contents.bytes),
+                    ))
+                })
+                .collect(),
+        }
+    }
 }
 
 impl PreparedCorrections {

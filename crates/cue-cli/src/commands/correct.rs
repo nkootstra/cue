@@ -47,6 +47,14 @@ fn run_inner(
 ) -> Result<()> {
     let output_dir = resolve_output_dir(args.output.as_path())?;
     let plan = CorrectionPlan::require(&output_dir, corrections)?;
+    let _output_lock = if args.dry_run {
+        None
+    } else {
+        Some(crate::run_contract::OutputLock::acquire(&output_dir)?)
+    };
+    if _output_lock.is_some() {
+        crate::run_contract::invalidate(&output_dir)?;
+    }
     let outcome = plan.render(&output_dir, config, CorrectionScope::Full, args.dry_run)?;
 
     for (artifact, replacements) in &outcome.replacements {
