@@ -155,7 +155,7 @@ dependencies = [
 
 [[package]]
 name = "cue-analysis"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "cue-core",
@@ -168,7 +168,7 @@ dependencies = [
 
 [[package]]
 name = "cue-cache"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "blake3",
  "cue-core",
@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "cue-cli"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "cue-analysis",
  "cue-cache",
@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "cue-core"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "cue-llm"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "cue-core",
  "reqwest",
@@ -229,7 +229,7 @@ dependencies = [
 
 [[package]]
 name = "cue-media"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "cue-core",
  "serde",
@@ -241,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "cue-normalization"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "cue-core",
@@ -255,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "cue-subtitles"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "cue-core",
  "insta",
@@ -263,7 +263,7 @@ dependencies = [
 
 [[package]]
 name = "cue-transcription"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "cue-core",
