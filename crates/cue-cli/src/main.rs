@@ -10,7 +10,7 @@ mod render;
 
 use std::process::ExitCode;
 
-use cli::{Command, Cue};
+use cli::{Command, Cue, SubtitlesCommand};
 use cue_core::config::{load_user_config, resolve};
 
 #[tokio::main]
@@ -66,6 +66,17 @@ async fn dispatch(mut cli: Cue) -> cue_core::Result<i32> {
         }
         Some(Command::Lexicon(args)) => Ok(commands::lexicon::run(args)),
         Some(Command::Review(args)) => Ok(commands::review::run(args, cli.corrections.as_deref())),
+        Some(Command::Subtitles(args)) => match args.command {
+            Some(SubtitlesCommand::Check(args)) => {
+                let config = load_resolved_config()?;
+                Ok(commands::subtitles::check(
+                    args,
+                    cli.corrections.as_deref(),
+                    &config,
+                ))
+            }
+            None => Ok(commands::subtitles::print_help()),
+        },
         None => {
             let config = load_resolved_config()?;
             Ok(commands::process::run(&cli, &config).await)

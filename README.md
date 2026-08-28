@@ -78,6 +78,7 @@ Ollama optional, for S1 transcript cleanup. After installing, run
 | `cue correct <file>.cue` | Rebuild an existing output from canonical JSON and apply corrections |
 | `cue review <file>.cue [--json]` | Report focused correction candidates without changing files |
 | `cue lexicon promote <file>.cue --rule <phrase> --to <dir>` | Promote a verified applied rule into a reusable scope |
+| `cue subtitles check <file>.cue [--json]` | Check generated subtitle cues and report source-linked policy findings |
 | `cue doctor` | Check required and optional tools; `--fix` provisions the Python worker |
 | `cue models list/check/install s1` | Manage transcription/normalization models in Ollama |
 | `cue skill install [--local]` | Install the `transcribe` agent skill globally, or in the current project |
@@ -222,6 +223,29 @@ corrections without this command.
 Add `--json` when a workflow needs a machine-readable attestation bound to the
 source receipt and resulting target lexicon.
 
+### Check subtitle quality
+
+Check the cues generated from the canonical transcript without changing any
+output files:
+
+```bash
+cue subtitles check video.cue
+cue subtitles check video.cue --json
+```
+
+The check reports cues that exceed the generic duration, line-capacity, or
+reading-speed policy. It also exposes any overlap shortening or dropped cue
+that cue applied to keep subtitle timing monotonic. Every diagnostic includes
+the half-open canonical word range (`word_start..word_end`) that produced it,
+so the source can be inspected without guessing from rendered subtitle text.
+
+No findings exits with status 0. Findings or an operational error exit with
+status 1, which makes the command suitable for local scripts and CI gates.
+`--json` emits a versioned report with stable diagnostic IDs. The current
+policy is `cue-generic-v1`; configured line and duration limits are included
+in the report, while the generic reading-speed limit is 20 characters per
+second.
+
 ## Agent skill
 
 AI coding agents (Claude Code, opencode, Codex, Cursor, ...) can transcribe
@@ -271,6 +295,7 @@ Work in progress.
 - [x] Pipeline event bus with TTY-aware rendering
 - [x] Durable scoped correction lexicons, focused review, explicit promotion,
       and application receipts
+- [x] Source-linked subtitle policy checks with human and JSON diagnostics
 - [x] `transcribe` agent skill with evals
 - [ ] Incremental progress within stages (worker-level reporting)
 - [ ] Parallel file processing

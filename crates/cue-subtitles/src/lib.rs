@@ -6,7 +6,10 @@ pub mod segment;
 
 pub use lines::break_lines;
 pub use render::{render_srt, render_vtt};
-pub use segment::{Cue, SubtitlePolicy, segment};
+pub use segment::{
+    CompiledCue, Cue, CueSource, SubtitleCompilation, SubtitlePolicy, TimingRepair,
+    TimingRepairKind, compile, compile_with_sources, segment,
+};
 
 use cue_core::Transcript;
 
@@ -336,6 +339,74 @@ mod tests {
                 .collect::<Vec<_>>(),
             [long, "next"]
         );
+    }
+
+    #[test]
+    fn compiled_cues_retain_half_open_canonical_word_spans() {
+        let t = transcript(vec![
+            word("hello", 0, 300),
+            word("world.", 310, 600),
+            word("second", 700, 900),
+            word("sentence.", 910, 1_200),
+        ]);
+
+        let compilation = super::compile(&t, &SubtitlePolicy::default()).unwrap();
+
+        assert_eq!(compilation.cues.len(), 2);
+        assert_eq!(compilation.cues[0].source.word_start, 0);
+        assert_eq!(compilation.cues[0].source.word_end, 2);
+        assert_eq!(compilation.cues[1].source.word_start, 2);
+        assert_eq!(compilation.cues[1].source.word_end, 4);
+    }
+
+    #[test]
+    fn compilation_records_overlap_shortening_against_source_words() {
+        let t = transcript(vec![word("one.", 0, 500), word("two.", 400, 900)]);
+
+        let compilation = super::compile(&t, &SubtitlePolicy::default()).unwrap();
+
+        assert_eq!(compilation.repairs.len(), 1);
+        let repair = &compilation.repairs[0];
+        assert_eq!(repair.kind, super::TimingRepairKind::Shortened);
+        assert_eq!((repair.source.word_start, repair.source.word_end), (0, 1));
+        assert_eq!((repair.start_ms, repair.original_end_ms), (0, 500));
+        assert_eq!((repair.start_ms, repair.repaired_end_ms), (0, 400));
+    }
+
+    #[test]
+    fn compilation_records_cues_dropped_by_overlap_repair() {
+        let t = transcript(vec![word("one.", 400, 500), word("two.", 400, 900)]);
+
+        let compilation = super::compile(&t, &SubtitlePolicy::default()).unwrap();
+
+        assert_eq!(compilation.cues.len(), 1);
+        assert_eq!(compilation.repairs.len(), 1);
+        assert_eq!(
+            compilation.repairs[0].kind,
+            super::TimingRepairKind::Dropped
+        );
+        assert_eq!(
+            (
+                compilation.repairs[0].source.word_start,
+                compilation.repairs[0].source.word_end,
+            ),
+            (0, 1)
+        );
+    }
+
+    #[test]
+    fn compilation_records_intrinsically_zero_duration_cues_as_dropped() {
+        let t = transcript(vec![word("instant.", 400, 400)]);
+
+        let compilation = super::compile(&t, &SubtitlePolicy::default()).unwrap();
+
+        assert!(compilation.cues.is_empty());
+        assert_eq!(compilation.repairs.len(), 1);
+        let repair = &compilation.repairs[0];
+        assert_eq!(repair.kind, super::TimingRepairKind::Dropped);
+        assert_eq!((repair.source.word_start, repair.source.word_end), (0, 1));
+        assert_eq!((repair.start_ms, repair.original_end_ms), (400, 400));
+        assert_eq!(repair.repaired_end_ms, 400);
     }
 
     #[test]

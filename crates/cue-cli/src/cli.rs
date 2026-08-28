@@ -61,6 +61,8 @@ pub enum Command {
     Lexicon(LexiconArgs),
     /// Review a canonical transcript for focused correction candidates
     Review(ReviewArgs),
+    /// Check generated subtitle cues against a measurable policy
+    Subtitles(SubtitlesArgs),
 }
 
 /// Transcribe files or directories
@@ -176,6 +178,30 @@ pub struct ReviewArgs {
     /// Report words with confidence below this value
     #[usage(long, default = "0.75")]
     pub confidence_below: f32,
+    /// Emit a machine-readable JSON report
+    #[usage(long)]
+    pub json: bool,
+}
+
+/// Check and inspect generated subtitles
+#[derive(Debug, Args)]
+pub struct SubtitlesArgs {
+    /// Which subtitle action to run
+    #[usage(subcommand)]
+    pub command: Option<SubtitlesCommand>,
+}
+
+#[derive(Debug, Subcommands)]
+pub enum SubtitlesCommand {
+    /// Check subtitle cues without changing generated files
+    Check(SubtitlesCheckArgs),
+}
+
+/// Check subtitle cues against cue's generic policy
+#[derive(Debug, Args)]
+pub struct SubtitlesCheckArgs {
+    /// A cue output directory or its source media file
+    pub output: PathBuf,
     /// Emit a machine-readable JSON report
     #[usage(long)]
     pub json: bool,
@@ -324,6 +350,20 @@ mod tests {
                 assert_eq!(args.confidence_below, 0.6);
                 assert!(args.json);
             }
+            other => panic!("wrong command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subtitles_check_supports_source_outputs_and_json() {
+        let cli = parse_args(&["cue", "subtitles", "check", "lesson.cue", "--json"]);
+        match cli.command.unwrap() {
+            Command::Subtitles(args) => match args.command.unwrap() {
+                SubtitlesCommand::Check(args) => {
+                    assert_eq!(args.output, PathBuf::from("lesson.cue"));
+                    assert!(args.json);
+                }
+            },
             other => panic!("wrong command: {other:?}"),
         }
     }

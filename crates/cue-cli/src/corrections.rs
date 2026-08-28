@@ -193,6 +193,45 @@ impl CorrectionPlan {
     pub(crate) fn invalidate_receipt(&self, output_dir: &Path) -> Result<()> {
         clear_receipt(output_dir).map_err(|error| error.at_stage(cue_core::PipelineStage::Render))
     }
+
+    /// Apply this plan to an in-memory transcript using the same word-aware
+    /// transformation used for corrected subtitle rendering.
+    pub(crate) fn apply_to_transcript(
+        &self,
+        transcript: &mut cue_core::Transcript,
+    ) -> Vec<cue_subtitles::CueSource> {
+        let mut sources = (0..transcript.words.len())
+            .map(|word_start| cue_subtitles::CueSource {
+                word_start,
+                word_end: word_start + 1,
+            })
+            .collect::<Vec<_>>();
+        if let Self::Apply(corrections) = self {
+            corrections.apply_to_transcript_tracking_sources(transcript, Some(&mut sources));
+        }
+        sources
+    }
+}
+
+impl PreparedCorrections {
+    fn apply_to_transcript(&self, transcript: &mut cue_core::Transcript) -> Vec<usize> {
+        self.apply_to_transcript_tracking_sources(transcript, None)
+    }
+
+    fn apply_to_transcript_tracking_sources(
+        &self,
+        transcript: &mut cue_core::Transcript,
+        sources: Option<&mut [cue_subtitles::CueSource]>,
+    ) -> Vec<usize> {
+        let rules = self
+            .rules
+            .iter()
+            .map(|rule| rule.correction.clone())
+            .collect::<Vec<_>>();
+        let mut counts = vec![0; rules.len()];
+        apply_rules_across_words(&mut transcript.words, &rules, &mut counts, sources);
+        counts
+    }
 }
 
 fn find_manifests(
@@ -504,12 +543,7 @@ fn render_output(
             max_duration_ms: config.subtitles.max_duration_ms,
         };
         let mut corrected_transcript = transcript.clone();
-        let mut subtitle_counts = vec![0; rules.len()];
-        apply_rules_across_words(
-            &mut corrected_transcript.words,
-            &rules,
-            &mut subtitle_counts,
-        );
+        let subtitle_counts = manifest.apply_to_transcript(&mut corrected_transcript);
         let cues = cue_subtitles::build_cues(&corrected_transcript, &policy)?;
         for format in subtitle_formats {
             let (name, content) = match format {
@@ -626,6 +660,7 @@ fn apply_rules_across_words(
     words: &mut [cue_core::Word],
     rules: &[cue_core::correct::Correction],
     counts: &mut [usize],
+    mut sources: Option<&mut [cue_subtitles::CueSource]>,
 ) {
     for (rule_index, rule) in rules.iter().enumerate() {
         let mut start = 0;
@@ -652,6 +687,10 @@ fn apply_rules_across_words(
             let end_ms = words[end].end_ms;
             words[start].text = replacement;
             words[start].end_ms = end_ms;
+            if let Some(sources) = sources.as_deref_mut() {
+                sources[start].word_start = sources[start].word_start.min(sources[end].word_start);
+                sources[start].word_end = sources[start].word_end.max(sources[end].word_end);
+            }
             for word in &mut words[start + 1..=end] {
                 word.text.clear();
             }
