@@ -48,6 +48,10 @@ The scoped lexicon workflow requires `cue review` and `cue lexicon` to appear
 in `cue --help`. Upgrade cue before using review or promotion when either
 command is absent; do not emulate promotion by silently copying rules.
 
+Subtitle validation requires `cue subtitles` to appear in `cue --help`.
+Upgrade cue before claiming subtitle-policy evidence when the command is
+absent; visually inspecting SRT/VTT is useful but is not an equivalent check.
+
 If the required tools are fine but the Python worker is missing, provision it:
 
 ```bash
@@ -202,9 +206,23 @@ After applying, confirm the fixes actually landed:
    confirm it is present.
 2. Confirm `corrections.applied.json` exists. Treat the manifest, not this
    generated receipt, as the durable source of correction rules.
-3. If a misheard variant remains, add it to the manifest and re-run
+3. Check the rebuilt subtitle cues:
+
+   ```bash
+   cue subtitles check <file>.cue
+   cue subtitles check <file>.cue --json
+   ```
+
+   The command is read-only and links each duration, line-capacity,
+   reading-speed, or timing-repair finding to its canonical half-open word
+   range. Exit status 0 means no findings; status 1 means findings or an
+   operational error, so inspect the output rather than treating every status
+   1 as a failed invocation. Use JSON when another agent or script consumes
+   the diagnostics.
+4. If a misheard variant remains, add it to the manifest and re-run
    `cue correct`.
-4. Report what you changed (old -> new), so the user can review.
+5. Report what you changed (old -> new) and any remaining subtitle findings,
+   so the user can review.
 
 ### Promote verified corrections
 
@@ -361,4 +379,4 @@ anywhere.
 | No `transcript.clean.txt` / `summary.md` / `description.md` | Optional integrations (Ollama S1, LLM gateway) are not configured — local transcription still works |
 | S1 cleanup needed | `cue models install s1` (pulls ~460 MB into Ollama) |
 | `cue models install s1` fails with a 400 from Ollama | A known Ollama API limitation with `FROM hf.co/...` Modelfiles; run `ollama create cue-s1-mini -f <path-to-Modelfile>` manually and retry |
-| Subtitle timing looks off | Re-run with a larger `max_duration_ms` in `~/.config/cue/cue.toml` `[subtitles]` |
+| Subtitle timing or readability looks off | Run `cue subtitles check <file>.cue`; inspect the reported canonical word ranges before changing `[subtitles]` limits |

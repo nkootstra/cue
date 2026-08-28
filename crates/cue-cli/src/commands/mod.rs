@@ -8,3 +8,4 @@ pub mod models;
 pub mod process;
 pub mod review;
 pub mod skill;
+pub mod subtitles;
