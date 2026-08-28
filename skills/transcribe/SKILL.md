@@ -44,6 +44,11 @@ check `cue --version`; upgrade cue with the same installation method if it is
 older. Do not substitute a hand-written directory loop for an outdated cue
 without telling the user why the upgrade could not be completed.
 
+Bounded parallel batches require cue 0.10.0 or newer. Upgrade before using
+`--jobs`; do not emulate it with shell background jobs because that bypasses
+cue's cache coordination, file-attributed progress, and deterministic failure
+accounting.
+
 The scoped lexicon workflow requires `cue review` and `cue lexicon` to appear
 in `cue --help`. Upgrade cue before using review or promotion when either
 command is absent; do not emulate promotion by silently copying rules.
@@ -72,6 +77,7 @@ cue <file.mp4> [--language en] [--output <dir>]
 cue <first.mp4> <second.wav>
 cue <directory>
 cue --recursive <directory>
+cue --recursive <directory> --jobs 2
 ```
 
 cue runs the whole local pipeline: inspect -> extract audio -> transcribe ->
@@ -127,10 +133,13 @@ rejected, so pass its resolved target directory instead.
 A directory or multiple positional paths is a batch. Without `--output`, each
 file writes `<stem>.cue/` beside its source. With `--output <root>`, a batch
 writes `<root>/<stem>.cue/`; a single explicit file still uses `--output` as
-the output directory itself. cue processes batch files sequentially, continues
-after individual media failures, and exits with status 1 after its summary if
-anything failed. If two inputs would have the same destination, resolve the
-name collision before retrying.
+the output directory itself. cue processes batch files sequentially by default.
+Use `--jobs <N>` for bounded parallel processing, starting with `--jobs 2`
+because transcription and local model stages can consume substantial memory.
+cue keeps progress attributable to each file, continues after individual media
+failures, reports failures in input order, and exits with status 1 after its
+summary if anything failed. If two inputs would have the same destination,
+resolve the name collision before retrying.
 
 ## 3. Correct mishearings with context
 
@@ -362,11 +371,13 @@ order:
 
    ```bash
    cue <first.mp4> <second.mp4>
-   cue --recursive <course-directory>
+   cue --recursive <course-directory> --jobs 2
    ```
 
-   Directory mode requires cue 0.5.0 or newer. cue discovers media, creates a
-   sibling `<stem>.cue/` per source by default, and processes it sequentially.
+   Directory mode requires cue 0.5.0 or newer; `--jobs` requires cue 0.10.0 or
+   newer. cue discovers media and creates a sibling `<stem>.cue/` per source by
+   default. Omit `--jobs` when memory is constrained or only one file should
+   run at a time.
    Pass `--corrections /absolute/path/to/corrections.md` when deliberately
    bypassing hierarchical discovery. A rerun safely reuses the pipeline cache
    and reapplies the effective lexicon.

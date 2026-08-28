@@ -69,7 +69,7 @@ impl Transcriber for FasterWhisperTranscriber {
         &self,
         input: &Path,
         options: &TranscriptionOptions,
-        progress: Option<tokio::sync::mpsc::UnboundedSender<cue_core::PipelineEvent>>,
+        progress: Option<tokio::sync::mpsc::UnboundedSender<u8>>,
     ) -> Result<Transcript> {
         debug!(worker = %self.env.script.display(), "launching worker");
 
@@ -139,7 +139,7 @@ impl Transcriber for FasterWhisperTranscriber {
 /// as pipeline events and returning a bounded tail for diagnostics.
 async fn drain_stderr(
     stderr: impl tokio::io::AsyncRead + Unpin,
-    progress: Option<tokio::sync::mpsc::UnboundedSender<cue_core::PipelineEvent>>,
+    progress: Option<tokio::sync::mpsc::UnboundedSender<u8>>,
 ) -> String {
     use std::collections::VecDeque;
     use tokio::io::AsyncReadExt;
@@ -184,7 +184,7 @@ async fn drain_stderr(
 fn process_stderr_line(
     bytes: &[u8],
     truncated: bool,
-    progress: Option<&tokio::sync::mpsc::UnboundedSender<cue_core::PipelineEvent>>,
+    progress: Option<&tokio::sync::mpsc::UnboundedSender<u8>>,
 ) {
     if truncated {
         debug!(target: "cue_worker", "worker stderr line exceeded capture limit");
@@ -198,10 +198,7 @@ fn process_stderr_line(
         && let Some(sender) = progress
     {
         let percent = (fraction.clamp(0.0, 1.0) * 100.0).round() as u8;
-        let _ = sender.send(cue_core::PipelineEvent::Progress {
-            stage: PipelineStage::Transcribe,
-            percent,
-        });
+        let _ = sender.send(percent);
     } else if !line.trim().is_empty() {
         debug!(target: "cue_worker", "{line}");
     }
@@ -482,10 +479,8 @@ sys.stdout.write(json.dumps({
         assert_eq!(transcript.words.len(), 1);
 
         let mut percents = Vec::new();
-        while let Ok(event) = rx.try_recv() {
-            if let cue_core::PipelineEvent::Progress { percent, .. } = event {
-                percents.push(percent);
-            }
+        while let Ok(percent) = rx.try_recv() {
+            percents.push(percent);
         }
         assert_eq!(percents, vec![25, 50, 75]);
     }
@@ -497,12 +492,7 @@ sys.stdout.write(json.dumps({
         process_stderr_line(b"PROGRESS -0.5", false, Some(&tx));
         process_stderr_line(b"PROGRESS 1.5", false, Some(&tx));
 
-        let percents = std::iter::from_fn(|| rx.try_recv().ok())
-            .map(|event| match event {
-                cue_core::PipelineEvent::Progress { percent, .. } => percent,
-                other => panic!("unexpected event: {other:?}"),
-            })
-            .collect::<Vec<_>>();
+        let percents = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
 
         assert_eq!(percents, [0, 100]);
     }

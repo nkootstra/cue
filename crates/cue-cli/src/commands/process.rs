@@ -18,8 +18,10 @@ use cue_media::extract::extract_audio;
 use cue_transcription::Transcriber;
 
 use crate::cli::Cue;
+use crate::commands::batch::{KeyedLocks, MediaProcessor, process_inputs};
 use crate::commands::inputs::{ResolvedInput, resolve_inputs};
 use crate::corrections::{CorrectionPlan, CorrectionScope};
+use crate::events::{FileEvents, FilePipelineEvent, RendererEvent};
 use crate::render::{human_duration, println_line};
 use crate::run_contract::{
     ProcessModeName, ProviderIdentity, RemoteDataUsage, RunReceipt, StageRecord, StageStatus,
@@ -82,19 +84,6 @@ fn remove_stale_artifacts(out_dir: &Path, names: &[&str]) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn remember_successful_readiness(
-    readiness: &mut Option<bool>,
-    result: std::result::Result<bool, String>,
-) -> std::result::Result<bool, String> {
-    match result {
-        Ok(ready) => {
-            *readiness = Some(ready);
-            Ok(ready)
-        }
-        Err(reason) => Err(reason),
-    }
 }
 
 /// The two supported processing contracts.
@@ -173,26 +162,32 @@ async fn run_inner(
     // Stage logic emits events; the renderer decides presentation. Core
     // pipeline behavior never depends on terminal output.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let renderer = tokio::spawn(crate::events::run_renderer(rx));
+    let renderer = tokio::spawn(crate::events::run_renderer(rx, plan.is_batch));
 
-    let mut processor = PipelineProcessor {
+    let processor = PipelineProcessor {
         cli,
         config,
         events: &tx,
         mode,
         corrections,
-        s1_readiness: None,
+        s1_readiness: tokio::sync::OnceCell::new(),
+        cache_work: KeyedLocks::default(),
     };
-    let result =
-        process_resolved_inputs(&plan.inputs, plan.is_batch, &mut processor, |input, err| {
+    let result = process_inputs(&plan.inputs, plan.is_batch, cli.jobs, &processor).await;
+
+    if let Ok(outcome) = &result {
+        for failure in &outcome.failures {
             use cue_core::{PipelineEvent, PipelineStage};
 
-            let _ = tx.send(PipelineEvent::Failed {
-                stage: err.stage().unwrap_or(PipelineStage::Inspect),
-                error: format!("{}: {err}", input.source.display()),
+            let _ = tx.send(FilePipelineEvent {
+                source: failure.input.source.clone(),
+                event: RendererEvent::Pipeline(PipelineEvent::Failed {
+                    stage: failure.error.stage().unwrap_or(PipelineStage::Inspect),
+                    error: failure.error.to_string(),
+                }),
             });
-        })
-        .await;
+        }
+    }
 
     drop(tx); // close so the renderer can finish
     if let Err(join_err) = renderer.await {
@@ -203,40 +198,26 @@ async fn run_inner(
         if plan.is_batch {
             println_line(&format!(
                 "Batch complete: {} succeeded, {} failed",
-                outcome.succeeded, outcome.failed
+                outcome.succeeded,
+                outcome.failures.len()
             ));
         }
         outcome.exit_code()
     })
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
-struct BatchOutcome {
-    succeeded: usize,
-    failed: usize,
-}
-
-impl BatchOutcome {
-    fn exit_code(&self) -> i32 {
-        i32::from(self.failed > 0)
-    }
-}
-
-trait MediaProcessor {
-    async fn process(&mut self, input: &ResolvedInput) -> Result<()>;
-}
-
 struct PipelineProcessor<'a> {
     cli: &'a Cue,
     config: &'a cue_core::Config,
-    events: &'a tokio::sync::mpsc::UnboundedSender<cue_core::PipelineEvent>,
+    events: &'a tokio::sync::mpsc::UnboundedSender<FilePipelineEvent>,
     mode: ProcessMode,
     corrections: HashMap<PathBuf, CorrectionPlan>,
-    s1_readiness: Option<bool>,
+    s1_readiness: tokio::sync::OnceCell<bool>,
+    cache_work: KeyedLocks,
 }
 
 impl MediaProcessor for PipelineProcessor<'_> {
-    async fn process(&mut self, input: &ResolvedInput) -> Result<()> {
+    async fn process(&self, input: &ResolvedInput) -> Result<()> {
         let correction = self.corrections.get(&input.output).ok_or_else(|| {
             CueError::general(format!(
                 "no correction plan prepared for {}",
@@ -246,50 +227,22 @@ impl MediaProcessor for PipelineProcessor<'_> {
         let context = FileContext {
             cli: self.cli,
             config: self.config,
-            events: self.events,
+            events: FileEvents::new(input.source.clone(), self.events.clone()),
             mode: self.mode,
             correction,
+            cache_work: &self.cache_work,
         };
-        process_file(
-            &input.source,
-            &input.output,
-            &context,
-            &mut self.s1_readiness,
-        )
-        .await
+        process_file(&input.source, &input.output, &context, &self.s1_readiness).await
     }
-}
-
-async fn process_resolved_inputs<P, F>(
-    inputs: &[ResolvedInput],
-    is_batch: bool,
-    processor: &mut P,
-    mut on_failure: F,
-) -> Result<BatchOutcome>
-where
-    P: MediaProcessor,
-    F: FnMut(&ResolvedInput, &CueError),
-{
-    let mut outcome = BatchOutcome::default();
-    for input in inputs {
-        match processor.process(input).await {
-            Ok(()) => outcome.succeeded += 1,
-            Err(err) if is_batch => {
-                outcome.failed += 1;
-                on_failure(input, &err);
-            }
-            Err(err) => return Err(err),
-        }
-    }
-    Ok(outcome)
 }
 
 struct FileContext<'a> {
     cli: &'a Cue,
     config: &'a cue_core::Config,
-    events: &'a tokio::sync::mpsc::UnboundedSender<cue_core::PipelineEvent>,
+    events: FileEvents,
     mode: ProcessMode,
     correction: &'a CorrectionPlan,
+    cache_work: &'a KeyedLocks,
 }
 
 fn initial_run_receipt(
@@ -377,24 +330,26 @@ async fn process_file(
     path: &Path,
     out_dir: &Path,
     context: &FileContext<'_>,
-    s1_readiness: &mut Option<bool>,
+    s1_readiness: &tokio::sync::OnceCell<bool>,
 ) -> Result<()> {
     use cue_core::{PipelineEvent, PipelineStage};
 
     let cli = context.cli;
     let config = context.config;
-    let events = context.events;
+    let events = &context.events;
     let mode = context.mode;
     let correction = context.correction;
 
-    println_line(&format!("Processing {}...", path.display()));
+    events.processing();
 
     // ---- Inspect --------------------------------------------------------
     let ffprobe = require_tool("ffprobe", "inspect media files")?;
-    let _ = events.send(PipelineEvent::Started(PipelineStage::Inspect));
+    events.send(PipelineEvent::Started(PipelineStage::Inspect));
     let media = cue_media::probe::inspect(&ffprobe, path).await?;
-    print_media_summary(&media);
-    let _ = events.send(PipelineEvent::Completed(PipelineStage::Inspect));
+    for line in media_summary(&media) {
+        events.message(line);
+    }
+    events.send(PipelineEvent::Completed(PipelineStage::Inspect));
 
     if !media.has_audio() {
         return Err(CueError::new(
@@ -406,6 +361,7 @@ async fn process_file(
 
     // Content cache layout keyed by the media bytes themselves.
     let media_hash = cue_cache::file_hash(path)?;
+    let cache_work = context.cache_work.lock(&media_hash).await;
     let mut run_receipt = initial_run_receipt(path, out_dir, media_hash.clone(), context)?;
     let cache_root = cue_cache::cache_dir().ok_or_else(|| {
         CueError::general("could not determine a cache directory")
@@ -423,16 +379,16 @@ async fn process_file(
     let ffmpeg = require_tool("ffmpeg", "extract audio")?;
     let wav_path = stage_dir.join("audio.wav");
     if wav_path.exists() {
-        let _ = events.send(PipelineEvent::Cached(PipelineStage::Extract));
+        events.send(PipelineEvent::Cached(PipelineStage::Extract));
         run_receipt.stages.push(StageRecord::new(
             PipelineStage::Extract,
             StageStatus::Cached,
             None,
         ));
     } else {
-        let _ = events.send(PipelineEvent::Started(PipelineStage::Extract));
+        events.send(PipelineEvent::Started(PipelineStage::Extract));
         extract_audio(&ffmpeg, path, &wav_path).await?;
-        let _ = events.send(PipelineEvent::Completed(PipelineStage::Extract));
+        events.send(PipelineEvent::Completed(PipelineStage::Extract));
         run_receipt.stages.push(StageRecord::new(
             PipelineStage::Extract,
             StageStatus::Executed,
@@ -470,7 +426,7 @@ async fn process_file(
         );
     let transcript = match cached_transcript {
         Some(cached) => {
-            let _ = events.send(PipelineEvent::Cached(PipelineStage::Transcribe));
+            events.send(PipelineEvent::Cached(PipelineStage::Transcribe));
             run_receipt.stages.push(StageRecord::new(
                 PipelineStage::Transcribe,
                 StageStatus::Cached,
@@ -479,14 +435,28 @@ async fn process_file(
             cached
         }
         None => {
-            let _ = events.send(PipelineEvent::Started(PipelineStage::Transcribe));
+            events.send(PipelineEvent::Started(PipelineStage::Transcribe));
             let transcriber = cue_transcription::FasterWhisperTranscriber::resolve(None)?;
-            let fresh = transcriber
-                .transcribe_with_progress(&wav_path, &options, Some(events.clone()))
-                .await?;
+            let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+            let transcription =
+                transcriber.transcribe_with_progress(&wav_path, &options, Some(progress_tx));
+            tokio::pin!(transcription);
+            let mut progress_open = true;
+            let fresh = loop {
+                tokio::select! {
+                    result = &mut transcription => break result?,
+                    progress = progress_rx.recv(), if progress_open => match progress {
+                        Some(percent) => events.send(PipelineEvent::Progress {
+                            stage: PipelineStage::Transcribe,
+                            percent,
+                        }),
+                        None => progress_open = false,
+                    }
+                }
+            };
             fresh.validate()?;
             store_cached(&transcript_cache, &transcript_cache_key, &fresh);
-            let _ = events.send(PipelineEvent::Completed(PipelineStage::Transcribe));
+            events.send(PipelineEvent::Completed(PipelineStage::Transcribe));
             run_receipt.stages.push(StageRecord::new(
                 PipelineStage::Transcribe,
                 StageStatus::Executed,
@@ -498,7 +468,8 @@ async fn process_file(
 
     // `cue transcribe` stops here: canonical transcript only.
     if !mode.includes(PipelineStage::Normalize) {
-        let _ = events.send(PipelineEvent::Started(PipelineStage::Render));
+        drop(cache_work);
+        events.send(PipelineEvent::Started(PipelineStage::Render));
         let _output_lock = crate::run_contract::OutputLock::acquire(out_dir)?;
         begin_render(out_dir, correction)?;
         write_render_json(&out_dir.join("transcript.json"), &transcript)?;
@@ -512,8 +483,8 @@ async fn process_file(
         let mut artifacts = vec!["transcript.json".into(), "transcript.txt".into()];
         include_if_present(out_dir, &mut artifacts, "corrections.applied.json");
         run_receipt.publish(out_dir, &artifacts)?;
-        let _ = events.send(PipelineEvent::Completed(PipelineStage::Render));
-        println_line(&format!(
+        events.send(PipelineEvent::Completed(PipelineStage::Render));
+        events.message(format!(
             "\nDone. Transcript written to {}/",
             out_dir.display()
         ));
@@ -547,7 +518,7 @@ async fn process_file(
 
     let normalized = match load_cached(&normalized_cache, &normalization_key) {
         Some(cached) => {
-            let _ = events.send(PipelineEvent::Cached(PipelineStage::Normalize));
+            events.send(PipelineEvent::Cached(PipelineStage::Normalize));
             run_receipt.stages.push(StageRecord::new(
                 PipelineStage::Normalize,
                 StageStatus::Cached,
@@ -556,18 +527,15 @@ async fn process_file(
             Some(cached)
         }
         None => {
-            let readiness = match *s1_readiness {
-                Some(ready) => Ok(ready),
-                None => {
+            let readiness = s1_readiness
+                .get_or_try_init(|| async {
                     let admin = cue_llm::OllamaAdmin::new(&config.normalization.ollama_url);
-                    remember_successful_readiness(
-                        s1_readiness,
-                        cue_normalization::s1_ready(&admin)
-                            .await
-                            .map_err(|err| err.to_string()),
-                    )
-                }
-            };
+                    cue_normalization::s1_ready(&admin)
+                        .await
+                        .map_err(|err| err.to_string())
+                })
+                .await
+                .copied();
             let outcome = match readiness {
                 Ok(true) => match cue_normalization::normalize_s1(
                     &config.normalization.ollama_url,
@@ -590,7 +558,7 @@ async fn process_file(
             match outcome {
                 cue_normalization::NormalizationOutcome::Done(clean) => {
                     store_cached(&normalized_cache, &normalization_key, &clean);
-                    let _ = events.send(PipelineEvent::Completed(PipelineStage::Normalize));
+                    events.send(PipelineEvent::Completed(PipelineStage::Normalize));
                     run_receipt.stages.push(StageRecord::new(
                         PipelineStage::Normalize,
                         StageStatus::Executed,
@@ -637,7 +605,7 @@ async fn process_file(
 
             match load_cached(&analysis_cache, &analysis_key) {
                 Some(cached) => {
-                    let _ = events.send(PipelineEvent::Cached(PipelineStage::Analyze));
+                    events.send(PipelineEvent::Cached(PipelineStage::Analyze));
                     run_receipt.stages.push(StageRecord::new(
                         PipelineStage::Analyze,
                         StageStatus::Cached,
@@ -646,7 +614,7 @@ async fn process_file(
                     Some(cached)
                 }
                 None => {
-                    let _ = events.send(PipelineEvent::Started(PipelineStage::Analyze));
+                    events.send(PipelineEvent::Started(PipelineStage::Analyze));
                     if crate::run_contract::endpoint_is_remote(&llm.base_url) {
                         run_receipt
                             .remote_data_usage
@@ -664,7 +632,7 @@ async fn process_file(
                     {
                         Ok(a) => {
                             store_cached(&analysis_cache, &analysis_key, &a);
-                            let _ = events.send(PipelineEvent::Completed(PipelineStage::Analyze));
+                            events.send(PipelineEvent::Completed(PipelineStage::Analyze));
                             run_receipt.stages.push(StageRecord::new(
                                 PipelineStage::Analyze,
                                 StageStatus::Executed,
@@ -673,7 +641,7 @@ async fn process_file(
                             Some(a)
                         }
                         Err(err) => {
-                            let _ = events.send(PipelineEvent::Failed {
+                            events.send(PipelineEvent::Failed {
                                 stage: PipelineStage::Analyze,
                                 error: err.to_string(),
                             });
@@ -713,7 +681,8 @@ async fn process_file(
     };
 
     // ---- Render ---------------------------------------------------------
-    let _ = events.send(PipelineEvent::Started(PipelineStage::Render));
+    drop(cache_work);
+    events.send(PipelineEvent::Started(PipelineStage::Render));
     let _output_lock = crate::run_contract::OutputLock::acquire(out_dir)?;
     begin_render(out_dir, correction)?;
 
@@ -791,8 +760,8 @@ async fn process_file(
     include_if_present(out_dir, &mut artifacts, "corrections.applied.json");
     run_receipt.publish(out_dir, &artifacts)?;
 
-    let _ = events.send(PipelineEvent::Completed(PipelineStage::Render));
-    println_line(&format!(
+    events.send(PipelineEvent::Completed(PipelineStage::Render));
+    events.message(format!(
         "\nDone. Transcript and subtitles written to {}/",
         out_dir.display()
     ));
@@ -895,169 +864,36 @@ fn print_usage_hint() {
     println_line("    cache     Manage the processing cache");
 }
 
-fn print_media_summary(media: &Media) {
-    println_line(&format!("  format:     {}", media.format));
-    println_line(&format!(
-        "  duration:   {}",
-        human_duration(media.duration_ms)
-    ));
+fn media_summary(media: &Media) -> Vec<String> {
+    let mut lines = vec![
+        format!("  format:     {}", media.format),
+        format!("  duration:   {}", human_duration(media.duration_ms)),
+    ];
 
     if media.has_video() {
         for stream in &media.video_streams {
-            println_line(&format!(
+            lines.push(format!(
                 "  video:      #{} {} ({}x{} @ {})",
                 stream.index, stream.codec, stream.width, stream.height, stream.frame_rate
             ));
         }
     } else {
-        println_line("  video:      none");
+        lines.push("  video:      none".into());
     }
 
     for stream in &media.audio_streams {
-        println_line(&format!(
+        lines.push(format!(
             "  audio:      #{} {} ({} Hz, {} ch)",
             stream.index, stream.codec, stream.sample_rate_hz, stream.channels
         ));
     }
+
+    lines
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-
     use super::*;
-
-    struct StubProcessor {
-        results: VecDeque<Result<()>>,
-        attempted: Vec<PathBuf>,
-    }
-
-    impl MediaProcessor for StubProcessor {
-        async fn process(&mut self, input: &ResolvedInput) -> Result<()> {
-            self.attempted.push(input.source.clone());
-            self.results.pop_front().expect("missing stub result")
-        }
-    }
-
-    fn resolved(name: &str) -> ResolvedInput {
-        ResolvedInput {
-            source: PathBuf::from(name),
-            output: PathBuf::from(format!("{name}.cue")),
-        }
-    }
-
-    #[tokio::test]
-    async fn batch_attempts_every_input_and_reports_failures() {
-        let inputs = [resolved("one.mp4"), resolved("two.mp4")];
-        let mut processor = StubProcessor {
-            results: VecDeque::from([
-                Err(CueError::general("first failed")),
-                Err(CueError::general("second failed")),
-            ]),
-            attempted: Vec::new(),
-        };
-        let mut failures = Vec::new();
-
-        let outcome = process_resolved_inputs(&inputs, true, &mut processor, |input, _| {
-            failures.push(input.source.clone());
-        })
-        .await
-        .unwrap();
-
-        assert_eq!(
-            processor.attempted,
-            [PathBuf::from("one.mp4"), PathBuf::from("two.mp4")]
-        );
-        assert_eq!(failures, processor.attempted);
-        assert_eq!(
-            outcome,
-            BatchOutcome {
-                succeeded: 0,
-                failed: 2
-            }
-        );
-        assert_eq!(outcome.exit_code(), 1);
-    }
-
-    #[tokio::test]
-    async fn successful_batch_returns_zero() {
-        let inputs = [resolved("one.mp4"), resolved("two.mp4")];
-        let mut processor = StubProcessor {
-            results: VecDeque::from([Ok(()), Ok(())]),
-            attempted: Vec::new(),
-        };
-
-        let outcome = process_resolved_inputs(&inputs, true, &mut processor, |_, _| {})
-            .await
-            .unwrap();
-
-        assert_eq!(
-            outcome,
-            BatchOutcome {
-                succeeded: 2,
-                failed: 0
-            }
-        );
-        assert_eq!(outcome.exit_code(), 0);
-    }
-
-    #[tokio::test]
-    async fn single_input_propagates_failure_without_callback_or_continuation() {
-        let inputs = [resolved("one.mp4"), resolved("two.mp4")];
-        let mut processor = StubProcessor {
-            results: VecDeque::from([Err(CueError::general("first failed")), Ok(())]),
-            attempted: Vec::new(),
-        };
-        let mut failures = Vec::new();
-
-        let err = process_resolved_inputs(&inputs, false, &mut processor, |input, _| {
-            failures.push(input.source.clone());
-        })
-        .await
-        .unwrap_err();
-
-        assert!(err.to_string().contains("first failed"));
-        assert_eq!(processor.attempted, [PathBuf::from("one.mp4")]);
-        assert!(failures.is_empty());
-    }
-
-    #[tokio::test]
-    async fn mixed_batch_attempts_all_inputs_and_reports_only_the_failure() {
-        let inputs = [
-            resolved("one.mp4"),
-            resolved("two.mp4"),
-            resolved("three.mp4"),
-        ];
-        let mut processor = StubProcessor {
-            results: VecDeque::from([Ok(()), Err(CueError::general("second failed")), Ok(())]),
-            attempted: Vec::new(),
-        };
-        let mut failures = Vec::new();
-
-        let outcome = process_resolved_inputs(&inputs, true, &mut processor, |input, _| {
-            failures.push(input.source.clone());
-        })
-        .await
-        .unwrap();
-
-        assert_eq!(
-            processor.attempted,
-            [
-                PathBuf::from("one.mp4"),
-                PathBuf::from("two.mp4"),
-                PathBuf::from("three.mp4")
-            ]
-        );
-        assert_eq!(failures, [PathBuf::from("two.mp4")]);
-        assert_eq!(
-            outcome,
-            BatchOutcome {
-                succeeded: 2,
-                failed: 1
-            }
-        );
-        assert_eq!(outcome.exit_code(), 1);
-    }
 
     #[test]
     fn output_directory_failures_are_attributed_to_render() {
@@ -1228,19 +1064,6 @@ mod tests {
         assert!(!dir.path().join("transcript.clean.txt").exists());
         assert!(!dir.path().join("analysis.json").exists());
         remove_stale_artifacts(dir.path(), &["normalized.json"]).unwrap();
-    }
-
-    #[test]
-    fn readiness_errors_are_not_remembered_for_later_files() {
-        let mut readiness = None;
-
-        let first = remember_successful_readiness(&mut readiness, Err("temporary outage".into()));
-        assert_eq!(first.unwrap_err(), "temporary outage");
-        assert_eq!(readiness, None);
-
-        let second = remember_successful_readiness(&mut readiness, Ok(true));
-        assert!(second.unwrap());
-        assert_eq!(readiness, Some(true));
     }
 
     #[test]
