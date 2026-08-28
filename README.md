@@ -7,9 +7,8 @@ AI-generated descriptions.
 cue ./video.mp4
 ```
 
-produces a `video.cue/` directory containing transcripts (`json`, `txt`,
-cleaned `txt`), subtitles (`srt`, `vtt`) and — when an LLM gateway is
-configured — summaries, descriptions, and chapters.
+publishes `video.srt` beside the media. Canonical transcripts, receipts, and
+optional analysis remain available in the hidden `.cue/video/` workspace.
 
 ## Why cue?
 
@@ -86,6 +85,10 @@ Ollama optional, for S1 transcript cleanup. After installing, run
 | `cue config` | Show resolved configuration and its sources |
 | `cue cache dir/clear` | Inspect or clear the content-addressed cache |
 
+Use `--format vtt` to replace the default SRT output, or repeat `--format` to
+publish both formats. Use `--summary` to print a content summary to stdout;
+add `--stream` for completion-order summaries in concurrent batches.
+
 ## Multiple files and directories
 
 Both the default pipeline and `cue transcribe` accept more than one path:
@@ -111,11 +114,12 @@ Directory discovery recognizes these extensions, case-insensitively:
 An explicitly named file is still inspected by FFprobe regardless of its
 extension.
 
-Each discovered file gets its own `<stem>.cue/` output directory. Without
-`--output`, that directory is created beside the source. In a batch,
-`--output <dir>` makes `<dir>` the common root, for example
-`transcripts/intro.cue/`. A single explicit file keeps the existing behavior:
-`--output` names its output directory directly.
+Each discovered file publishes one `<stem>.srt` sidecar by default and keeps
+supporting state in `<source-dir>/.cue/<stem>/`. `--output <dir>` redirects
+both: visible subtitles retain their relative source path beneath the output
+root, and workspaces live beneath `<output>/.cue/`. Explicit file lists use
+their stems at the output root. Existing `<stem>.cue/` workspaces are reused;
+if both legacy and hidden workspaces exist, cue stops rather than guessing.
 
 cue preserves the order of positional path groups and sorts files within each
 directory lexically. It removes canonical duplicates, includes hidden media
@@ -138,18 +142,39 @@ that render, including fully cached reruns.
 
 ## Outputs
 
-`cue ./video.mp4` writes into `video.cue/`:
+`cue ./video.mp4` publishes `video.srt` and writes supporting state into the
+hidden `.cue/video/` workspace:
 
 | File | Role |
 |---|---|
 | `transcript.json` | Raw canonical transcript (timed words) — the source of truth, never edited |
 | `transcript.txt` | Plain text derived from the canonical transcript |
 | `transcript.clean.txt` / `normalized.json` | S1-cleaned prose (when Ollama has S1) |
-| `subtitles.srt` / `subtitles.vtt` | Subtitles from the canonical transcript |
+| `subtitles.srt` / `subtitles.vtt` | Workspace copies of explicitly selected subtitle formats |
 | `analysis.json` / `summary.md` / `description.md` | LLM analysis (when a gateway is configured) |
 | `corrections.md` | Optional manifest you write to fix misheard names/terms |
 | `corrections.applied.json` | Versioned receipt recording contributing lexicons, canonical source hashes, rule provenance, and per-artifact applications |
 | `cue.run.json` | Completion receipt recording the source, effective configuration, providers, stage/cache outcomes, warnings, remote-data use, corrections, and final artifact hashes |
+
+The visible sidecar is also recorded in `cue.run.json`. To publish VTT instead
+of SRT, run `cue --format vtt ./video.mp4`. Repeat `--format` to request more
+than one format explicitly.
+
+### Terminal summaries
+
+Summaries are opt-in and require local S1 normalization plus a configured
+analysis gateway:
+
+```bash
+cue --summary ./video.mp4
+cue --summary ./course --recursive --jobs 2
+cue --summary --stream ./course --recursive --jobs 2
+```
+
+Summary blocks go to stdout and are source-labelled. Progress, diagnostics,
+and the batch result go to stderr. The default is deterministic input order;
+`--stream` emits each complete block as its file finishes. It never streams
+partial model tokens and does not create an additional visible summary file.
 
 ## Verifying completed outputs
 
@@ -158,8 +183,8 @@ completed run rather than a partially written output. Verify the source,
 correction manifests, and every recorded artifact at any time:
 
 ```bash
-cue verify video.cue
-cue verify video.cue --json
+cue verify video.mp4
+cue verify video.mp4 --json
 ```
 
 Exit status 0 means all recorded files still match. Exit status 1 means a file

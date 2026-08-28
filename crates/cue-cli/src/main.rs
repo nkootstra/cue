@@ -32,6 +32,14 @@ async fn main() -> ExitCode {
 }
 
 async fn dispatch(mut cli: Cue) -> cue_core::Result<i32> {
+    if cli.stream && !cli.summary {
+        return Err(cue_core::CueError::general("--stream requires --summary"));
+    }
+    if cli.command.is_some() && (cli.summary || cli.stream || !cli.format.is_empty()) {
+        return Err(cue_core::CueError::general(
+            "--format, --summary, and --stream apply only to the default processing command",
+        ));
+    }
     match cli.command.take() {
         Some(Command::Doctor(args)) => {
             let config = load_resolved_config()?;
@@ -62,11 +70,19 @@ async fn dispatch(mut cli: Cue) -> cue_core::Result<i32> {
             Ok(commands::correct::run(
                 args,
                 cli.corrections.as_deref(),
+                cli.output.as_deref().map(std::path::Path::new),
                 &config,
             ))
         }
-        Some(Command::Lexicon(args)) => Ok(commands::lexicon::run(args)),
-        Some(Command::Review(args)) => Ok(commands::review::run(args, cli.corrections.as_deref())),
+        Some(Command::Lexicon(args)) => Ok(commands::lexicon::run(
+            args,
+            cli.output.as_deref().map(std::path::Path::new),
+        )),
+        Some(Command::Review(args)) => Ok(commands::review::run(
+            args,
+            cli.corrections.as_deref(),
+            cli.output.as_deref().map(std::path::Path::new),
+        )),
         Some(Command::Subtitles(args)) => match args.command {
             Some(SubtitlesCommand::Check(args)) => {
                 let config = load_resolved_config()?;
@@ -74,13 +90,26 @@ async fn dispatch(mut cli: Cue) -> cue_core::Result<i32> {
                     args,
                     cli.corrections.as_deref(),
                     &config,
+                    cli.output.as_deref().map(std::path::Path::new),
                 ))
             }
             None => Ok(commands::subtitles::print_help()),
         },
-        Some(Command::Verify(args)) => Ok(commands::verify::run(args)),
+        Some(Command::Verify(args)) => Ok(commands::verify::run(
+            args,
+            cli.output.as_deref().map(std::path::Path::new),
+        )),
         None => {
-            let config = load_resolved_config()?;
+            let mut config = load_resolved_config()?;
+            if !cli.format.is_empty() {
+                let mut formats = Vec::new();
+                for format in &cli.format {
+                    if !formats.contains(format) {
+                        formats.push(*format);
+                    }
+                }
+                config.subtitles.formats = formats;
+            }
             Ok(commands::process::run(&cli, &config).await)
         }
     }

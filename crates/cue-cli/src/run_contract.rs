@@ -7,9 +7,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cue_core::{CueError, Result};
 
 pub(crate) const RECEIPT_FILE: &str = "cue.run.json";
-pub(crate) const SCHEMA_VERSION: u32 = 1;
+pub(crate) const SCHEMA_VERSION: u32 = 2;
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const LOCK_FILE: &str = ".cue.lock";
+
+fn supported_schema(version: u32) -> bool {
+    matches!(version, 1 | SCHEMA_VERSION)
+}
 
 pub(crate) struct OutputLock {
     _file: std::fs::File,
@@ -56,7 +60,79 @@ pub(crate) fn tracked_reference(output_dir: &Path, path: &Path) -> Result<String
         )
         .remedy("rename the source/output path to valid UTF-8 and run cue again"));
     }
-    Ok(crate::corrections::manifest_reference(output_dir, path))
+    let base = canonical_lexical(output_dir)?;
+    let target = canonical_lexical(path)?;
+    let base_components = base.components().collect::<Vec<_>>();
+    let target_components = target.components().collect::<Vec<_>>();
+    let common = base_components
+        .iter()
+        .zip(&target_components)
+        .take_while(|(left, right)| left == right)
+        .count();
+    if common == 0 {
+        return Ok(target.to_string_lossy().into_owned());
+    }
+    let mut relative = PathBuf::new();
+    for _ in common..base_components.len() {
+        relative.push("..");
+    }
+    for component in &target_components[common..] {
+        relative.push(component.as_os_str());
+    }
+    Ok(relative.to_string_lossy().into_owned())
+}
+
+fn canonical_lexical(path: &Path) -> Result<PathBuf> {
+    let absolute = absolute_lexical(path)?;
+    let mut existing = absolute.as_path();
+    let mut suffix = Vec::new();
+    while !existing.exists() {
+        let name = existing.file_name().ok_or_else(|| {
+            CueError::general(format!(
+                "could not resolve an existing ancestor of {}",
+                path.display()
+            ))
+        })?;
+        suffix.push(name.to_owned());
+        existing = existing.parent().ok_or_else(|| {
+            CueError::general(format!(
+                "could not resolve an existing ancestor of {}",
+                path.display()
+            ))
+        })?;
+    }
+    let mut resolved = std::fs::canonicalize(existing).map_err(|error| {
+        CueError::general(format!("could not resolve path {}", path.display()))
+            .because(error.to_string())
+    })?;
+    for component in suffix.iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
+}
+
+fn absolute_lexical(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| {
+                CueError::general("could not determine current directory")
+                    .because(error.to_string())
+            })?
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    Ok(normalized)
 }
 
 pub(crate) fn configuration_snapshot(
@@ -136,6 +212,8 @@ pub(crate) struct RunReceipt {
     pub(crate) remote_data_usage: RemoteDataUsage,
     pub(crate) corrections: Vec<TrackedFile>,
     pub(crate) artifacts: Vec<TrackedFile>,
+    #[serde(default)]
+    pub(crate) published_outputs: Vec<TrackedFile>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -288,7 +366,7 @@ impl RunReceipt {
                     reason: error.to_string(),
                 }
             })?;
-        if receipt.schema_version != SCHEMA_VERSION {
+        if !supported_schema(receipt.schema_version) {
             return Err(ReceiptReadError::UnsupportedSchema {
                 version: receipt.schema_version,
             });
@@ -298,13 +376,27 @@ impl RunReceipt {
             .map_err(|error| ReceiptReadError::Invalid {
                 reason: error.to_string().trim().to_owned(),
             })?;
+        receipt
+            .validate_published_targets(output_dir)
+            .map_err(|error| ReceiptReadError::Invalid {
+                reason: error.to_string().trim().to_owned(),
+            })?;
         Ok(receipt)
     }
 
     pub(crate) fn publish<S: AsRef<str>>(
+        self,
+        output_dir: &Path,
+        artifact_names: &[S],
+    ) -> Result<()> {
+        self.publish_with_outputs(output_dir, artifact_names, &[])
+    }
+
+    pub(crate) fn publish_with_outputs<S: AsRef<str>>(
         mut self,
         output_dir: &Path,
         artifact_names: &[S],
+        published_paths: &[PathBuf],
     ) -> Result<()> {
         (|| {
             self.verify_inputs_current(output_dir)?;
@@ -321,6 +413,13 @@ impl RunReceipt {
                     TrackedFile::from_path(name, &path)
                 })
                 .collect::<Result<Vec<_>>>()?;
+            self.published_outputs = published_paths
+                .iter()
+                .map(|path| {
+                    require_regular_file(path, false)?;
+                    TrackedFile::from_path(tracked_reference(output_dir, path)?, path)
+                })
+                .collect::<Result<Vec<_>>>()?;
             self.validate()?;
             let mut bytes = serde_json::to_vec_pretty(&self).map_err(|error| {
                 CueError::general("could not serialize run receipt").because(error.to_string())
@@ -331,8 +430,13 @@ impl RunReceipt {
         .map_err(|error: CueError| error.at_stage(cue_core::PipelineStage::Render))
     }
 
+    pub(crate) fn ensure_inputs_current(&self, output_dir: &Path) -> Result<()> {
+        self.verify_inputs_current(output_dir)
+            .map_err(|error| error.at_stage(cue_core::PipelineStage::Render))
+    }
+
     fn validate(&self) -> Result<()> {
-        if self.schema_version != SCHEMA_VERSION {
+        if !supported_schema(self.schema_version) {
             return Err(CueError::general(format!(
                 "unsupported run receipt schema version {}",
                 self.schema_version
@@ -342,6 +446,11 @@ impl RunReceipt {
         if self.cue_version.trim().is_empty() {
             return Err(CueError::general(
                 "run receipt contains an empty cue version",
+            ));
+        }
+        if self.schema_version == 1 && !self.published_outputs.is_empty() {
+            return Err(CueError::general(
+                "run receipt schema version 1 cannot contain published outputs",
             ));
         }
         if self.source.path.is_empty() {
@@ -358,6 +467,16 @@ impl RunReceipt {
                 return Err(CueError::general(format!(
                     "run receipt contains duplicate artifact {}",
                     artifact.path
+                )));
+            }
+        }
+        for published in &self.published_outputs {
+            validate_published_path(&published.path)?;
+            validate_digest(&published.digest)?;
+            if !paths.insert(published.path.as_str()) {
+                return Err(CueError::general(format!(
+                    "run receipt contains duplicate published output {}",
+                    published.path
                 )));
             }
         }
@@ -507,6 +626,27 @@ impl RunReceipt {
         }
         Ok(())
     }
+
+    fn validate_published_targets(&self, output_dir: &Path) -> Result<()> {
+        let layout = crate::commands::output::workspace_layout(output_dir);
+        let expected = [
+            crate::commands::output::published_subtitle_path(&layout, "srt"),
+            crate::commands::output::published_subtitle_path(&layout, "vtt"),
+        ]
+        .iter()
+        .map(|path| absolute_lexical(path))
+        .collect::<Result<Vec<_>>>()?;
+        for published in &self.published_outputs {
+            let actual = absolute_lexical(&output_dir.join(&published.path))?;
+            if !expected.contains(&actual) {
+                return Err(CueError::general(format!(
+                    "run receipt contains published output outside the workspace publication boundary: {}",
+                    published.path
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl TrackedFile {
@@ -575,6 +715,28 @@ fn validate_artifact_path(path: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_published_path(path: &str) -> Result<()> {
+    let path = Path::new(path);
+    if path.as_os_str().is_empty() || path.is_absolute() || path == Path::new(RECEIPT_FILE) {
+        return Err(CueError::general(format!(
+            "run receipt contains unsafe published output path {}",
+            path.display()
+        )));
+    }
+    if path.components().any(|component| {
+        matches!(
+            component,
+            Component::RootDir | Component::Prefix(_) | Component::CurDir
+        )
+    }) {
+        return Err(CueError::general(format!(
+            "run receipt contains unsafe published output path {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn is_regular_file(path: &Path, follow_symlinks: bool) -> std::io::Result<bool> {
     let metadata = if follow_symlinks {
         std::fs::metadata(path)?
@@ -599,7 +761,7 @@ fn require_regular_file(path: &Path, follow_symlinks: bool) -> Result<()> {
     }
 }
 
-fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
     let parent = path.parent().ok_or_else(|| {
         CueError::general(format!(
             "could not determine the parent of {}",
@@ -609,7 +771,7 @@ fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| CueError::general("could not construct run receipt temporary file name"))?;
+        .ok_or_else(|| CueError::general("could not construct temporary file name"))?;
     loop {
         let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let temp_path = parent.join(format!(
@@ -626,7 +788,7 @@ fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
                 return Err(CueError::general(format!(
-                    "could not create a temporary run receipt in {}",
+                    "could not create a temporary file in {}",
                     parent.display()
                 ))
                 .because(error.to_string()));
@@ -721,6 +883,7 @@ mod tests {
             },
             corrections: Vec::new(),
             artifacts: Vec::new(),
+            published_outputs: Vec::new(),
         }
     }
 
@@ -917,6 +1080,26 @@ mod tests {
         let error = tracked_reference(&output, &source).unwrap_err();
 
         assert!(error.to_string().contains("non-UTF-8"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tracked_references_account_for_symlinked_ancestor_depth() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real/deep");
+        let alias = temp.path().join("alias");
+        let output = alias.join("workspace");
+        let source = temp.path().join("lesson.mp4");
+        std::fs::create_dir_all(real.join("workspace")).unwrap();
+        std::fs::write(&source, b"media").unwrap();
+        symlink(&real, &alias).unwrap();
+
+        let reference = tracked_reference(&output, &source).unwrap();
+
+        assert_eq!(reference, "../../../lesson.mp4");
+        assert_eq!(std::fs::read(output.join(reference)).unwrap(), b"media");
     }
 
     #[test]

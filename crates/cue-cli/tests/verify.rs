@@ -136,7 +136,7 @@ fn verify_json_reports_a_modified_artifact() {
     assert!(result.stderr.is_empty(), "{result:?}");
     let report: serde_json::Value =
         serde_json::from_slice(&result.stdout).expect("parse verification report");
-    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["schema_version"], 2);
     assert_eq!(report["valid"], false);
     assert_eq!(report["diagnostics"].as_array().unwrap().len(), 1);
     assert_eq!(
@@ -263,7 +263,7 @@ fn verify_json_reports_unsupported_receipt_schemas() {
     let receipt_path = fixture.output.join("cue.run.json");
     let mut receipt: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
-    receipt["schema_version"] = serde_json::json!(2);
+    receipt["schema_version"] = serde_json::json!(3);
     std::fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
 
     let result = cue()
@@ -277,6 +277,77 @@ fn verify_json_reports_unsupported_receipt_schemas() {
     assert_eq!(
         report["diagnostics"][0]["id"],
         "CUE-VERIFY-SCHEMA-UNSUPPORTED"
+    );
+}
+
+#[test]
+fn verify_v2_tracks_published_subtitle_sidecars() {
+    let fixture = fixture();
+    let sidecar = fixture.output.parent().unwrap().join("lesson.srt");
+    std::fs::write(&sidecar, "1\n00:00:00,000 --> 00:00:01,000\nHello.\n").unwrap();
+    let receipt_path = fixture.output.join("cue.run.json");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+    receipt["schema_version"] = serde_json::json!(2);
+    receipt["published_outputs"] = serde_json::json!([{
+        "path": "../lesson.srt",
+        "digest": digest(&sidecar)
+    }]);
+    std::fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+
+    let valid = cue()
+        .args(["verify", fixture.output.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(valid.status.success(), "{valid:?}");
+
+    std::fs::write(&sidecar, "changed\n").unwrap();
+    let changed = cue()
+        .args(["verify", fixture.output.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(changed.status.code(), Some(1), "{changed:?}");
+    assert!(
+        String::from_utf8_lossy(&changed.stdout).contains("CUE-VERIFY-PUBLISHED-OUTPUT-MISMATCH"),
+        "{changed:?}"
+    );
+}
+
+#[test]
+fn verify_rejects_published_outputs_outside_the_subtitle_boundary() {
+    let fixture = fixture();
+    let external = fixture
+        .output
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("unrelated.srt");
+    std::fs::write(&external, "unrelated\n").unwrap();
+    let receipt_path = fixture.output.join("cue.run.json");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+    receipt["schema_version"] = serde_json::json!(2);
+    receipt["published_outputs"] = serde_json::json!([{
+        "path": "../../unrelated.srt",
+        "digest": digest(&external)
+    }]);
+    std::fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+
+    let result = cue()
+        .args(["verify", fixture.output.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["diagnostics"][0]["id"], "CUE-VERIFY-RECEIPT-INVALID");
+    assert!(
+        report["diagnostics"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("outside the workspace publication boundary"),
+        "{report}"
     );
 }
 

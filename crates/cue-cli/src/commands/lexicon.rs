@@ -66,25 +66,27 @@ struct PromotionRule {
     replace: String,
 }
 
-pub fn run(args: LexiconArgs) -> i32 {
+pub fn run(args: LexiconArgs, output_root: Option<&Path>) -> i32 {
     let Some(command) = args.command else {
         println_line("Usage: cue lexicon promote <OUTPUT> --rule <PHRASE> --to <DIRECTORY>");
         return 0;
     };
 
     let result = match command {
-        LexiconCommand::Promote(args) => crate::commands::correct::resolve_output_dir(&args.output)
-            .and_then(|output_dir| promote_applied_rule(&output_dir, &args.rule, &args.to))
-            .and_then(|outcome| {
-                if args.json {
-                    serde_json::to_string_pretty(&outcome).map_err(|error| {
-                        CueError::general("could not serialize promotion attestation")
-                            .because(error.to_string())
-                    })
-                } else {
-                    Ok(outcome.message())
-                }
-            }),
+        LexiconCommand::Promote(args) => {
+            crate::commands::correct::resolve_output_dir_at(&args.output, output_root)
+                .and_then(|output_dir| promote_applied_rule(&output_dir, &args.rule, &args.to))
+                .and_then(|outcome| {
+                    if args.json {
+                        serde_json::to_string_pretty(&outcome).map_err(|error| {
+                            CueError::general("could not serialize promotion attestation")
+                                .because(error.to_string())
+                        })
+                    } else {
+                        Ok(outcome.message())
+                    }
+                })
+        }
     };
 
     match result {

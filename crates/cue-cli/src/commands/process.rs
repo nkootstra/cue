@@ -154,15 +154,28 @@ async fn run_inner(
     // Resolve the complete batch before starting any media work. This keeps
     // discovery and output collisions from producing partial batches.
     let plan = resolve_inputs(paths, cli.recursive, cli.output.as_deref().map(Path::new))?;
+    if mode == ProcessMode::Full {
+        for input in &plan.inputs {
+            let layout = crate::commands::output::OutputLayout {
+                workspace: input.workspace.clone(),
+                published_base: input.published_base.clone(),
+            };
+            crate::commands::output::preflight_subtitles(
+                &layout,
+                config.subtitles.formats.iter().copied(),
+                false,
+            )?;
+        }
+    }
     let corrections = CorrectionPlan::prepare_batch(
-        plan.inputs.iter().map(|input| input.output.as_path()),
+        plan.inputs.iter().map(|input| input.workspace.as_path()),
         cli.corrections.as_deref(),
     )?;
 
     // Stage logic emits events; the renderer decides presentation. Core
     // pipeline behavior never depends on terminal output.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let renderer = tokio::spawn(crate::events::run_renderer(rx, plan.is_batch));
+    let renderer = tokio::spawn(crate::events::run_renderer(rx, plan.is_batch, cli.summary));
 
     let processor = PipelineProcessor {
         cli,
@@ -173,7 +186,19 @@ async fn run_inner(
         s1_readiness: tokio::sync::OnceCell::new(),
         cache_work: KeyedLocks::default(),
     };
-    let result = process_inputs(&plan.inputs, plan.is_batch, cli.jobs, &processor).await;
+    let result = process_inputs(
+        &plan.inputs,
+        plan.is_batch,
+        cli.jobs,
+        &processor,
+        |input, result| {
+            if cli.summary && cli.stream {
+                print_summary(input, result);
+            }
+            cli.summary && !cli.stream
+        },
+    )
+    .await;
 
     if let Ok(outcome) = &result {
         for failure in &outcome.failures {
@@ -195,15 +220,39 @@ async fn run_inner(
     }
 
     result.map(|outcome| {
+        if cli.summary && !cli.stream {
+            for success in &outcome.successes {
+                print_summary(success.input, &success.value);
+            }
+        }
         if plan.is_batch {
-            println_line(&format!(
+            let batch_line = format!(
                 "Batch complete: {} succeeded, {} failed",
-                outcome.succeeded,
+                outcome.succeeded(),
                 outcome.failures.len()
-            ));
+            );
+            if cli.summary {
+                eprintln!("{batch_line}");
+            } else {
+                println_line(&batch_line);
+            }
         }
         outcome.exit_code()
     })
+}
+
+fn print_summary(input: &ResolvedInput, result: &ProcessResult) {
+    if let Some(summary) = &result.summary {
+        println_line(&format!(
+            "==> {} <==\n\n{}",
+            input.source.display(),
+            summary.trim()
+        ));
+    }
+}
+
+struct ProcessResult {
+    summary: Option<String>,
 }
 
 struct PipelineProcessor<'a> {
@@ -217,11 +266,13 @@ struct PipelineProcessor<'a> {
 }
 
 impl MediaProcessor for PipelineProcessor<'_> {
-    async fn process(&self, input: &ResolvedInput) -> Result<()> {
-        let correction = self.corrections.get(&input.output).ok_or_else(|| {
+    type Output = ProcessResult;
+
+    async fn process(&self, input: &ResolvedInput) -> Result<ProcessResult> {
+        let correction = self.corrections.get(&input.workspace).ok_or_else(|| {
             CueError::general(format!(
                 "no correction plan prepared for {}",
-                input.output.display()
+                input.workspace.display()
             ))
         })?;
         let context = FileContext {
@@ -232,7 +283,7 @@ impl MediaProcessor for PipelineProcessor<'_> {
             correction,
             cache_work: &self.cache_work,
         };
-        process_file(&input.source, &input.output, &context, &self.s1_readiness).await
+        process_file(input, &context, &self.s1_readiness).await
     }
 }
 
@@ -317,6 +368,7 @@ fn initial_run_receipt(
         },
         corrections: correction.attested_manifests(output_dir)?,
         artifacts: Vec::new(),
+        published_outputs: Vec::new(),
     })
 }
 
@@ -327,11 +379,10 @@ fn include_if_present(output_dir: &Path, names: &mut Vec<String>, name: &str) {
 }
 
 async fn process_file(
-    path: &Path,
-    out_dir: &Path,
+    input: &ResolvedInput,
     context: &FileContext<'_>,
     s1_readiness: &tokio::sync::OnceCell<bool>,
-) -> Result<()> {
+) -> Result<ProcessResult> {
     use cue_core::{PipelineEvent, PipelineStage};
 
     let cli = context.cli;
@@ -339,6 +390,8 @@ async fn process_file(
     let events = &context.events;
     let mode = context.mode;
     let correction = context.correction;
+    let path = &input.source;
+    let out_dir = &input.workspace;
 
     events.processing();
 
@@ -472,6 +525,7 @@ async fn process_file(
         events.send(PipelineEvent::Started(PipelineStage::Render));
         let _output_lock = crate::run_contract::OutputLock::acquire(out_dir)?;
         begin_render(out_dir, correction)?;
+        crate::commands::output::write_workspace_descriptor(out_dir, path)?;
         write_render_json(&out_dir.join("transcript.json"), &transcript)?;
         write_render_file(&out_dir.join("transcript.txt"), transcript.plain_text())?;
         correction.render(out_dir, config, CorrectionScope::TranscriptOnly, false)?;
@@ -480,7 +534,11 @@ async fn process_file(
             StageStatus::Executed,
             None,
         ));
-        let mut artifacts = vec!["transcript.json".into(), "transcript.txt".into()];
+        let mut artifacts = vec![
+            crate::commands::output::WORKSPACE_FILE.into(),
+            "transcript.json".into(),
+            "transcript.txt".into(),
+        ];
         include_if_present(out_dir, &mut artifacts, "corrections.applied.json");
         run_receipt.publish(out_dir, &artifacts)?;
         events.send(PipelineEvent::Completed(PipelineStage::Render));
@@ -488,7 +546,7 @@ async fn process_file(
             "\nDone. Transcript written to {}/",
             out_dir.display()
         ));
-        return Ok(());
+        return Ok(ProcessResult { summary: None });
     }
 
     // ---- Normalize (optional; stays local via Ollama) -------------------
@@ -684,7 +742,13 @@ async fn process_file(
     drop(cache_work);
     events.send(PipelineEvent::Started(PipelineStage::Render));
     let _output_lock = crate::run_contract::OutputLock::acquire(out_dir)?;
+    let layout = crate::commands::output::OutputLayout {
+        workspace: input.workspace.clone(),
+        published_base: input.published_base.clone(),
+    };
+    let previous_published = crate::commands::output::owned_published_outputs(&layout);
     begin_render(out_dir, correction)?;
+    crate::commands::output::write_workspace_descriptor(out_dir, path)?;
 
     write_render_json(&out_dir.join("transcript.json"), &transcript)?;
     write_render_file(&out_dir.join("transcript.txt"), transcript.plain_text())?;
@@ -738,12 +802,23 @@ async fn process_file(
 
     correction.render(out_dir, config, CorrectionScope::Full, false)?;
 
+    run_receipt.ensure_inputs_current(out_dir)?;
+    let published_outputs = crate::commands::output::publish_subtitles(
+        &layout,
+        config.subtitles.formats.iter().copied(),
+        false,
+    )?;
+
     run_receipt.stages.push(StageRecord::new(
         PipelineStage::Render,
         StageStatus::Executed,
         None,
     ));
-    let mut artifacts = vec!["transcript.json".into(), "transcript.txt".into()];
+    let mut artifacts = vec![
+        crate::commands::output::WORKSPACE_FILE.into(),
+        "transcript.json".into(),
+        "transcript.txt".into(),
+    ];
     if normalized.is_some() {
         artifacts.extend(["normalized.json".into(), "transcript.clean.txt".into()]);
     }
@@ -758,14 +833,31 @@ async fn process_file(
         artifacts.push(format!("subtitles.{}", format.extension()));
     }
     include_if_present(out_dir, &mut artifacts, "corrections.applied.json");
-    run_receipt.publish(out_dir, &artifacts)?;
+    run_receipt.publish_with_outputs(out_dir, &artifacts, &published_outputs)?;
+    crate::commands::output::remove_stale_published_outputs(
+        &previous_published,
+        &published_outputs,
+    )?;
 
     events.send(PipelineEvent::Completed(PipelineStage::Render));
     events.message(format!(
         "\nDone. Transcript and subtitles written to {}/",
         out_dir.display()
     ));
-    Ok(())
+    if cli.summary {
+        let Some(analysis) = &analysis else {
+            return Err(CueError::new(
+                PipelineStage::Analyze,
+                format!("could not produce requested summary for {}", path.display()),
+            )
+            .remedy("configure a working analysis gateway and local S1 normalization model"));
+        };
+        return Ok(ProcessResult {
+            summary: Some(cue_analysis::render_summary(analysis)),
+        });
+    }
+
+    Ok(ProcessResult { summary: None })
 }
 
 fn require_tool(binary: &str, purpose: &str) -> Result<PathBuf> {

@@ -119,7 +119,7 @@ pub struct SubtitlesConfig {
 }
 
 fn default_subtitle_formats() -> Vec<SubtitleFormat> {
-    vec![SubtitleFormat::Srt, SubtitleFormat::Vtt]
+    vec![SubtitleFormat::Srt]
 }
 
 fn default_max_lines() -> usize {
@@ -169,6 +169,20 @@ impl SubtitleFormat {
                     .remedy("supported formats are \"srt\" and \"vtt\""),
             ),
         }
+    }
+}
+
+impl std::str::FromStr for SubtitleFormat {
+    type Err = CueError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+impl std::fmt::Display for SubtitleFormat {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.extension())
     }
 }
 
@@ -493,10 +507,7 @@ mod tests {
         assert_eq!(config.normalization.styling, "semi-formal");
         assert_eq!(config.normalization.structure, "prose");
         assert_eq!(config.normalization.context, "general");
-        assert_eq!(
-            config.subtitles.formats,
-            vec![SubtitleFormat::Srt, SubtitleFormat::Vtt]
-        );
+        assert_eq!(config.subtitles.formats, vec![SubtitleFormat::Srt]);
         assert_eq!(config.subtitles.max_lines, 2);
         assert_eq!(config.subtitles.max_chars_per_line, 42);
         assert_eq!(config.subtitles.max_duration_ms, 6_000);

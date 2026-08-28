@@ -209,11 +209,9 @@ fn subtitle_corrections_can_span_cue_boundaries() {
 
     assert!(status.success());
     let srt = fs::read_to_string(output.join("subtitles.srt")).unwrap();
-    let vtt = fs::read_to_string(output.join("subtitles.vtt")).unwrap();
     assert!(srt.contains("OpenTelemetry"), "{srt}");
-    assert!(vtt.contains("OpenTelemetry"), "{vtt}");
     assert!(!srt.contains("open\ntelemetry"), "{srt}");
-    assert!(!vtt.contains("open\ntelemetry"), "{vtt}");
+    assert!(!output.join("subtitles.vtt").exists());
 }
 
 #[test]
