@@ -111,12 +111,13 @@ fn progress_label(stage: PipelineStage, percent: u8) -> String {
 pub async fn run_renderer(
     rx: tokio::sync::mpsc::UnboundedReceiver<FilePipelineEvent>,
     is_batch: bool,
+    stderr: bool,
 ) {
-    let interactive = std::io::stdout().is_terminal();
+    let interactive = !stderr && std::io::stdout().is_terminal();
     if interactive && is_batch {
         run_batch_renderer(rx).await;
     } else {
-        run_linear_renderer(rx, interactive, is_batch).await;
+        run_linear_renderer(rx, interactive, is_batch, stderr).await;
     }
 }
 
@@ -124,6 +125,7 @@ async fn run_linear_renderer(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<FilePipelineEvent>,
     interactive: bool,
     is_batch: bool,
+    stderr: bool,
 ) {
     let mut open_spinner: Option<indicatif::ProgressBar> = None;
 
@@ -133,7 +135,7 @@ async fn run_linear_renderer(
             if let Some(spinner) = &open_spinner {
                 spinner.println(message);
             } else {
-                println!("{message}");
+                print_line(&message, stderr);
             }
             continue;
         };
@@ -159,7 +161,7 @@ async fn run_linear_renderer(
                 if !matches!(event, PipelineEvent::Completed(_)) {
                     // Completed stages are silent under a spinner; cached and
                     // failed states still say something.
-                    println!("{}", render_file_event(&file_event, is_batch));
+                    print_line(&render_file_event(&file_event, is_batch), stderr);
                 }
             }
             _ => {
@@ -167,7 +169,7 @@ async fn run_linear_renderer(
                 match &event {
                     PipelineEvent::Started(stage) => {
                         let line = format!("  [{}] {}", short_stage(*stage), stage_label(*stage));
-                        println!("{}", prefix_source(&line, &file_event.source, is_batch));
+                        print_line(&prefix_source(&line, &file_event.source, is_batch), stderr);
                     }
                     PipelineEvent::Cached(stage) => {
                         let line = format!(
@@ -175,7 +177,7 @@ async fn run_linear_renderer(
                             short_stage(*stage),
                             stage_label(*stage)
                         );
-                        println!("{}", prefix_source(&line, &file_event.source, is_batch));
+                        print_line(&prefix_source(&line, &file_event.source, is_batch), stderr);
                     }
                     PipelineEvent::Failed { stage, error } => {
                         let line = format!(
@@ -183,7 +185,7 @@ async fn run_linear_renderer(
                             short_stage(*stage),
                             stage_label(*stage)
                         );
-                        println!("{}", prefix_source(&line, &file_event.source, is_batch));
+                        print_line(&prefix_source(&line, &file_event.source, is_batch), stderr);
                     }
                     PipelineEvent::Completed(_) | PipelineEvent::Progress { .. } => {}
                 }
@@ -193,6 +195,14 @@ async fn run_linear_renderer(
 
     if let Some(spinner) = open_spinner.take() {
         spinner.finish_and_clear();
+    }
+}
+
+fn print_line(line: &str, stderr: bool) {
+    if stderr {
+        eprintln!("{line}");
+    } else {
+        println!("{line}");
     }
 }
 

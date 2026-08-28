@@ -6,6 +6,7 @@ pub mod doctor;
 mod inputs;
 pub mod lexicon;
 pub mod models;
+pub(crate) mod output;
 pub mod process;
 pub mod review;
 pub mod skill;

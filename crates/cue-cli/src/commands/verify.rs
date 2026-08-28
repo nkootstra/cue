@@ -6,9 +6,9 @@ use crate::cli::VerifyArgs;
 use crate::render::println_line;
 use crate::run_contract::{ReceiptReadError, RunReceipt, TrackedFile};
 
-pub fn run(args: VerifyArgs) -> i32 {
+pub fn run(args: VerifyArgs, output_root: Option<&Path>) -> i32 {
     let output_label = args.output.display().to_string();
-    let result = crate::commands::correct::resolve_output_dir(&args.output)
+    let result = crate::commands::correct::resolve_output_dir_at(&args.output, output_root)
         .map_err(|error| OperationalError {
             id: "CUE-VERIFY-OUTPUT-INVALID",
             message: error.to_string().trim().to_owned(),
@@ -124,11 +124,18 @@ fn verify_output(output_dir: &Path) -> std::result::Result<VerifyReport, Receipt
             diagnostics.push(diagnostic);
         }
     }
+    for published in &receipt.published_outputs {
+        if let Some(diagnostic) =
+            verify_tracked_file(output_dir, published, TrackedKind::PublishedOutput)
+        {
+            diagnostics.push(diagnostic);
+        }
+    }
     Ok(VerifyReport {
         schema_version: crate::run_contract::SCHEMA_VERSION,
         output: output_dir.display().to_string(),
         valid: diagnostics.is_empty(),
-        artifact_count: receipt.artifacts.len(),
+        artifact_count: receipt.artifacts.len() + receipt.published_outputs.len(),
         diagnostics,
     })
 }
@@ -197,11 +204,12 @@ enum TrackedKind {
     Source,
     Correction,
     Artifact,
+    PublishedOutput,
 }
 
 impl TrackedKind {
     const fn follows_symlinks(self) -> bool {
-        !matches!(self, Self::Artifact)
+        !matches!(self, Self::Artifact | Self::PublishedOutput)
     }
 
     const fn mismatch_id(self) -> &'static str {
@@ -209,6 +217,7 @@ impl TrackedKind {
             Self::Source => "CUE-VERIFY-SOURCE-MISMATCH",
             Self::Correction => "CUE-VERIFY-CORRECTION-MISMATCH",
             Self::Artifact => "CUE-VERIFY-ARTIFACT-MISMATCH",
+            Self::PublishedOutput => "CUE-VERIFY-PUBLISHED-OUTPUT-MISMATCH",
         }
     }
 
@@ -217,6 +226,7 @@ impl TrackedKind {
             Self::Source => "CUE-VERIFY-SOURCE-MISSING",
             Self::Correction => "CUE-VERIFY-CORRECTION-MISSING",
             Self::Artifact => "CUE-VERIFY-ARTIFACT-MISSING",
+            Self::PublishedOutput => "CUE-VERIFY-PUBLISHED-OUTPUT-MISSING",
         }
     }
 
@@ -225,6 +235,7 @@ impl TrackedKind {
             Self::Source => "CUE-VERIFY-SOURCE-UNSAFE",
             Self::Correction => "CUE-VERIFY-CORRECTION-UNSAFE",
             Self::Artifact => "CUE-VERIFY-ARTIFACT-UNSAFE",
+            Self::PublishedOutput => "CUE-VERIFY-PUBLISHED-OUTPUT-UNSAFE",
         }
     }
 }

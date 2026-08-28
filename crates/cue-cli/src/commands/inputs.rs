@@ -12,7 +12,10 @@ const MEDIA_EXTENSIONS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ResolvedInput {
     pub source: PathBuf,
-    pub output: PathBuf,
+    pub workspace: PathBuf,
+    /// Subtitle path without an extension. Selected formats append their
+    /// extension at publication time.
+    pub published_base: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,7 +29,7 @@ pub(super) fn resolve_inputs(
     recursive: bool,
     output: Option<&Path>,
 ) -> Result<InputPlan> {
-    let mut discovered = Vec::new();
+    let mut discovered: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut contains_directory = false;
 
     for path in paths {
@@ -56,9 +59,15 @@ pub(super) fn resolve_inputs(
                 }
                 return Err(error);
             }
-            discovered.append(&mut files);
+            discovered.extend(files.drain(..).map(|source| {
+                let relative = source
+                    .strip_prefix(path)
+                    .expect("directory discovery stays below its root")
+                    .to_owned();
+                (source, relative)
+            }));
         } else if file_type.is_file() {
-            discovered.push(path.clone());
+            discovered.push((path.clone(), file_identity(path)));
         } else if file_type.is_symlink() {
             let target_metadata = fs::metadata(path).map_err(|err| {
                 CueError::general(format!(
@@ -80,7 +89,7 @@ pub(super) fn resolve_inputs(
                     path.display()
                 )));
             }
-            discovered.push(path.clone());
+            discovered.push((path.clone(), file_identity(path)));
         } else {
             return Err(CueError::general(format!(
                 "input {} is not a regular file or directory",
@@ -92,23 +101,27 @@ pub(super) fn resolve_inputs(
     let is_batch = paths.len() > 1 || contains_directory;
     let mut seen = HashSet::new();
     let mut sources = Vec::new();
-    for source in discovered {
+    for (source, relative) in discovered {
         let canonical = fs::canonicalize(&source).map_err(|err| {
             CueError::general(format!("could not resolve input file {}", source.display()))
                 .because(err.to_string())
         })?;
         if seen.insert(canonical) {
-            sources.push(source);
+            sources.push((source, relative));
         }
     }
 
     let inputs = sources
         .into_iter()
-        .map(|source| {
-            let output = output_directory(&source, output, is_batch);
-            ResolvedInput { source, output }
+        .map(|(source, relative)| {
+            let layout = output_paths(&source, &relative, output)?;
+            Ok(ResolvedInput {
+                source,
+                workspace: layout.workspace,
+                published_base: layout.published_base,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     reject_output_collisions(&inputs)?;
 
     Ok(InputPlan { inputs, is_batch })
@@ -200,49 +213,62 @@ fn is_media_path(path: &Path) -> bool {
         })
 }
 
-fn output_directory(source: &Path, root: Option<&Path>, is_batch: bool) -> PathBuf {
-    if let Some(root) = root {
-        if !is_batch {
-            return root.to_owned();
-        }
-        return root.join(cue_directory_name(source));
-    }
-
+fn file_identity(source: &Path) -> PathBuf {
     source
-        .parent()
-        .unwrap_or_else(|| Path::new(""))
-        .join(cue_directory_name(source))
+        .file_name()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("output"))
 }
 
-fn cue_directory_name(source: &Path) -> String {
+fn stem(source: &Path) -> String {
     let stem = source
         .file_stem()
         .map(|stem| stem.to_string_lossy())
         .unwrap_or_else(|| "output".into());
-    format!("{stem}.cue")
+    stem.into_owned()
+}
+
+fn output_paths(
+    source: &Path,
+    relative: &Path,
+    root: Option<&Path>,
+) -> Result<crate::commands::output::OutputLayout> {
+    let relative_parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    let relative_stem = relative_parent.join(stem(relative));
+
+    if let Some(root) = root {
+        return Ok(crate::commands::output::OutputLayout {
+            workspace: root.join(".cue").join(&relative_stem),
+            published_base: root.join(relative_stem),
+        });
+    }
+    crate::commands::output::source_layout(source, None)
 }
 
 fn reject_output_collisions(inputs: &[ResolvedInput]) -> Result<()> {
-    let mut destinations: HashMap<String, &ResolvedInput> = HashMap::new();
+    let mut destinations: HashMap<String, (&ResolvedInput, &Path)> = HashMap::new();
     for input in inputs {
-        // Fold on every platform so accepted batches remain portable to case-insensitive targets.
-        let folded = output_collision_identity(&input.output)
-            .to_string_lossy()
-            .to_lowercase();
-        if let Some(previous) = destinations.insert(folded, input) {
-            return Err(
-                CueError::general("multiple inputs resolve to the same output directory")
-                    .because(format!(
-                        "{} -> {}; {} -> {}",
-                        previous.source.display(),
-                        previous.output.display(),
-                        input.source.display(),
-                        input.output.display()
-                    ))
-                    .remedy(
-                        "rename one input or process the files with separate --output directories",
-                    ),
-            );
+        for destination in [&input.workspace, &input.published_base] {
+            // Fold on every platform so accepted batches remain portable to
+            // case-insensitive targets.
+            let folded = output_collision_identity(destination)
+                .to_string_lossy()
+                .to_lowercase();
+            if let Some((previous, previous_destination)) =
+                destinations.insert(folded, (input, destination))
+            {
+                return Err(CueError::general(
+                    "multiple inputs resolve to the same output destination",
+                )
+                .because(format!(
+                    "{} -> {}; {} -> {}",
+                    previous.source.display(),
+                    previous_destination.display(),
+                    input.source.display(),
+                    destination.display()
+                ))
+                .remedy("rename one input or use separate --output roots"));
+            }
         }
     }
     Ok(())
@@ -425,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn output_mapping_preserves_single_file_compatibility_and_isolates_batches() {
+    fn output_root_contains_hidden_workspaces_and_visible_sidecars() {
         let temp = tempfile::tempdir().unwrap();
         let one = temp.path().join("one.mp4");
         let two = temp.path().join("two.mp4");
@@ -434,20 +460,59 @@ mod tests {
         let output = temp.path().join("out");
 
         let single = resolve_inputs(std::slice::from_ref(&one), false, Some(&output)).unwrap();
-        assert_eq!(single.inputs[0].output, output);
+        assert_eq!(single.inputs[0].workspace, output.join(".cue/one"));
+        assert_eq!(single.inputs[0].published_base, output.join("one"));
 
         let batch = resolve_inputs(&[one, two], false, Some(&output)).unwrap();
-        assert_eq!(batch.inputs[0].output, output.join("one.cue"));
-        assert_eq!(batch.inputs[1].output, output.join("two.cue"));
+        assert_eq!(batch.inputs[0].workspace, output.join(".cue/one"));
+        assert_eq!(batch.inputs[1].workspace, output.join(".cue/two"));
+        assert_eq!(batch.inputs[0].published_base, output.join("one"));
+        assert_eq!(batch.inputs[1].published_base, output.join("two"));
 
-        std::fs::create_dir_all(output.join("one.cue")).unwrap();
+        std::fs::create_dir_all(output.join(".cue/one")).unwrap();
         let existing = resolve_inputs(
             &[temp.path().join("one.mp4"), temp.path().join("two.mp4")],
             false,
             Some(&output),
         )
         .unwrap();
-        assert_eq!(existing.inputs[0].output, output.join("one.cue"));
+        assert_eq!(existing.inputs[0].workspace, output.join(".cue/one"));
+    }
+
+    #[test]
+    fn default_layout_reuses_legacy_workspace_and_rejects_split_brain() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("lesson.mp4");
+        touch(&source);
+
+        let fresh = resolve_inputs(std::slice::from_ref(&source), false, None).unwrap();
+        assert_eq!(fresh.inputs[0].workspace, temp.path().join(".cue/lesson"));
+        assert_eq!(fresh.inputs[0].published_base, temp.path().join("lesson"));
+
+        std::fs::create_dir(temp.path().join("lesson.cue")).unwrap();
+        let legacy = resolve_inputs(std::slice::from_ref(&source), false, None).unwrap();
+        assert_eq!(legacy.inputs[0].workspace, temp.path().join("lesson.cue"));
+
+        std::fs::create_dir_all(temp.path().join(".cue/lesson")).unwrap();
+        let error = resolve_inputs(std::slice::from_ref(&source), false, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("multiple cue workspaces"), "{error}");
+        assert!(error.contains("lesson.cue"), "{error}");
+        assert!(error.contains(".cue/lesson"), "{error}");
+    }
+
+    #[test]
+    fn recursive_output_root_preserves_relative_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let course = temp.path().join("course");
+        touch(&course.join("module/lesson.mp4"));
+        let root = temp.path().join("out");
+
+        let plan = resolve_inputs(&[course], true, Some(&root)).unwrap();
+
+        assert_eq!(plan.inputs[0].workspace, root.join(".cue/module/lesson"));
+        assert_eq!(plan.inputs[0].published_base, root.join("module/lesson"));
     }
 
     #[test]
@@ -462,9 +527,8 @@ mod tests {
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("Same.cue"), "{error}");
-        assert!(error.contains("same.cue"), "{error}");
-        assert!(error.contains("same output directory"), "{error}");
+        assert!(error.contains("Same") || error.contains("same"), "{error}");
+        assert!(error.contains("same output destination"), "{error}");
     }
 
     #[test]
@@ -479,8 +543,8 @@ mod tests {
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("same output directory"), "{error}");
-        assert!(error.contains("same.cue"), "{error}");
+        assert!(error.contains("same output destination"), "{error}");
+        assert!(error.contains(".cue/same"), "{error}");
     }
 
     #[cfg(unix)]
@@ -501,9 +565,8 @@ mod tests {
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("same output directory"), "{error}");
-        assert!(error.contains("real/same.cue"), "{error}");
-        assert!(error.contains("alias/same.cue"), "{error}");
+        assert!(error.contains("same output destination"), "{error}");
+        assert!(error.contains(".cue/same"), "{error}");
     }
 
     #[test]

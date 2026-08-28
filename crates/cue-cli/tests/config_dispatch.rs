@@ -52,3 +52,33 @@ fn model_operations_propagate_configuration_errors() {
         "{output:?}"
     );
 }
+
+#[test]
+fn stream_requires_summary() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let output = cue(config_dir.path())
+        .args(["--stream", "missing.mp4"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--stream requires --summary"),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn processing_output_controls_are_not_ignored_by_subcommands() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let output = cue(config_dir.path())
+        .args(["--summary", "transcribe", "missing.mp4"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("apply only to the default processing"),
+        "{output:?}"
+    );
+}

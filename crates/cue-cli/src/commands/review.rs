@@ -91,8 +91,8 @@ impl ReviewDiagnostic {
     }
 }
 
-pub fn run(args: ReviewArgs, corrections: Option<&Path>) -> i32 {
-    let result = crate::commands::correct::resolve_output_dir(&args.output)
+pub fn run(args: ReviewArgs, corrections: Option<&Path>, output_root: Option<&Path>) -> i32 {
+    let result = crate::commands::correct::resolve_output_dir_at(&args.output, output_root)
         .and_then(|output_dir| review_output(&output_dir, corrections, args.confidence_below));
 
     match result {

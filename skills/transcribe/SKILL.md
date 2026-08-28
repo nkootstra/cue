@@ -78,18 +78,23 @@ cue <first.mp4> <second.wav>
 cue <directory>
 cue --recursive <directory>
 cue --recursive <directory> --jobs 2
+cue --format vtt <file.mp4>
+cue --summary <file.mp4>
+cue --summary --stream --recursive <directory> --jobs 2
 ```
 
 cue runs the whole local pipeline: inspect -> extract audio -> transcribe ->
 normalize (S1, if installed) -> analyze (if a gateway is configured) ->
-write outputs. Outputs land in `<file>.cue/` next to the source (or `--output`):
+write outputs. The default visible result is `<file>.srt` beside the source.
+Supporting state lives in `<source-dir>/.cue/<stem>/` (or beneath
+`<output>/.cue/` when `--output` is used):
 
 | File | Role |
 |---|---|
 | `transcript.json` | **Raw canonical transcript.** Timed words, the source of truth. Never edit this. |
 | `transcript.txt` | Plain text derived from the canonical transcript. Inspect this to identify corrections. |
 | `normalized.json` / `transcript.clean.txt` | S1-cleaned prose (present when Ollama has the S1 model). |
-| `subtitles.srt` / `subtitles.vtt` | Subtitles derived from the canonical transcript. |
+| `subtitles.srt` / `subtitles.vtt` | Workspace copies of the selected subtitle formats. SRT is the only default; use repeatable `--format` for explicit alternatives. |
 | `analysis.json` / `summary.md` / `description.md` | LLM analysis (present when a gateway is configured). |
 | `corrections.applied.json` | Receipt written after correction, showing which rules were applied to `transcript.txt`, optional `transcript.clean.txt`, and subtitles. |
 | `cue.run.json` | Completion receipt binding the source, effective configuration, providers, correction manifests, and final artifact hashes. |
@@ -97,8 +102,8 @@ write outputs. Outputs land in `<file>.cue/` next to the source (or `--output`):
 After processing, verify the completed output before reporting success:
 
 ```bash
-cue verify <file>.cue
-cue verify <file>.cue --json  # when another agent or script consumes the result
+cue verify <file.mp4>
+cue verify <file.mp4> --json  # when another agent or script consumes the result
 ```
 
 Exit status 0 means the source, corrections, and artifacts still match the
@@ -131,15 +136,23 @@ symlinks are never traversed; an explicitly supplied directory symlink is
 rejected, so pass its resolved target directory instead.
 
 A directory or multiple positional paths is a batch. Without `--output`, each
-file writes `<stem>.cue/` beside its source. With `--output <root>`, a batch
-writes `<root>/<stem>.cue/`; a single explicit file still uses `--output` as
-the output directory itself. cue processes batch files sequentially by default.
+file publishes `<stem>.srt` beside its source and keeps state under
+`.cue/<stem>/`. With `--output <root>`, visible subtitles and hidden workspaces
+preserve directory-relative paths beneath that root. Explicit file lists use
+their stems at the root. cue processes batch files sequentially by default.
 Use `--jobs <N>` for bounded parallel processing, starting with `--jobs 2`
 because transcription and local model stages can consume substantial memory.
 cue keeps progress attributable to each file, continues after individual media
 failures, reports failures in input order, and exits with status 1 after its
 summary if anything failed. If two inputs would have the same destination,
 resolve the name collision before retrying.
+
+When the user requests an inline summary, use `--summary`. Treat stdout as the
+requested artifact: do not mix commentary into it. For concurrent batches,
+omit `--stream` when stable input order matters; add it only when the user
+wants each complete source-labelled summary as soon as that file finishes.
+Never describe `--stream` as token streaming. A requested summary failure is a
+real per-file failure even when the local SRT and hidden workspace were written.
 
 ## 3. Correct mishearings with context
 
@@ -375,8 +388,8 @@ order:
    ```
 
    Directory mode requires cue 0.5.0 or newer; `--jobs` requires cue 0.10.0 or
-   newer. cue discovers media and creates a sibling `<stem>.cue/` per source by
-   default. Omit `--jobs` when memory is constrained or only one file should
+   newer. cue discovers media, publishes a sibling `<stem>.srt`, and keeps
+   supporting state under `.cue/<stem>/` by default. Omit `--jobs` when memory is constrained or only one file should
    run at a time.
    Pass `--corrections /absolute/path/to/corrections.md` when deliberately
    bypassing hierarchical discovery. A rerun safely reuses the pipeline cache
@@ -386,8 +399,8 @@ order:
    processing is needed:
 
    ```bash
-   cue correct <course-directory/episode.cue>
-   cue correct <course-directory/module/episode.cue>
+   cue correct <course-directory/episode.mp4>
+   cue correct <course-directory/module/episode.mp4>
    ```
 
    Run those commands from the course root. If the outputs are outside that

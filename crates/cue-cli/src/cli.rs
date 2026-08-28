@@ -26,6 +26,18 @@ pub struct Cue {
     #[usage(long, global)]
     pub output: Option<String>,
 
+    /// Subtitle format to publish (srt or vtt); repeat to publish both
+    #[usage(long, global)]
+    pub format: Vec<cue_core::config::SubtitleFormat>,
+
+    /// Print a content summary to stdout
+    #[usage(long, global)]
+    pub summary: bool,
+
+    /// Print each complete summary as its file finishes
+    #[usage(long, global)]
+    pub stream: bool,
+
     /// Search directory inputs recursively
     #[usage(short = 'r', long, global)]
     pub recursive: bool,
@@ -440,6 +452,30 @@ mod tests {
         ]);
         assert_eq!(cli.language.as_deref(), Some("en"));
         assert_eq!(cli.output.as_deref(), Some("./result"));
+    }
+
+    #[test]
+    fn output_and_summary_controls_are_explicit_root_flags() {
+        let cli = parse_args(&[
+            "cue",
+            "--format",
+            "vtt",
+            "--format",
+            "srt",
+            "--summary",
+            "--stream",
+            "clip.mp4",
+        ]);
+
+        assert_eq!(
+            cli.format,
+            [
+                cue_core::config::SubtitleFormat::Vtt,
+                cue_core::config::SubtitleFormat::Srt
+            ]
+        );
+        assert!(cli.summary);
+        assert!(cli.stream);
     }
 
     #[test]

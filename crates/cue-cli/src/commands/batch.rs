@@ -26,7 +26,9 @@ impl KeyedLocks {
 }
 
 pub(super) trait MediaProcessor: Sync {
-    async fn process(&self, input: &ResolvedInput) -> Result<()>;
+    type Output;
+
+    async fn process(&self, input: &ResolvedInput) -> Result<Self::Output>;
 }
 
 pub(super) struct BatchFailure<'a> {
@@ -34,29 +36,54 @@ pub(super) struct BatchFailure<'a> {
     pub error: CueError,
 }
 
-pub(super) struct BatchOutcome<'a> {
+pub(super) struct BatchSuccess<'a, T> {
+    pub input: &'a ResolvedInput,
+    pub value: T,
+}
+
+pub(super) struct BatchOutcome<'a, T> {
     pub succeeded: usize,
+    pub successes: Vec<BatchSuccess<'a, T>>,
     pub failures: Vec<BatchFailure<'a>>,
 }
 
-impl<'a> BatchOutcome<'a> {
+impl<T> BatchOutcome<'_, T> {
+    pub fn succeeded(&self) -> usize {
+        self.succeeded
+    }
+
     pub fn exit_code(&self) -> i32 {
         i32::from(!self.failures.is_empty())
     }
 }
 
-pub(super) async fn process_inputs<'a, P: MediaProcessor>(
+pub(super) async fn process_inputs<'a, P, F>(
     inputs: &'a [ResolvedInput],
     is_batch: bool,
     jobs: NonZeroUsize,
     processor: &P,
-) -> Result<BatchOutcome<'a>> {
+    mut on_success: F,
+) -> Result<BatchOutcome<'a, P::Output>>
+where
+    P: MediaProcessor,
+    F: FnMut(&ResolvedInput, &P::Output) -> bool,
+{
     if !is_batch {
         if let Some(input) = inputs.first() {
-            processor.process(input).await?;
+            let value = processor.process(input).await?;
+            let retain = on_success(input, &value);
+            return Ok(BatchOutcome {
+                succeeded: 1,
+                successes: retain
+                    .then_some(BatchSuccess { input, value })
+                    .into_iter()
+                    .collect(),
+                failures: Vec::new(),
+            });
         }
         return Ok(BatchOutcome {
-            succeeded: inputs.len(),
+            succeeded: 0,
+            successes: Vec::new(),
             failures: Vec::new(),
         });
     }
@@ -67,28 +94,35 @@ pub(super) async fn process_inputs<'a, P: MediaProcessor>(
             .enumerate()
             .map(|(index, input)| async move { (index, input, processor.process(input).await) }),
     )
-    .buffer_unordered(jobs.get())
-    .collect::<Vec<_>>()
-    .await;
-    results.sort_unstable_by_key(|(index, _, _)| *index);
-
-    let mut succeeded = 0;
+    .buffer_unordered(jobs.get());
+    let mut successes = Vec::new();
     let mut failures = Vec::new();
-    for (_, input, result) in results {
+    let mut succeeded = 0;
+    while let Some((index, input, result)) = results.next().await {
         match result {
-            Ok(()) => succeeded += 1,
-            Err(error) => failures.push(BatchFailure { input, error }),
+            Ok(value) => {
+                succeeded += 1;
+                if on_success(input, &value) {
+                    successes.push((index, BatchSuccess { input, value }));
+                }
+            }
+            Err(error) => failures.push((index, BatchFailure { input, error })),
         }
     }
 
+    successes.sort_unstable_by_key(|(index, _)| *index);
+    failures.sort_unstable_by_key(|(index, _)| *index);
+
     Ok(BatchOutcome {
         succeeded,
-        failures,
+        successes: successes.into_iter().map(|(_, success)| success).collect(),
+        failures: failures.into_iter().map(|(_, failure)| failure).collect(),
     })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -103,6 +137,8 @@ mod tests {
     }
 
     impl MediaProcessor for ConcurrencyProbe {
+        type Output = ();
+
         async fn process(&self, _input: &ResolvedInput) -> Result<()> {
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.maximum.fetch_max(active, Ordering::SeqCst);
@@ -115,7 +151,8 @@ mod tests {
     fn resolved(name: &str) -> ResolvedInput {
         ResolvedInput {
             source: name.into(),
-            output: format!("{name}.cue").into(),
+            workspace: format!("{name}.cue").into(),
+            published_base: name.trim_end_matches(".mp4").into(),
         }
     }
 
@@ -126,18 +163,26 @@ mod tests {
             .collect::<Vec<_>>();
         let processor = ConcurrencyProbe::default();
 
-        let outcome = process_inputs(&inputs, true, NonZeroUsize::new(2).unwrap(), &processor)
-            .await
-            .unwrap();
+        let outcome = process_inputs(
+            &inputs,
+            true,
+            NonZeroUsize::new(2).unwrap(),
+            &processor,
+            |_, _| false,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(processor.maximum.load(Ordering::SeqCst), 2);
-        assert_eq!(outcome.succeeded, 5);
+        assert_eq!(outcome.succeeded(), 5);
         assert!(outcome.failures.is_empty());
     }
 
     struct OutOfOrderProcessor;
 
     impl MediaProcessor for OutOfOrderProcessor {
+        type Output = ();
+
         async fn process(&self, input: &ResolvedInput) -> Result<()> {
             let name = input.source.to_string_lossy();
             let delay = if name.contains("slow") { 30 } else { 1 };
@@ -163,11 +208,12 @@ mod tests {
             true,
             NonZeroUsize::new(3).unwrap(),
             &OutOfOrderProcessor,
+            |_, _| false,
         )
         .await
         .unwrap();
 
-        assert_eq!(outcome.succeeded, 1);
+        assert_eq!(outcome.succeeded(), 1);
         assert_eq!(
             outcome
                 .failures
@@ -180,6 +226,38 @@ mod tests {
             ]
         );
         assert_eq!(outcome.exit_code(), 1);
+    }
+
+    #[tokio::test]
+    async fn success_callback_observes_completion_order() {
+        let inputs = [resolved("slow.mp4"), resolved("fast.mp4")];
+        let mut completed = Vec::new();
+
+        let outcome = process_inputs(
+            &inputs,
+            true,
+            NonZeroUsize::new(2).unwrap(),
+            &OutOfOrderProcessor,
+            |input, _| {
+                completed.push(input.source.clone());
+                true
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            completed,
+            [PathBuf::from("fast.mp4"), PathBuf::from("slow.mp4")]
+        );
+        assert_eq!(
+            outcome
+                .successes
+                .iter()
+                .map(|success| success.input.source.clone())
+                .collect::<Vec<_>>(),
+            [PathBuf::from("slow.mp4"), PathBuf::from("fast.mp4")]
+        );
     }
 
     #[tokio::test]
@@ -211,6 +289,8 @@ mod tests {
     struct AlwaysFails;
 
     impl MediaProcessor for AlwaysFails {
+        type Output = ();
+
         async fn process(&self, _input: &ResolvedInput) -> Result<()> {
             Err(cue_core::CueError::general("single failed"))
         }
@@ -220,8 +300,14 @@ mod tests {
     async fn single_input_failure_is_returned_directly() {
         let inputs = [resolved("only.mp4")];
 
-        let result =
-            process_inputs(&inputs, false, NonZeroUsize::new(4).unwrap(), &AlwaysFails).await;
+        let result = process_inputs(
+            &inputs,
+            false,
+            NonZeroUsize::new(4).unwrap(),
+            &AlwaysFails,
+            |_, _| false,
+        )
+        .await;
         let Err(error) = result else {
             panic!("single failure unexpectedly succeeded");
         };

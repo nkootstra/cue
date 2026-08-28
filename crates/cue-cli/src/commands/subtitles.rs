@@ -175,8 +175,9 @@ pub fn check(
     args: SubtitlesCheckArgs,
     corrections: Option<&Path>,
     config: &cue_core::Config,
+    output_root: Option<&Path>,
 ) -> i32 {
-    let result = crate::commands::correct::resolve_output_dir(&args.output)
+    let result = crate::commands::correct::resolve_output_dir_at(&args.output, output_root)
         .and_then(|output_dir| check_output(&output_dir, corrections, config));
 
     match result {

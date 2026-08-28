@@ -2,36 +2,35 @@
 
 use std::path::{Path, PathBuf};
 
-use cue_core::{CueError, Result};
+use cue_core::Result;
 
 use crate::cli::CorrectArgs;
 use crate::corrections::{CorrectionPlan, CorrectionScope};
 use crate::render::println_line;
 
-/// Resolve the output directory: a `.cue/` dir directly, or the sibling
-/// `.cue/` of a media file.
-pub(crate) fn resolve_output_dir(path: &Path) -> Result<PathBuf> {
-    if path.is_dir() {
-        return Ok(path.to_path_buf());
-    }
-    if let Some(stem) = path.file_stem() {
-        let sibling = path.with_file_name(format!("{}.cue", stem.to_string_lossy()));
-        if sibling.is_dir() {
-            return Ok(sibling);
-        }
-    }
-    Err(CueError::general(format!(
-        "no cue output directory found at {}",
-        path.display()
-    ))
-    .remedy(
-        "pass a `<file>.cue/` directory, or a media file whose sibling \
-         `.cue/` directory already exists",
-    ))
+/// Resolve a durable workspace directly or from a media file. New workspaces
+/// live under `.cue/<stem>/`; visible `<stem>.cue/` workspaces remain valid.
+pub(crate) fn resolve_output_dir_at(path: &Path, root: Option<&Path>) -> Result<PathBuf> {
+    resolve_output_layout(path, root).map(|layout| layout.workspace)
 }
 
-pub fn run(args: CorrectArgs, corrections: Option<&Path>, config: &cue_core::Config) -> i32 {
-    match run_inner(&args, corrections, config) {
+fn resolve_output_layout(
+    path: &Path,
+    root: Option<&Path>,
+) -> Result<crate::commands::output::OutputLayout> {
+    if path.is_dir() {
+        return Ok(crate::commands::output::workspace_layout(path));
+    }
+    crate::commands::output::existing_source_layout(path, root)
+}
+
+pub fn run(
+    args: CorrectArgs,
+    corrections: Option<&Path>,
+    output_root: Option<&Path>,
+    config: &cue_core::Config,
+) -> i32 {
+    match run_inner(&args, corrections, output_root, config) {
         Ok(()) => 0,
         Err(err) => {
             eprintln!("{err}");
@@ -43,9 +42,19 @@ pub fn run(args: CorrectArgs, corrections: Option<&Path>, config: &cue_core::Con
 fn run_inner(
     args: &CorrectArgs,
     corrections: Option<&Path>,
+    output_root: Option<&Path>,
     config: &cue_core::Config,
 ) -> Result<()> {
-    let output_dir = resolve_output_dir(args.output.as_path())?;
+    let layout = resolve_output_layout(args.output.as_path(), output_root)?;
+    let output_dir = layout.workspace.clone();
+    let subtitle_formats = correction_subtitle_formats(&output_dir, config);
+    if !args.dry_run {
+        crate::commands::output::preflight_subtitles(
+            &layout,
+            subtitle_formats.iter().copied(),
+            false,
+        )?;
+    }
     let plan = CorrectionPlan::require(&output_dir, corrections)?;
     let _output_lock = if args.dry_run {
         None
@@ -56,6 +65,13 @@ fn run_inner(
         crate::run_contract::invalidate(&output_dir)?;
     }
     let outcome = plan.render(&output_dir, config, CorrectionScope::Full, args.dry_run)?;
+    if !args.dry_run {
+        crate::commands::output::publish_subtitles(
+            &layout,
+            subtitle_formats.iter().copied(),
+            false,
+        )?;
+    }
 
     for (artifact, replacements) in &outcome.replacements {
         if *replacements > 0 {
@@ -71,4 +87,22 @@ fn run_inner(
         println_line("\nApplied. transcript.json and analysis outputs were left untouched.");
     }
     Ok(())
+}
+
+fn correction_subtitle_formats(
+    output_dir: &Path,
+    config: &cue_core::Config,
+) -> Vec<cue_core::config::SubtitleFormat> {
+    [
+        cue_core::config::SubtitleFormat::Srt,
+        cue_core::config::SubtitleFormat::Vtt,
+    ]
+    .into_iter()
+    .filter(|format| {
+        output_dir
+            .join(format!("subtitles.{}", format.extension()))
+            .exists()
+            || config.subtitles.formats.contains(format)
+    })
+    .collect()
 }
