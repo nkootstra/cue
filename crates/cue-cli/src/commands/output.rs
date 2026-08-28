@@ -311,7 +311,13 @@ pub(super) fn remove_stale_published_outputs(
     current: &[PathBuf],
 ) -> Result<()> {
     for output in previous {
-        if current.iter().any(|path| path == &output.path) {
+        let resolved_output = std::fs::canonicalize(&output.path).ok();
+        if current.iter().any(|path| {
+            path == &output.path
+                || resolved_output
+                    .as_ref()
+                    .is_some_and(|output| std::fs::canonicalize(path).ok().as_ref() == Some(output))
+        }) {
             continue;
         }
         let is_regular =
@@ -479,6 +485,23 @@ mod tests {
         std::fs::write(&current, "subtitle\n").unwrap();
         let previous = vec![OwnedPublishedOutput {
             path: current.clone(),
+            digest: cue_cache::file_hash(&current).unwrap(),
+        }];
+
+        remove_stale_published_outputs(&previous, std::slice::from_ref(&current)).unwrap();
+
+        assert!(current.is_file());
+    }
+
+    #[test]
+    fn stale_cleanup_keeps_lexically_different_current_outputs() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join(".cue/lesson");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let current = temp.path().join("lesson.srt");
+        std::fs::write(&current, "subtitle\n").unwrap();
+        let previous = vec![OwnedPublishedOutput {
+            path: workspace.join("../../lesson.srt"),
             digest: cue_cache::file_hash(&current).unwrap(),
         }];
 

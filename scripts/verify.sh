@@ -14,6 +14,7 @@ MOCK="$ROOT/scripts/testdata/mock_gateway.py"
 VERIFY_TMP="$(mktemp -d "${TMPDIR:-/tmp}/cue-verify.XXXXXX")"
 CFG_DIR="$VERIFY_TMP/cfg"
 OUT="$VERIFY_TMP/out"
+WORKSPACE="$OUT/.cue/speech"
 SPEECH_MP3="$VERIFY_TMP/speech.mp3"
 FAILURES=0
 
@@ -91,49 +92,56 @@ say -o "$SPEECH_AIFF" "Hello from the cue verification suite." \
 ffmpeg -y -v error -i "$SPEECH_AIFF" "$SPEECH_MP3"
 rm -rf "$OUT"
 
-check "pipeline run" env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" "$SPEECH_MP3" --output "$OUT"
+check "pipeline run" env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" "$SPEECH_MP3" \
+  --output "$OUT" --format srt --format vtt
 
-for f in transcript.json transcript.txt transcript.clean.txt normalized.json \
+for f in cue.workspace.json transcript.json transcript.txt transcript.clean.txt normalized.json \
          subtitles.srt subtitles.vtt analysis.json summary.md description.md \
          cue.run.json; do
-  check "output exists: $f" test -s "$OUT/$f"
+  check "workspace output exists: $f" test -s "$WORKSPACE/$f"
 done
 
-check "transcript has words"     bash -c "python3 -c \"import json; d=json.load(open('$OUT/transcript.json')); assert len(d['words'])>0\""
-check "clean text is non-empty"  bash -c "grep -q . '$OUT/transcript.clean.txt'"
-check "srt well-formed"          bash -c "grep -q -- '-->' '$OUT/subtitles.srt'"
-check "vtt has header"           bash -c "head -1 '$OUT/subtitles.vtt' | grep -q WEBVTT"
-check "analysis schema version"  bash -c "grep -q '\"schema_version\": 1' '$OUT/analysis.json'"
-check "summary mentions title"   bash -c "grep -q 'Cue Pipeline Test' '$OUT/summary.md'"
-check "description has chapters" bash -c "grep -q 'Chapters' '$OUT/description.md'"
-check "run receipt contract" bash -c "python3 -c \"import json; d=json.load(open('$OUT/cue.run.json')); assert d['schema_version']==1; assert d['mode']=='full'; assert d['source']['digest']['algorithm']=='blake3'; assert len(d['source']['digest']['value'])==64; assert d['remote_data_usage']['normalized_text_sent_to_remote_in_current_run'] is None; assert {a['path'] for a in d['artifacts']} == {'transcript.json','transcript.txt','transcript.clean.txt','normalized.json','subtitles.srt','subtitles.vtt','analysis.json','summary.md','description.md'}; assert {s['stage'] for s in d['stages']} >= {'inspect','extract','transcribe','normalize','analyze','render'}\""
-check "verify accepts intact output" "$CUE" verify "$OUT"
-printf 'tampered\n' >> "$OUT/transcript.txt"
-check_fail "verify detects artifact drift" "$CUE" verify "$OUT"
-check "rerun restores attested output" env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" "$SPEECH_MP3" --output "$OUT"
-check "verify accepts restored output" "$CUE" verify "$OUT"
+check "published srt exists"      test -s "$OUT/speech.srt"
+check "published vtt exists"      test -s "$OUT/speech.vtt"
+check "transcript has words"     bash -c "python3 -c \"import json; d=json.load(open('$WORKSPACE/transcript.json')); assert len(d['words'])>0\""
+check "clean text is non-empty"  bash -c "grep -q . '$WORKSPACE/transcript.clean.txt'"
+check "srt well-formed"          bash -c "grep -q -- '-->' '$OUT/speech.srt'"
+check "vtt has header"           bash -c "head -1 '$OUT/speech.vtt' | grep -q WEBVTT"
+check "analysis schema version"  bash -c "grep -q '\"schema_version\": 1' '$WORKSPACE/analysis.json'"
+check "summary mentions title"   bash -c "grep -q 'Cue Pipeline Test' '$WORKSPACE/summary.md'"
+check "description has chapters" bash -c "grep -q 'Chapters' '$WORKSPACE/description.md'"
+check "run receipt contract" bash -c "python3 -c \"import json; d=json.load(open('$WORKSPACE/cue.run.json')); assert d['schema_version']==2; assert d['mode']=='full'; assert d['source']['digest']['algorithm']=='blake3'; assert len(d['source']['digest']['value'])==64; assert d['remote_data_usage']['normalized_text_sent_to_remote_in_current_run'] is None; assert {a['path'] for a in d['artifacts']} == {'cue.workspace.json','transcript.json','transcript.txt','transcript.clean.txt','normalized.json','subtitles.srt','subtitles.vtt','analysis.json','summary.md','description.md'}; assert {a['path'] for a in d['published_outputs']} == {'../../speech.srt','../../speech.vtt'}; assert {s['stage'] for s in d['stages']} >= {'inspect','extract','transcribe','normalize','analyze','render'}\""
+check "verify accepts intact output" "$CUE" verify "$WORKSPACE"
+printf 'tampered\n' >> "$WORKSPACE/transcript.txt"
+check_fail "verify detects artifact drift" "$CUE" verify "$WORKSPACE"
+check "rerun restores attested output" env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" \
+  "$SPEECH_MP3" --output "$OUT" --format srt --format vtt
+check "verify accepts restored output" "$CUE" verify "$WORKSPACE"
 
 echo
 echo "== cache behavior =="
-check "rerun fully cached" bash -c "env CUE_CONFIG_DIR=$CFG_DIR $CUE '$SPEECH_MP3' --output '$OUT' 2>&1 | grep -c cached | grep -q 4"
+check "rerun fully cached" bash -c "env CUE_CONFIG_DIR=$CFG_DIR $CUE '$SPEECH_MP3' --output '$OUT' --format srt --format vtt 2>&1 | grep -c cached | grep -q 4"
 
-SOURCE_TERM=$(python3 -c "import json,re; d=json.load(open('$OUT/transcript.json')); m=re.search(r'[A-Za-z0-9]+', d['segments'][0]['text']); assert m; print(m.group(0))")
-PIPELINE_CANONICAL_HASH=$(shasum -a 256 "$OUT/transcript.json" "$OUT/analysis.json" "$OUT/normalized.json" | shasum | cut -d' ' -f1)
-printf '%s -> DurableFirst\n' "$SOURCE_TERM" > "$OUT/corrections.md"
-check "manifest applies on cached rerun" env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" "$SPEECH_MP3" --output "$OUT"
-check "corrected render uses first manifest" bash -c "grep -q 'DurableFirst' '$OUT/transcript.txt' && grep -q 'DurableFirst' '$OUT/subtitles.srt'"
-check "correction receipt is valid" bash -c "python3 -c \"import json; d=json.load(open('$OUT/corrections.applied.json')); assert d['schema_version']==2; assert d['manifests'][0]['source']=='output-directory'; assert d['source_hashes']['transcript']; assert d['rules'][0]['replace']=='DurableFirst'; assert d['rules'][0]['source_manifest']==0\""
-check "first corrected rerun keeps canonical data" bash -c "test '$PIPELINE_CANONICAL_HASH' = \"\$(shasum -a 256 '$OUT/transcript.json' '$OUT/analysis.json' '$OUT/normalized.json' | shasum | cut -d' ' -f1)\""
+SOURCE_TERM=$(python3 -c "import json,re; d=json.load(open('$WORKSPACE/transcript.json')); m=re.search(r'[A-Za-z0-9]+', d['segments'][0]['text']); assert m; print(m.group(0))")
+PIPELINE_CANONICAL_HASH=$(shasum -a 256 "$WORKSPACE/transcript.json" "$WORKSPACE/analysis.json" "$WORKSPACE/normalized.json" | shasum | cut -d' ' -f1)
+printf '%s -> DurableFirst\n' "$SOURCE_TERM" > "$WORKSPACE/corrections.md"
+check "manifest applies on cached rerun" env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" \
+  "$SPEECH_MP3" --output "$OUT" --format srt --format vtt
+check "corrected render uses first manifest" bash -c "grep -q 'DurableFirst' '$WORKSPACE/transcript.txt' && grep -q 'DurableFirst' '$OUT/speech.srt'"
+check "correction receipt is valid" bash -c "python3 -c \"import json; d=json.load(open('$WORKSPACE/corrections.applied.json')); assert d['schema_version']==2; assert d['manifests'][0]['source']=='output-directory'; assert d['source_hashes']['transcript']; assert d['rules'][0]['replace']=='DurableFirst'; assert d['rules'][0]['source_manifest']==0\""
+check "first corrected rerun keeps canonical data" bash -c "test '$PIPELINE_CANONICAL_HASH' = \"\$(shasum -a 256 '$WORKSPACE/transcript.json' '$WORKSPACE/analysis.json' '$WORKSPACE/normalized.json' | shasum | cut -d' ' -f1)\""
 
-printf '%s -> DurableSecond\n' "$SOURCE_TERM" > "$OUT/corrections.md"
-check "changed manifest reapplies from canonical" env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" "$SPEECH_MP3" --output "$OUT"
-check "changed manifest replaces prior correction" bash -c "grep -q 'DurableSecond' '$OUT/transcript.txt' && ! grep -q 'DurableFirst' '$OUT/transcript.txt'"
+printf '%s -> DurableSecond\n' "$SOURCE_TERM" > "$WORKSPACE/corrections.md"
+check "changed manifest reapplies from canonical" env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" \
+  "$SPEECH_MP3" --output "$OUT" --format srt --format vtt
+check "changed manifest replaces prior correction" bash -c "grep -q 'DurableSecond' '$WORKSPACE/transcript.txt' && ! grep -q 'DurableFirst' '$WORKSPACE/transcript.txt'"
 
-rm "$OUT/corrections.md"
-check "manifest removal rerenders canonical text" env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" "$SPEECH_MP3" --output "$OUT"
-check "manifest removal restores raw-derived text" bash -c "grep -Fqi '$SOURCE_TERM' '$OUT/transcript.txt' && ! grep -q 'DurableFirst\|DurableSecond' '$OUT/transcript.txt'"
-check_fail "manifest removal clears receipt" test -e "$OUT/corrections.applied.json"
-check "correction lifecycle keeps canonical data" bash -c "test '$PIPELINE_CANONICAL_HASH' = \"\$(shasum -a 256 '$OUT/transcript.json' '$OUT/analysis.json' '$OUT/normalized.json' | shasum | cut -d' ' -f1)\""
+rm "$WORKSPACE/corrections.md"
+check "manifest removal rerenders canonical text" env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" \
+  "$SPEECH_MP3" --output "$OUT" --format srt --format vtt
+check "manifest removal restores raw-derived text" bash -c "grep -Fqi '$SOURCE_TERM' '$WORKSPACE/transcript.txt' && ! grep -q 'DurableFirst\|DurableSecond' '$WORKSPACE/transcript.txt'"
+check_fail "manifest removal clears receipt" test -e "$WORKSPACE/corrections.applied.json"
+check "correction lifecycle keeps canonical data" bash -c "test '$PIPELINE_CANONICAL_HASH' = \"\$(shasum -a 256 '$WORKSPACE/transcript.json' '$WORKSPACE/analysis.json' '$WORKSPACE/normalized.json' | shasum | cut -d' ' -f1)\""
 
 check "doctor optional ok" bash -c "env 'CUE_CONFIG_DIR=$CFG_DIR' '$CUE' doctor | grep -q 'S1.*ok.*ready'"
 check "models list"        bash -c "env 'CUE_CONFIG_DIR=$CFG_DIR' '$CUE' models list | grep -q cue-s1-mini"
@@ -142,14 +150,15 @@ check "models check ok"    env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" models check
 echo
 echo "== transcribe subcommand =="
 TRANS_DIR="$VERIFY_TMP/trans"
+TRANS_WORKSPACE="$TRANS_DIR/.cue/speech"
 rm -rf "$TRANS_DIR"
 check "transcribe runs" env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" transcribe "$SPEECH_MP3" --output "$TRANS_DIR"
-check "transcript exists"     test -s "$TRANS_DIR/transcript.txt"
-check "transcribe receipt exists" test -s "$TRANS_DIR/cue.run.json"
-check "transcribe receipt mode" bash -c "python3 -c \"import json; d=json.load(open('$TRANS_DIR/cue.run.json')); assert d['mode']=='transcript-only'; assert {a['path'] for a in d['artifacts']} == {'transcript.json','transcript.txt'}\""
-check "verify accepts transcript-only output" "$CUE" verify "$TRANS_DIR"
-check_fail "no subtitles"     test -s "$TRANS_DIR/subtitles.srt"
-check_fail "no analysis"      test -s "$TRANS_DIR/analysis.json"
+check "transcript exists"     test -s "$TRANS_WORKSPACE/transcript.txt"
+check "transcribe receipt exists" test -s "$TRANS_WORKSPACE/cue.run.json"
+check "transcribe receipt mode" bash -c "python3 -c \"import json; d=json.load(open('$TRANS_WORKSPACE/cue.run.json')); assert d['schema_version']==2; assert d['mode']=='transcript-only'; assert {a['path'] for a in d['artifacts']} == {'cue.workspace.json','transcript.json','transcript.txt'}; assert d['published_outputs'] == []\""
+check "verify accepts transcript-only output" "$CUE" verify "$TRANS_WORKSPACE"
+check_fail "no subtitles"     test -s "$TRANS_WORKSPACE/subtitles.srt"
+check_fail "no analysis"      test -s "$TRANS_WORKSPACE/analysis.json"
 
 echo
 echo "== skill =="
