@@ -49,6 +49,15 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      - name: Full verification (macOS)
+        if: runner.os == 'macOS'
+        env:
+          CUE_DATA_DIR: ${{ runner.temp }}/cue-data
+        run: |
+          cargo build --locked -p cue-cli
+          target/debug/cue doctor --fix
+          bash scripts/verify.sh
+
       - name: Global skill install smoke
         if: runner.os == 'Linux'
         run: |
