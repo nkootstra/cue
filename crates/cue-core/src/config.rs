@@ -225,12 +225,18 @@ impl LlmConfig {
         (!api_key_env.is_empty()).then_some(api_key_env)
     }
 
+    fn declared_api_key(&self) -> Option<String> {
+        self.declared_api_key_env()
+            .and_then(|api_key_env| std::env::var(api_key_env).ok())
+            .filter(|api_key| !api_key.trim().is_empty())
+    }
+
     /// Reports whether the gateway's declared credential is ready for use.
     pub fn credential_readiness(&self) -> LlmCredentialReadiness {
         let Some(api_key_env) = self.declared_api_key_env() else {
             return LlmCredentialReadiness::Unauthenticated;
         };
-        if std::env::var(api_key_env).is_ok() {
+        if self.declared_api_key().is_some() {
             return LlmCredentialReadiness::Available {
                 api_key_env: api_key_env.into(),
             };
@@ -243,8 +249,7 @@ impl LlmConfig {
     /// Reads the API key from the environment variable named by
     /// `api_key_env`, if that variable is set.
     pub fn api_key(&self) -> Option<String> {
-        self.declared_api_key_env()
-            .and_then(|api_key_env| std::env::var(api_key_env).ok())
+        self.declared_api_key()
     }
 }
 

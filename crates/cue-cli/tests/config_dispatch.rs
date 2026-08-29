@@ -205,6 +205,49 @@ fn available_summary_credential_passes_preflight() {
 }
 
 #[test]
+fn empty_summary_credential_fails_preflight() {
+    let config_dir = tempfile::tempdir().unwrap();
+    write_llm_config(config_dir.path(), "CUE_TEST_SUMMARY_EMPTY");
+    let media_dir = tempfile::tempdir().unwrap();
+    let media = empty_media(media_dir.path(), "lesson.mp4");
+    let output_dir = media_dir.path().join("out");
+
+    let output = cue(config_dir.path())
+        .env("CUE_TEST_SUMMARY_EMPTY", "")
+        .args(["--summary", "--output"])
+        .arg(&output_dir)
+        .arg(&media)
+        .output()
+        .expect("run cue with an empty credential");
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = stderr(&output);
+    assert!(stderr.contains("Stage: analyze"), "{stderr}");
+    assert!(
+        stderr.contains("CUE_TEST_SUMMARY_EMPTY is not set"),
+        "{stderr}"
+    );
+    assert!(!output_dir.exists(), "{output_dir:?} should not exist");
+}
+
+#[test]
+fn input_resolution_errors_precede_summary_readiness_errors() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let missing = config_dir.path().join("missing.mp4");
+
+    let output = cue(config_dir.path())
+        .arg("--summary")
+        .arg(&missing)
+        .output()
+        .expect("run cue with a missing input");
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = stderr(&output);
+    assert!(stderr.contains("does not exist"), "{stderr}");
+    assert!(!stderr.contains("no LLM gateway is configured"), "{stderr}");
+}
+
+#[test]
 fn processing_without_summary_does_not_require_a_gateway() {
     let config_dir = tempfile::tempdir().unwrap();
     let media_dir = tempfile::tempdir().unwrap();
