@@ -176,6 +176,18 @@ and the batch result go to stderr. The default is deterministic input order;
 `--stream` emits each complete block as its file finishes. It never streams
 partial model tokens and does not create an additional visible summary file.
 
+When `--summary` is requested, cue first resolves every input and then checks
+the deterministic LLM configuration before doing media or output work. It
+fails immediately if no analysis gateway is configured or if the credential
+declared by `llm.api_key_env` is unavailable. This check still applies
+when a previous analysis may be cached, so a requested summary never silently
+depends on cache state.
+
+The preflight does not contact the configured services. URL and model validity,
+S1 availability, gateway reachability, credential acceptance, and model
+availability remain runtime outcomes. Runs without `--summary`, including
+`cue transcribe`, remain independent of the optional analysis integration.
+
 ## Verifying completed outputs
 
 A successful render publishes `cue.run.json` last, so its presence marks a
@@ -398,6 +410,27 @@ base_url = "https://openrouter.ai/api/v1"   # or http://localhost:11434/v1
 model = "model-name"
 api_key_env = "CUE_LLM_API_KEY"             # key read from env, never stored
 ```
+
+Omitting `api_key_env` uses `CUE_LLM_API_KEY`. Any nonempty value, after
+trimming whitespace, declares an environment variable that must be present.
+`cue doctor` reports the configured LLM as not ready when that credential is
+unavailable and tells you which variable to set. Because analysis is optional,
+this status does not make the required local transcription tooling unhealthy.
+
+For a gateway that intentionally accepts unauthenticated requests, explicitly
+disable the credential requirement with valid TOML:
+
+```toml
+[llm]
+base_url = "http://localhost:1234/v1"
+model = "local-model"
+api_key_env = ""
+```
+
+An empty or whitespace-only `api_key_env` means intentionally unauthenticated;
+it is different from omitting the setting. API keys are read from the declared
+environment variable at runtime and are never stored in cue configuration or
+receipts.
 
 S1 normalization is deliberately restricted to `localhost` and IP loopback
 addresses. Remote OpenAI-compatible endpoints remain supported for analysis

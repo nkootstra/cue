@@ -12,8 +12,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use cue_analysis::Analyzer as _;
+use cue_core::config::LlmCredentialReadiness;
 use cue_core::media::Media;
-use cue_core::{CueError, Result};
+use cue_core::{CueError, PipelineStage, Result};
 use cue_media::extract::extract_audio;
 use cue_transcription::Transcriber;
 
@@ -154,6 +155,7 @@ async fn run_inner(
     // Resolve the complete batch before starting any media work. This keeps
     // discovery and output collisions from producing partial batches.
     let plan = resolve_inputs(paths, cli.recursive, cli.output.as_deref().map(Path::new))?;
+    preflight_summary(mode, cli.summary, config)?;
     if mode == ProcessMode::Full {
         for input in &plan.inputs {
             let layout = crate::commands::output::OutputLayout {
@@ -239,6 +241,34 @@ async fn run_inner(
         }
         outcome.exit_code()
     })
+}
+
+fn preflight_summary(mode: ProcessMode, summary: bool, config: &cue_core::Config) -> Result<()> {
+    if !summary || !mode.includes(PipelineStage::Analyze) {
+        return Ok(());
+    }
+
+    let Some(llm) = &config.llm else {
+        return Err(CueError::new(
+            PipelineStage::Analyze,
+            "cannot produce the requested summary because no LLM gateway is configured",
+        )
+        .remedy("configure the [llm] gateway in cue.toml and retry"));
+    };
+
+    if let LlmCredentialReadiness::Missing { api_key_env } = llm.credential_readiness() {
+        return Err(CueError::new(
+            PipelineStage::Analyze,
+            format!(
+                "cannot produce the requested summary because credential {api_key_env} is unavailable"
+            ),
+        )
+        .remedy(format!(
+            "set {api_key_env}, or configure api_key_env = \"\" for an unauthenticated gateway"
+        )));
+    }
+
+    Ok(())
 }
 
 fn print_summary(input: &ResolvedInput, result: &ProcessResult) {

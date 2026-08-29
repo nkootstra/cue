@@ -189,9 +189,10 @@ impl std::fmt::Display for SubtitleFormat {
 /// Connection details for an OpenAI-compatible LLM gateway.
 ///
 /// Works unchanged against Ollama (`http://localhost:11434/v1`) and remote
-/// gateways such as OpenRouter (`https://openrouter.ai/api/v1`). The API key
-/// is never stored in configuration files; it is read from the environment
-/// variable named by `api_key_env`.
+/// gateways such as OpenRouter (`https://openrouter.ai/api/v1`). When
+/// `api_key_env` is nonempty, the API key is read from that environment
+/// variable and never stored in configuration files. An empty or whitespace-
+/// only value explicitly selects an unauthenticated gateway.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmConfig {
     pub base_url: String,
@@ -200,15 +201,55 @@ pub struct LlmConfig {
     pub api_key_env: String,
 }
 
+/// Whether a configured LLM gateway has the credentials it declares.
+///
+/// This status deliberately carries only the environment-variable name, never
+/// the credential value itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LlmCredentialReadiness {
+    /// The gateway explicitly declares that it does not require credentials.
+    Unauthenticated,
+    /// The named credential is available in the process environment.
+    Available { api_key_env: String },
+    /// The gateway requires a named credential that is not available.
+    Missing { api_key_env: String },
+}
+
 fn default_api_key_env() -> String {
     "CUE_LLM_API_KEY".into()
 }
 
 impl LlmConfig {
+    fn declared_api_key_env(&self) -> Option<&str> {
+        let api_key_env = self.api_key_env.trim();
+        (!api_key_env.is_empty()).then_some(api_key_env)
+    }
+
+    fn declared_api_key(&self) -> Option<String> {
+        self.declared_api_key_env()
+            .and_then(|api_key_env| std::env::var(api_key_env).ok())
+            .filter(|api_key| !api_key.trim().is_empty())
+    }
+
+    /// Reports whether the gateway's declared credential is ready for use.
+    pub fn credential_readiness(&self) -> LlmCredentialReadiness {
+        let Some(api_key_env) = self.declared_api_key_env() else {
+            return LlmCredentialReadiness::Unauthenticated;
+        };
+        if self.declared_api_key().is_some() {
+            return LlmCredentialReadiness::Available {
+                api_key_env: api_key_env.into(),
+            };
+        }
+        LlmCredentialReadiness::Missing {
+            api_key_env: api_key_env.into(),
+        }
+    }
+
     /// Reads the API key from the environment variable named by
     /// `api_key_env`, if that variable is set.
     pub fn api_key(&self) -> Option<String> {
-        std::env::var(&self.api_key_env).ok()
+        self.declared_api_key()
     }
 }
 
@@ -496,6 +537,73 @@ impl RawToml {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn llm_credentials_report_a_named_missing_variable() {
+        let config = LlmConfig {
+            base_url: "https://gateway.example.com/v1".into(),
+            model: "test-model".into(),
+            api_key_env: "  CUE_TEST_DEFINITELY_UNSET_CREDENTIAL_91A7  ".into(),
+        };
+
+        assert_eq!(
+            config.credential_readiness(),
+            LlmCredentialReadiness::Missing {
+                api_key_env: "CUE_TEST_DEFINITELY_UNSET_CREDENTIAL_91A7".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn llm_credentials_use_a_trimmed_variable_without_exposing_its_value() {
+        let config = LlmConfig {
+            base_url: "https://gateway.example.com/v1".into(),
+            model: "test-model".into(),
+            api_key_env: "  PATH  ".into(),
+        };
+
+        let readiness = config.credential_readiness();
+        assert_eq!(config.api_key(), std::env::var("PATH").ok());
+        assert_eq!(
+            readiness,
+            LlmCredentialReadiness::Available {
+                api_key_env: "PATH".into(),
+            }
+        );
+        assert!(!format!("{readiness:?}").contains(&std::env::var("PATH").unwrap()));
+    }
+
+    #[test]
+    fn llm_credentials_allow_explicitly_unauthenticated_gateways() {
+        for api_key_env in ["", "   \t"] {
+            let config = LlmConfig {
+                base_url: "http://localhost:8765/v1".into(),
+                model: "test-model".into(),
+                api_key_env: api_key_env.into(),
+            };
+
+            assert_eq!(
+                config.credential_readiness(),
+                LlmCredentialReadiness::Unauthenticated
+            );
+            assert_eq!(config.api_key(), None);
+        }
+    }
+
+    #[test]
+    fn omitted_llm_key_declaration_keeps_the_default_variable() {
+        let partial = parse_toml(
+            r#"
+[llm]
+base_url = "https://gateway.example.com/v1"
+model = "test-model"
+"#,
+        )
+        .unwrap();
+
+        let config = resolve(&[&partial]).unwrap();
+        assert_eq!(config.llm.unwrap().api_key_env, "CUE_LLM_API_KEY");
+    }
 
     #[test]
     fn defaults_match_the_plan() {

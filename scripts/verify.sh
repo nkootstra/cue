@@ -83,7 +83,7 @@ ollama_url = "http://127.0.0.1:8765"
 [llm]
 base_url = "http://127.0.0.1:8765/v1"
 model = "test-model"
-api_key_env = "CUE_TEST_KEY"
+api_key_env = ""
 EOF
 
 SPEECH_AIFF="$VERIFY_TMP/speech.aiff"
