@@ -189,9 +189,10 @@ impl std::fmt::Display for SubtitleFormat {
 /// Connection details for an OpenAI-compatible LLM gateway.
 ///
 /// Works unchanged against Ollama (`http://localhost:11434/v1`) and remote
-/// gateways such as OpenRouter (`https://openrouter.ai/api/v1`). The API key
-/// is never stored in configuration files; it is read from the environment
-/// variable named by `api_key_env`.
+/// gateways such as OpenRouter (`https://openrouter.ai/api/v1`). When
+/// `api_key_env` is nonempty, the API key is read from that environment
+/// variable and never stored in configuration files. An empty or whitespace-
+/// only value explicitly selects an unauthenticated gateway.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmConfig {
     pub base_url: String,
@@ -549,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn llm_credentials_report_a_named_present_variable_without_its_value() {
+    fn llm_credentials_use_a_trimmed_variable_without_exposing_its_value() {
         let config = LlmConfig {
             base_url: "https://gateway.example.com/v1".into(),
             model: "test-model".into(),
@@ -557,6 +558,7 @@ mod tests {
         };
 
         let readiness = config.credential_readiness();
+        assert_eq!(config.api_key(), std::env::var("PATH").ok());
         assert_eq!(
             readiness,
             LlmCredentialReadiness::Available {
@@ -581,23 +583,6 @@ mod tests {
             );
             assert_eq!(config.api_key(), None);
         }
-    }
-
-    #[test]
-    fn llm_key_lookup_uses_the_same_trimmed_declaration_as_readiness() {
-        let config = LlmConfig {
-            base_url: "https://gateway.example.com/v1".into(),
-            model: "test-model".into(),
-            api_key_env: "  PATH  ".into(),
-        };
-
-        assert_eq!(config.api_key(), std::env::var("PATH").ok());
-        assert_eq!(
-            config.credential_readiness(),
-            LlmCredentialReadiness::Available {
-                api_key_env: "PATH".into(),
-            }
-        );
     }
 
     #[test]

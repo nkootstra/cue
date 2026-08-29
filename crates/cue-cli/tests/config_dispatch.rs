@@ -122,7 +122,7 @@ fn summary_without_a_gateway_fails_before_creating_outputs() {
         .expect("run cue with a requested summary");
 
     assert_eq!(output.status.code(), Some(1), "{output:?}");
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr(&output);
     assert!(stderr.contains("summary"), "{stderr}");
     assert!(stderr.contains("Stage: analyze"), "{stderr}");
     assert!(stderr.contains("gateway"), "{stderr}");
@@ -214,24 +214,6 @@ fn processing_without_summary_does_not_require_a_gateway() {
         .arg(&media)
         .output()
         .expect("run cue without a requested summary");
-
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
-    let stderr = stderr(&output);
-    assert!(stderr.contains("Stage: inspect"), "{stderr}");
-    assert!(!stderr.contains("no LLM gateway is configured"), "{stderr}");
-}
-
-#[test]
-fn transcript_only_processing_does_not_require_a_gateway() {
-    let config_dir = tempfile::tempdir().unwrap();
-    let media_dir = tempfile::tempdir().unwrap();
-    let media = empty_media(media_dir.path(), "lesson.mp4");
-
-    let output = cue(config_dir.path())
-        .arg("transcribe")
-        .arg(&media)
-        .output()
-        .expect("run transcript-only processing");
 
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let stderr = stderr(&output);

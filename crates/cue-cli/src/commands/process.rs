@@ -244,7 +244,7 @@ async fn run_inner(
 }
 
 fn preflight_summary(mode: ProcessMode, summary: bool, config: &cue_core::Config) -> Result<()> {
-    if mode != ProcessMode::Full || !summary {
+    if !summary || !mode.includes(PipelineStage::Analyze) {
         return Ok(());
     }
 
