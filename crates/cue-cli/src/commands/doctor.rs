@@ -111,7 +111,7 @@ fn llm_line(llm: Option<&cue_core::config::LlmConfig>) -> String {
                 "LLM", config.base_url, config.model
             ),
             cue_core::config::LlmCredentialReadiness::Missing { api_key_env } => format!(
-                "{:<10} not ready  {} ({}, env var {api_key_env} is unset; set {api_key_env} or configure api_key_env = \"\" if authentication is not required)",
+                "{:<10} not ready  {} ({}, credential {api_key_env} is unavailable; set {api_key_env} or configure api_key_env = \"\" if authentication is not required)",
                 "LLM", config.base_url, config.model
             ),
         },
@@ -231,7 +231,7 @@ mod tests {
         let line = llm_line(Some(&configured));
         assert!(line.contains("https://openrouter.ai/api/v1"), "{line}");
         assert!(
-            line.contains("CURE_DEFINITELY_UNSET_VAR_12345 is unset"),
+            line.contains("credential CURE_DEFINITELY_UNSET_VAR_12345 is unavailable"),
             "{line}"
         );
         assert!(line.contains("not ready"), "{line}");

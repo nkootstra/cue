@@ -178,8 +178,8 @@ partial model tokens and does not create an additional visible summary file.
 
 When `--summary` is requested, cue first resolves every input and then checks
 the deterministic LLM configuration before doing media or output work. It
-fails immediately if no analysis gateway is configured or if the environment
-variable declared by `llm.api_key_env` is missing. This check still applies
+fails immediately if no analysis gateway is configured or if the credential
+declared by `llm.api_key_env` is unavailable. This check still applies
 when a previous analysis may be cached, so a requested summary never silently
 depends on cache state.
 
@@ -413,8 +413,8 @@ api_key_env = "CUE_LLM_API_KEY"             # key read from env, never stored
 
 Omitting `api_key_env` uses `CUE_LLM_API_KEY`. Any nonempty value, after
 trimming whitespace, declares an environment variable that must be present.
-`cue doctor` reports the configured LLM as not ready when that variable is
-missing and tells you which variable to set. Because analysis is optional,
+`cue doctor` reports the configured LLM as not ready when that credential is
+unavailable and tells you which variable to set. Because analysis is optional,
 this status does not make the required local transcription tooling unhealthy.
 
 For a gateway that intentionally accepts unauthenticated requests, explicitly

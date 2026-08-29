@@ -152,7 +152,9 @@ fn summary_batch_with_a_missing_credential_fails_before_creating_outputs() {
     let stderr = stderr(&output);
     assert!(stderr.contains("Stage: analyze"), "{stderr}");
     assert!(
-        stderr.contains("CUE_TEST_SUMMARY_CREDENTIAL_DEFINITELY_UNSET_4B87 is not set"),
+        stderr.contains(
+            "credential CUE_TEST_SUMMARY_CREDENTIAL_DEFINITELY_UNSET_4B87 is unavailable"
+        ),
         "{stderr}"
     );
     assert!(stderr.contains("api_key_env = \"\""), "{stderr}");
@@ -224,7 +226,7 @@ fn empty_summary_credential_fails_preflight() {
     let stderr = stderr(&output);
     assert!(stderr.contains("Stage: analyze"), "{stderr}");
     assert!(
-        stderr.contains("CUE_TEST_SUMMARY_EMPTY is not set"),
+        stderr.contains("credential CUE_TEST_SUMMARY_EMPTY is unavailable"),
         "{stderr}"
     );
     assert!(!output_dir.exists(), "{output_dir:?} should not exist");

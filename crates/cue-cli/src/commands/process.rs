@@ -259,7 +259,9 @@ fn preflight_summary(mode: ProcessMode, summary: bool, config: &cue_core::Config
     if let LlmCredentialReadiness::Missing { api_key_env } = llm.credential_readiness() {
         return Err(CueError::new(
             PipelineStage::Analyze,
-            format!("cannot produce the requested summary because {api_key_env} is not set"),
+            format!(
+                "cannot produce the requested summary because credential {api_key_env} is unavailable"
+            ),
         )
         .remedy(format!(
             "set {api_key_env}, or configure api_key_env = \"\" for an unauthenticated gateway"
