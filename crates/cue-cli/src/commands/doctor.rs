@@ -101,17 +101,20 @@ fn llm_line(llm: Option<&cue_core::config::LlmConfig>) -> String {
             "{:<10} not configured  no gateway — summaries/descriptions skipped",
             "LLM"
         ),
-        Some(config) => {
-            let key_state = if config.api_key().is_some() {
-                "key set".to_string()
-            } else {
-                format!("env var {} is unset", config.api_key_env)
-            };
-            format!(
-                "{:<10} ok       {} ({}, {key_state})",
+        Some(config) => match config.credential_readiness() {
+            cue_core::config::LlmCredentialReadiness::Unauthenticated => format!(
+                "{:<10} ok       {} ({}, authentication not required)",
                 "LLM", config.base_url, config.model
-            )
-        }
+            ),
+            cue_core::config::LlmCredentialReadiness::Available { api_key_env } => format!(
+                "{:<10} ok       {} ({}, env var {api_key_env} is set)",
+                "LLM", config.base_url, config.model
+            ),
+            cue_core::config::LlmCredentialReadiness::Missing { api_key_env } => format!(
+                "{:<10} not ready  {} ({}, env var {api_key_env} is unset; set {api_key_env} or configure api_key_env = \"\" if authentication is not required)",
+                "LLM", config.base_url, config.model
+            ),
+        },
     }
 }
 
@@ -219,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn llm_line_reports_key_state() {
+    fn llm_line_reports_a_missing_credential_as_not_ready_with_a_remedy() {
         let configured = cue_core::config::LlmConfig {
             base_url: "https://openrouter.ai/api/v1".into(),
             model: "test-model".into(),
@@ -231,6 +234,38 @@ mod tests {
             line.contains("CURE_DEFINITELY_UNSET_VAR_12345 is unset"),
             "{line}"
         );
+        assert!(line.contains("not ready"), "{line}");
+        assert!(line.contains("api_key_env = \"\""), "{line}");
+        assert!(!line.contains(" ok "), "{line}");
+    }
+
+    #[test]
+    fn llm_line_reports_a_present_credential_without_disclosing_it() {
+        let configured = cue_core::config::LlmConfig {
+            base_url: "https://gateway.example.com/v1".into(),
+            model: "test-model".into(),
+            api_key_env: "  PATH  ".into(),
+        };
+
+        let line = llm_line(Some(&configured));
+        assert!(line.contains(" ok "), "{line}");
+        assert!(line.contains("env var PATH is set"), "{line}");
+        assert!(!line.contains(&std::env::var("PATH").unwrap()), "{line}");
+    }
+
+    #[test]
+    fn llm_line_reports_explicitly_unauthenticated_gateways_as_ready() {
+        for api_key_env in ["", "  \t"] {
+            let configured = cue_core::config::LlmConfig {
+                base_url: "http://localhost:8765/v1".into(),
+                model: "test-model".into(),
+                api_key_env: api_key_env.into(),
+            };
+
+            let line = llm_line(Some(&configured));
+            assert!(line.contains(" ok "), "{line}");
+            assert!(line.contains("authentication not required"), "{line}");
+        }
     }
 
     #[test]
