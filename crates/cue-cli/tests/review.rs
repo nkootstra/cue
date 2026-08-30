@@ -63,7 +63,7 @@ fn review_json_surfaces_low_confidence_unmatched_rules_and_scope_conflicts() {
         String::from_utf8_lossy(&result.stderr)
     );
     let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
-    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["schema_version"], 2);
     let diagnostics = report["diagnostics"].as_array().unwrap();
     assert!(diagnostics.iter().any(|item| {
         item["id"] == "CUE-REVIEW-LOW-CONFIDENCE"
@@ -79,6 +79,83 @@ fn review_json_surfaces_low_confidence_unmatched_rules_and_scope_conflicts() {
             && item["winner"] == "CourseTelemetry"
             && item["shadowed"] == "ProjectTelemetry"
     }));
+}
+
+#[test]
+fn review_finds_code_term_typo_and_accepts_it_into_output_scope() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let source = root.join("lesson.mp4");
+    fs::write(&source, b"media").unwrap();
+    let output = root.join(".cue/lesson");
+    fs::create_dir_all(&output).unwrap();
+    fs::write(
+        output.join("cue.workspace.json"),
+        r#"{"schema_version":1,"source":"../../lesson.mp4"}"#,
+    )
+    .unwrap();
+    fs::write(root.join("Cargo.toml"), "manifest = cargo.toml\n").unwrap();
+    fs::write(root.join("foo.toml"), "manifest = foo.toml\n").unwrap();
+    fs::write(
+        output.join("transcript.json"),
+        r#"{
+  "schema_version": 1, "language": "en", "duration_ms": 100,
+  "words": [
+    {"text":"cargo","start_ms":0,"end_ms":40,"confidence":0.99,"speaker":null},
+    {"text":".tomo,","start_ms":50,"end_ms":100,"confidence":0.7633,"speaker":null}
+  ],
+  "segments": [{"start_ms":0,"end_ms":100,"text":"cargo .tomo,","word_start":0,"word_end":2}]
+}"#,
+    )
+    .unwrap();
+
+    let review = cue_command(root)
+        .args(["review", output.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        review.status.success(),
+        "{}",
+        String::from_utf8_lossy(&review.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&review.stdout).unwrap();
+    let candidate = report["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == "CUE-REVIEW-TERM-MISMATCH")
+        .unwrap();
+    assert_eq!(candidate["proposed"], "cargo.toml");
+    assert_eq!(candidate["candidate_id"], "term-0");
+    assert_eq!(candidate["observed"], "cargo .tomo,");
+
+    let accepted = cue_command(root)
+        .args(["review", output.to_str().unwrap(), "--accept", "term-0"])
+        .output()
+        .unwrap();
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(output.join("corrections.md")).unwrap(),
+        "cargo .tomo -> cargo.toml\n"
+    );
+
+    let corrected = cue_command(root)
+        .args(["correct", output.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        corrected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&corrected.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(output.join("transcript.txt")).unwrap(),
+        "cargo.toml,\n"
+    );
 }
 
 #[test]

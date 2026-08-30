@@ -75,7 +75,7 @@ Ollama optional, for S1 transcript cleanup. After installing, run
 | `cue <path>...` | Process one or more media files or directories through the full pipeline |
 | `cue transcribe <path>...` | Process paths through the canonical transcript only (no subtitles/analysis) |
 | `cue correct <file>.cue` | Rebuild an existing output from canonical JSON and apply corrections |
-| `cue review <file>.cue [--json]` | Report focused correction candidates without changing files |
+| `cue review <file>.cue [--json]` | Report focused and terminology correction candidates |
 | `cue verify <file>.cue [--json]` | Verify a completed output against its source, corrections, and artifact hashes |
 | `cue resume [ID-OR-PATH]` | Resume an incomplete recoverable batch; defaults to the newest one for the current directory |
 | `cue batches list` | List recent recoverable batches for the current directory |
@@ -335,15 +335,32 @@ Use the focused review command instead of rereading an entire transcript:
 ```bash
 cue review video.cue
 cue review video.cue --confidence-below 0.60 --json
+cue review video.cue --context-root /path/to/project --json
+cue review video.cue --accept term-0
 ```
 
 The report is read-only. It identifies low-confidence words, words that may
 have segment-level fallback timing, effective rules that do not match the
 canonical transcript, conflicting scoped rules, and ambiguous speaker turns
-when speaker assignments exist. Diagnostic IDs are stable; `--json` emits a
+when speaker assignments exist. Reviews also discover likely technical-term
+mistakes from bounded local source, documentation, configuration, and sibling
+transcript evidence. Discovery is generic and does not ship a framework or
+language vocabulary; use `--context-root` to add a project tree or
+`--no-terms` to disable it. Diagnostic IDs are stable; `--json` emits a
 versioned report suitable for agents and scripts. Candidates are evidence to
 review, not automatic corrections—the correct spelling still requires known
 context.
+
+Approve a terminology candidate explicitly by its review ID. This writes a
+scoped `corrections.md` beside the output but does not rebuild anything:
+
+```bash
+cue review video.cue --accept term-0
+cue correct video.cue
+```
+
+The canonical transcript remains unchanged; corrections are applied
+deterministically to derived text and subtitle artifacts.
 
 After applying and verifying a source-specific correction, promote it into an
 existing project, course, or folder directory so later files reuse it:
