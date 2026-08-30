@@ -139,17 +139,10 @@ impl ProcessingRequest {
             summary: cli.summary,
             stream: cli.stream,
             jobs: cli.jobs,
-            corrections: cli
-                .corrections
-                .as_deref()
-                .map(|path| absolute_path(cwd, path)),
+            corrections: cli.corrections.as_deref().map(|path| cwd.join(path)),
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "U4 wires the internal resume entrypoint into CLI dispatch"
-    )]
     fn from_recovery(intent: &ProcessingIntent, jobs: NonZeroUsize) -> Self {
         Self {
             mode: intent.mode.into(),
@@ -341,9 +334,9 @@ fn recovery_items(cwd: &Path, inputs: &[ResolvedInput]) -> Result<Vec<BatchItem>
             Ok(BatchItem {
                 position: u32::try_from(position)
                     .map_err(|_| CueError::general("batch has too many media items"))?,
-                source: absolute_path(cwd, &input.source),
-                workspace: absolute_path(cwd, &input.workspace),
-                published_base: absolute_path(cwd, &input.published_base),
+                source: cwd.join(&input.source),
+                workspace: cwd.join(&input.workspace),
+                published_base: cwd.join(&input.published_base),
                 state: ItemState::Pending,
             })
         })
@@ -449,28 +442,15 @@ where
     .await
 }
 
-fn absolute_path(cwd: &Path, path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_owned()
-    } else {
-        cwd.join(path)
-    }
-}
-
 /// Resume a selected recovery record without rediscovering directory inputs.
-/// Selection and user-facing command rendering are owned by the command layer
-/// added in U4; this entrypoint owns resolved-plan reconstruction and execution.
-#[allow(
-    dead_code,
-    reason = "U4 wires this internal entrypoint into CLI dispatch"
-)]
+/// This entrypoint owns resolved-plan reconstruction and execution.
 pub(crate) async fn resume_stored_batch(
     store: RecoveryStore,
     stored: StoredBatch,
     jobs: NonZeroUsize,
     config: impl FnOnce() -> Result<cue_core::Config>,
 ) -> Result<i32> {
-    let lock = match BatchLock::try_acquire(&stored.path)? {
+    let lock = match store.try_lock(&stored)? {
         LockAttempt::Acquired(lock) => lock,
         LockAttempt::Busy => {
             return Err(CueError::general(format!(
@@ -481,9 +461,7 @@ pub(crate) async fn resume_stored_batch(
         }
     };
 
-    let fresh = store.load_path(&stored.path)?;
-    let mut reconciled = false;
-    let updated = store.update(&fresh.path, |record| {
+    let stored = store.update(&stored.path, |record| {
         let positions = record
             .items
             .iter()
@@ -496,17 +474,12 @@ pub(crate) async fn resume_stored_batch(
             .map(|item| item.position)
             .collect::<Vec<_>>();
         for position in positions {
-            if record.reconcile_item(position, current_time_ms()?)?
-                != crate::batch_recovery::Reconciliation::Unchanged
-            {
-                reconciled = true;
-            }
+            record.reconcile_item(position, crate::batch_recovery::unix_time_ms()?)?;
         }
         Ok(())
     })?;
-    let stored = if reconciled { updated } else { fresh };
-
     if stored.record.is_complete() {
+        println!("Batch {} is already complete.", stored.record.id);
         return Ok(0);
     }
 
@@ -560,7 +533,6 @@ pub(crate) async fn resume_stored_batch(
     .await
 }
 
-#[allow(dead_code, reason = "used by the U4 resume entrypoint")]
 fn recovered_inputs(record: &crate::batch_recovery::BatchRecord) -> Vec<ResolvedInput> {
     let mut items = record
         .items
@@ -576,17 +548,6 @@ fn recovered_inputs(record: &crate::batch_recovery::BatchRecord) -> Vec<Resolved
             published_base: item.published_base.clone(),
         })
         .collect()
-}
-
-#[allow(dead_code, reason = "used by the U4 resume entrypoint")]
-fn current_time_ms() -> Result<u64> {
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| {
-            CueError::general("system clock is before the Unix epoch").because(error.to_string())
-        })?
-        .as_millis();
-    u64::try_from(millis).map_err(|_| CueError::general("system clock value is too large"))
 }
 
 fn preflight_summary(mode: ProcessMode, summary: bool, config: &cue_core::Config) -> Result<()> {
@@ -1215,31 +1176,31 @@ async fn process_file(
         artifacts.push(format!("subtitles.{}", format.extension()));
     }
     include_if_present(out_dir, &mut artifacts, "corrections.applied.json");
-    run_receipt.publish_with_outputs(out_dir, &artifacts, &published_outputs)?;
+    let requested_summary = if request.summary {
+        Some(analysis.as_ref().ok_or_else(|| {
+            CueError::new(
+                PipelineStage::Analyze,
+                format!("could not produce requested summary for {}", path.display()),
+            )
+            .remedy("configure a working analysis gateway and local S1 normalization model")
+        })?)
+    } else {
+        None
+    };
     crate::commands::output::remove_stale_published_outputs(
         &previous_published,
         &published_outputs,
     )?;
+    run_receipt.publish_with_outputs(out_dir, &artifacts, &published_outputs)?;
 
     events.send(PipelineEvent::Completed(PipelineStage::Render));
     events.message(format!(
         "\nDone. Transcript and subtitles written to {}/",
         out_dir.display()
     ));
-    if request.summary {
-        let Some(analysis) = &analysis else {
-            return Err(CueError::new(
-                PipelineStage::Analyze,
-                format!("could not produce requested summary for {}", path.display()),
-            )
-            .remedy("configure a working analysis gateway and local S1 normalization model"));
-        };
-        return Ok(ProcessResult {
-            summary: Some(cue_analysis::render_summary(analysis)),
-        });
-    }
-
-    Ok(ProcessResult { summary: None })
+    Ok(ProcessResult {
+        summary: requested_summary.map(cue_analysis::render_summary),
+    })
 }
 
 fn require_tool(binary: &str, purpose: &str) -> Result<PathBuf> {

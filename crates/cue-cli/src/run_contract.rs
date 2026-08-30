@@ -469,12 +469,7 @@ impl RunReceipt {
             ));
         }
         if let Some(attempt) = &self.batch_attempt
-            && (attempt.batch_id.is_empty()
-                || attempt.batch_id.len() > 96
-                || !attempt
-                    .batch_id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            && (!crate::batch_recovery::is_valid_batch_id(&attempt.batch_id)
                 || attempt.attempt_number == 0)
         {
             return Err(CueError::general(

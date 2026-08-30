@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use serde_json::json;
 
@@ -155,6 +155,52 @@ fn write_journal(environment: &TestEnvironment, journal: Journal<'_>) -> std::pa
     path
 }
 
+fn lock_batch(environment: &TestEnvironment, id: &str) -> std::fs::File {
+    let directory = environment.state.join("locks");
+    std::fs::create_dir_all(&directory).expect("create batch lock directory");
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(directory.join(format!("{id}.lock")))
+        .expect("open batch lock");
+    fs4::FileExt::try_lock(&lock).expect("hold batch lock");
+    lock
+}
+
+fn wait_for_path(path: &Path) {
+    for _ in 0..200 {
+        if path.exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("timed out waiting for {}", path.display());
+}
+
+fn wait_for_recovery_journal(environment: &TestEnvironment) -> std::path::PathBuf {
+    let directory = environment
+        .state
+        .join("batches")
+        .join(scope_key(&environment.cwd));
+    for _ in 0..200 {
+        if let Ok(entries) = std::fs::read_dir(&directory)
+            && let Some(path) = entries
+                .filter_map(std::result::Result::ok)
+                .map(|entry| entry.path())
+                .find(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "json")
+                })
+        {
+            return path;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("timed out waiting for a recovery journal");
+}
+
 #[test]
 fn resume_without_an_incomplete_batch_is_an_informative_no_op() {
     let environment = TestEnvironment::new();
@@ -170,6 +216,81 @@ fn resume_without_an_incomplete_batch_is_an_informative_no_op() {
         stdout(&output).contains("No incomplete batch to resume"),
         "{output:?}"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn killed_process_leaves_a_discoverable_resumable_batch() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let environment = TestEnvironment::new();
+    let first = environment.cwd.join("first.mp4");
+    let second = environment.cwd.join("second.mp4");
+    std::fs::write(&first, b"media").unwrap();
+    std::fs::write(&second, b"media").unwrap();
+
+    let fake_bin = environment._root.path().join("bin");
+    std::fs::create_dir(&fake_bin).unwrap();
+    let marker = environment._root.path().join("ffprobe-started");
+    let release = environment._root.path().join("release-ffprobe");
+    let ffprobe = fake_bin.join("ffprobe");
+    std::fs::write(
+        &ffprobe,
+        "#!/bin/sh\n: > \"$CUE_TEST_FFPROBE_MARKER\"\nwhile [ ! -e \"$CUE_TEST_FFPROBE_RELEASE\" ]; do sleep 0.05; done\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&ffprobe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let mut child = environment
+        .cue()
+        .args([&first, &second])
+        .env("PATH", path)
+        .env("CUE_TEST_FFPROBE_MARKER", &marker)
+        .env("CUE_TEST_FFPROBE_RELEASE", &release)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    wait_for_path(&marker);
+    let journal = wait_for_recovery_journal(&environment);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    std::fs::write(&release, b"release").unwrap();
+
+    let interrupted = environment
+        .cue()
+        .args(["batches", "show"])
+        .arg(&journal)
+        .output()
+        .unwrap();
+    assert!(interrupted.status.success(), "{interrupted:?}");
+    assert!(stdout(&interrupted).contains("Status: interrupted"));
+
+    std::fs::remove_file(first).unwrap();
+    std::fs::remove_file(second).unwrap();
+    let resumed = environment
+        .cue()
+        .arg("resume")
+        .arg(&journal)
+        .output()
+        .unwrap();
+    assert_eq!(resumed.status.code(), Some(1), "{resumed:?}");
+    let shown = environment
+        .cue()
+        .args(["batches", "show"])
+        .arg(&journal)
+        .output()
+        .unwrap();
+    let shown = stdout(&shown);
+    assert!(shown.contains("Status: incomplete"), "{shown}");
+    assert!(shown.contains("first.mp4 — missing, attempt 2"), "{shown}");
+    assert!(shown.contains("second.mp4 — missing, attempt 1"), "{shown}");
 }
 
 #[test]
@@ -243,9 +364,9 @@ fn batches_show_reports_recorded_intent_and_safe_ordered_item_details() {
     );
     let mut record: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    record["intent"]["language"] = json!("nl");
+    record["intent"]["language"] = json!("nl\u{1b}]8;;malicious");
     record["items"][1]["state"]["failure"]["summary"] =
-        json!("provider failed without private response content");
+        json!("provider failed \u{1b}[31mwithout private response content");
     record["items"][1]["state"]["failure"]["remedy"] =
         json!("check provider connectivity and resume");
     record["items"].as_array_mut().unwrap().reverse();
@@ -265,7 +386,10 @@ fn batches_show_reports_recorded_intent_and_safe_ordered_item_details() {
     assert!(output.status.success(), "{output:?}");
     let output = stdout(&output);
     assert!(output.contains("Mode: transcript-only"), "{output}");
-    assert!(output.contains("Language: nl"), "{output}");
+    assert!(
+        output.contains(r"Language: nl\u{1b}]8;;malicious"),
+        "{output}"
+    );
     assert!(output.contains("Status: interrupted"), "{output}");
     assert!(
         output.contains("Next action: cue resume batch-details"),
@@ -273,8 +397,12 @@ fn batches_show_reports_recorded_intent_and_safe_ordered_item_details() {
     );
     assert!(output.contains("attempt 2"), "{output}");
     assert!(output.contains("verification required"), "{output}");
-    assert!(output.contains("provider failed without private response content"));
+    assert!(
+        output.contains(r"provider failed \u{1b}[31mwithout private response content"),
+        "{output}"
+    );
     assert!(output.contains("check provider connectivity and resume"));
+    assert!(!output.contains('\u{1b}'), "{output}");
     let first = output.find("lesson-0.mp4").unwrap();
     let second = output.find("lesson-1.mp4").unwrap();
     let third = output.find("lesson-2.mp4").unwrap();
@@ -284,7 +412,7 @@ fn batches_show_reports_recorded_intent_and_safe_ordered_item_details() {
 }
 
 #[test]
-fn explicit_complete_batch_path_is_a_no_op_before_configuration_loading() {
+fn explicit_complete_batch_reconciles_before_loading_configuration() {
     let environment = TestEnvironment::new();
     let other_cwd = environment._root.path().join("other-cwd");
     std::fs::create_dir(&other_cwd).unwrap();
@@ -307,12 +435,8 @@ fn explicit_complete_batch_path_is_a_no_op_before_configuration_loading() {
         .output()
         .expect("run explicit cue resume");
 
-    assert!(output.status.success(), "{output:?}");
-    assert!(stdout(&output).contains("batch-complete is already complete"));
-    assert!(
-        !stderr(&output).contains("configuration file"),
-        "{output:?}"
-    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(stderr(&output).contains("configuration file"), "{output:?}");
 }
 
 #[test]
@@ -470,7 +594,7 @@ fn explicit_invalid_recovery_targets_fail_actionably() {
 #[test]
 fn locked_resume_target_reports_busy_before_loading_configuration() {
     let environment = TestEnvironment::new();
-    let path = write_journal(
+    write_journal(
         &environment,
         Journal {
             id: "batch-busy",
@@ -481,18 +605,7 @@ fn locked_resume_target_reports_busy_before_loading_configuration() {
         },
     );
     std::fs::write(environment.config.join("cue.toml"), b"invalid TOML = [").unwrap();
-    let lock_path = path.with_file_name(format!(
-        ".{}.lock",
-        path.file_name().unwrap().to_string_lossy()
-    ));
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(lock_path)
-        .unwrap();
-    fs4::FileExt::try_lock(&lock).expect("hold batch lock");
+    let _lock = lock_batch(&environment, "batch-busy");
 
     let output = environment
         .cue()
@@ -595,7 +708,7 @@ fn implicit_resume_never_crosses_working_directory_scope() {
 #[test]
 fn list_and_show_report_a_locked_running_batch_as_active() {
     let environment = TestEnvironment::new();
-    let path = write_journal(
+    write_journal(
         &environment,
         Journal {
             id: "batch-active",
@@ -605,18 +718,7 @@ fn list_and_show_report_a_locked_running_batch_as_active() {
             statuses: &["running"],
         },
     );
-    let lock_path = path.with_file_name(format!(
-        ".{}.lock",
-        path.file_name().unwrap().to_string_lossy()
-    ));
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(lock_path)
-        .unwrap();
-    fs4::FileExt::try_lock(&lock).expect("hold batch lock");
+    let _lock = lock_batch(&environment, "batch-active");
 
     let listed = environment
         .cue()

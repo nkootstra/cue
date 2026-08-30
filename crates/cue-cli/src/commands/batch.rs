@@ -123,7 +123,7 @@ where
         _batch_attempt: Option<crate::run_contract::BatchAttemptRef>,
     ) -> Result<Self::Output> {
         let position = self.position(input)?;
-        let started_at_ms = unix_time_ms()?;
+        let started_at_ms = crate::batch_recovery::unix_time_ms()?;
         let mut attempt_number = 0;
         {
             let _start = self
@@ -144,12 +144,10 @@ where
             attempt_number,
         };
 
-        let metadata = std::fs::metadata(&input.source);
-        let (result, unavailable) = match metadata {
-            Ok(metadata) if metadata.is_file() => {
-                (self.inner.process(input, Some(attempt)).await, false)
-            }
-            Ok(_) => (Err(non_file_source_error(&input.source)), false),
+        let (result, unavailable) = match crate::run_contract::is_regular_file(&input.source, true)
+        {
+            Ok(true) => (self.inner.process(input, Some(attempt)).await, false),
+            Ok(false) => (Err(non_file_source_error(&input.source)), false),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 (Err(missing_source_error(&input.source)), true)
             }
@@ -166,7 +164,7 @@ where
             ),
         };
 
-        let finished_at_ms = unix_time_ms()?;
+        let finished_at_ms = crate::batch_recovery::unix_time_ms()?;
         match result {
             Ok(value) => {
                 self.update_item(position, |item| item.complete(finished_at_ms))?;
@@ -204,16 +202,6 @@ fn non_file_source_error(source: &Path) -> CueError {
         format!("original source {} is not a regular file", source.display()),
     )
     .remedy("restore the original media file at this path and run cue resume")
-}
-
-fn unix_time_ms() -> Result<u64> {
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| {
-            CueError::general("system clock is before the Unix epoch").because(error.to_string())
-        })?
-        .as_millis();
-    u64::try_from(millis).map_err(|_| CueError::general("system clock value is too large"))
 }
 
 pub(super) struct BatchFailure<'a> {

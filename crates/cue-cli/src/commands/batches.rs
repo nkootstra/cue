@@ -36,7 +36,11 @@ fn list() -> Result<i32> {
                 );
             }
             BatchListing::Unreadable { path, reason } => {
-                println!("{}  unreadable  {}", path.display(), one_line(&reason));
+                println!(
+                    "{}  unreadable  {}",
+                    display_path(&path),
+                    terminal_text(&reason)
+                );
             }
         }
     }
@@ -54,11 +58,11 @@ fn show(target: &std::path::Path) -> Result<i32> {
         BatchActivity::Complete => println!("Next action: none; this batch is complete"),
         BatchActivity::Active => println!("Next action: wait for the active cue process"),
         BatchActivity::Incomplete | BatchActivity::Interrupted => {
-            println!("Next action: cue resume {}", target.display());
+            println!("Next action: cue resume {}", display_path(target));
         }
     }
-    println!("Recovery state: {}", stored.path.display());
-    println!("Working directory: {}", record.cwd.display());
+    println!("Recovery state: {}", display_path(&stored.path));
+    println!("Working directory: {}", display_path(&record.cwd));
     println!(
         "Mode: {}",
         match record.intent.mode {
@@ -68,7 +72,7 @@ fn show(target: &std::path::Path) -> Result<i32> {
     );
     println!(
         "Language: {}",
-        record.intent.language.as_deref().unwrap_or("auto")
+        terminal_text(record.intent.language.as_deref().unwrap_or("auto"))
     );
     println!(
         "Subtitle formats: {}",
@@ -88,7 +92,7 @@ fn show(target: &std::path::Path) -> Result<i32> {
             .intent
             .corrections
             .as_deref()
-            .map_or_else(|| "automatic".to_owned(), |path| path.display().to_string())
+            .map_or_else(|| "automatic".to_owned(), display_path)
     );
     println!("Items:");
     let mut items = record.items.iter().collect::<Vec<_>>();
@@ -106,7 +110,7 @@ fn show(target: &std::path::Path) -> Result<i32> {
         println!(
             "  {}. {} — {}, {}{}",
             item.position + 1,
-            item.source.display(),
+            display_path(&item.source),
             item_state_label(&item.state),
             attempt,
             verification
@@ -115,9 +119,9 @@ fn show(target: &std::path::Path) -> Result<i32> {
             let stage = failure
                 .stage
                 .map_or_else(|| "batch".to_owned(), |stage| stage.to_string());
-            println!("     {stage}: {}", one_line(&failure.summary));
+            println!("     {stage}: {}", terminal_text(&failure.summary));
             if let Some(remedy) = &failure.remedy {
-                println!("     Remedy: {}", one_line(remedy));
+                println!("     Remedy: {}", terminal_text(remedy));
             }
         }
     }
@@ -157,6 +161,18 @@ fn activity_label(activity: BatchActivity) -> &'static str {
     }
 }
 
-fn one_line(value: &str) -> String {
-    value.lines().next().unwrap_or(value).to_owned()
+fn display_path(path: &std::path::Path) -> String {
+    terminal_text(&path.to_string_lossy())
+}
+
+fn terminal_text(value: &str) -> String {
+    let mut rendered = String::new();
+    for character in value.lines().next().unwrap_or(value).chars() {
+        if character.is_control() {
+            rendered.extend(character.escape_default());
+        } else {
+            rendered.push(character);
+        }
+    }
+    rendered
 }

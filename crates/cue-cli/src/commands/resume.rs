@@ -19,10 +19,6 @@ pub async fn run(
         println!("No incomplete batch to resume in the current directory.");
         return Ok(0);
     };
-    if stored.record.is_complete() {
-        println!("Batch {} is already complete.", stored.record.id);
-        return Ok(0);
-    }
     crate::commands::process::resume_stored_batch(store, stored, jobs, config).await
 }
 

@@ -28,19 +28,7 @@ fn state_dir_from(
     xdg_state_home: Option<OsString>,
     home: Option<OsString>,
 ) -> Option<PathBuf> {
-    if let Some(dir) = cue_state_dir.filter(|value| !value.is_empty()) {
-        return Some(PathBuf::from(dir));
-    }
-
-    let base = xdg_state_home
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            home.filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-                .map(|home| home.join(".local/state"))
-        })?;
-    Some(base.join("cue"))
+    directory_from(cue_state_dir, xdg_state_home, home, ".local/state")
 }
 
 fn data_dir_from(
@@ -48,17 +36,26 @@ fn data_dir_from(
     xdg_data_home: Option<OsString>,
     home: Option<OsString>,
 ) -> Option<PathBuf> {
-    if let Some(dir) = cue_data_dir.filter(|value| !value.is_empty()) {
+    directory_from(cue_data_dir, xdg_data_home, home, ".local/share")
+}
+
+fn directory_from(
+    explicit: Option<OsString>,
+    xdg_home: Option<OsString>,
+    home: Option<OsString>,
+    home_suffix: &str,
+) -> Option<PathBuf> {
+    if let Some(dir) = explicit.filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(dir));
     }
 
-    let base = xdg_data_home
+    let base = xdg_home
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| {
             home.filter(|value| !value.is_empty())
                 .map(PathBuf::from)
-                .map(|home| home.join(".local/share"))
+                .map(|home| home.join(home_suffix))
         })?;
     Some(base.join("cue"))
 }

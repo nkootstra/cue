@@ -1,8 +1,4 @@
 //! Durable state for recoverable media batches.
-#![allow(
-    dead_code,
-    reason = "U1 defines the recovery boundary before later units integrate processing and commands"
-)]
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -16,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const BATCH_SCHEMA_VERSION: u32 = 1;
 const BATCH_DIRECTORY: &str = "batches";
+const LOCK_DIRECTORY: &str = "locks";
 static BATCH_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -406,13 +403,16 @@ fn require_absolute(path: &std::path::Path, label: &str) -> Result<()> {
     }
 }
 
-fn validate_id(id: &str) -> Result<()> {
-    if !id.is_empty()
+pub(crate) fn is_valid_batch_id(id: &str) -> bool {
+    !id.is_empty()
         && id.len() <= 96
         && id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
+}
+
+fn validate_id(id: &str) -> Result<()> {
+    if is_valid_batch_id(id) {
         Ok(())
     } else {
         Err(CueError::general("batch recovery state has an invalid ID"))
@@ -469,14 +469,13 @@ pub(crate) enum BatchActivity {
 }
 
 impl BatchLock {
-    pub(crate) fn try_acquire(record_path: &Path) -> Result<LockAttempt> {
-        let lock_path = lock_path(record_path)?;
+    fn try_acquire(lock_path: &Path, record_path: &Path) -> Result<LockAttempt> {
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(&lock_path)
+            .open(lock_path)
             .map_err(|error| {
                 CueError::general(format!(
                     "could not open batch recovery lock {}",
@@ -522,24 +521,31 @@ impl RecoveryStore {
         }
     }
 
+    pub(crate) fn try_lock(&self, stored: &StoredBatch) -> Result<LockAttempt> {
+        self.try_lock_id(&stored.record.id, &stored.path)
+    }
+
+    fn try_lock_id(&self, id: &str, record_path: &Path) -> Result<LockAttempt> {
+        validate_id(id)?;
+        let directory = self.root.join(LOCK_DIRECTORY);
+        std::fs::create_dir_all(&directory).map_err(|error| {
+            CueError::general(format!(
+                "could not create batch recovery lock directory {}",
+                directory.display()
+            ))
+            .because(error.to_string())
+        })?;
+        BatchLock::try_acquire(&directory.join(format!("{id}.lock")), record_path)
+    }
+
+    #[cfg(test)]
     pub(crate) fn create(
         &self,
         cwd: &Path,
         intent: ProcessingIntent,
         items: Vec<BatchItem>,
     ) -> Result<StoredBatch> {
-        let cwd = canonical_cwd(cwd)?;
-        let now = unix_time_ms()?;
-        let record = BatchRecord {
-            schema_version: BATCH_SCHEMA_VERSION,
-            id: new_batch_id(now),
-            cue_version: env!("CARGO_PKG_VERSION").to_owned(),
-            created_at_ms: now,
-            updated_at_ms: now,
-            cwd,
-            intent,
-            items,
-        };
+        let record = new_record(cwd, intent, items)?;
         let path = self.save(&record)?;
         Ok(StoredBatch { path, record })
     }
@@ -553,18 +559,7 @@ impl RecoveryStore {
         intent: ProcessingIntent,
         items: Vec<BatchItem>,
     ) -> Result<(StoredBatch, BatchLock)> {
-        let cwd = canonical_cwd(cwd)?;
-        let now = unix_time_ms()?;
-        let record = BatchRecord {
-            schema_version: BATCH_SCHEMA_VERSION,
-            id: new_batch_id(now),
-            cue_version: env!("CARGO_PKG_VERSION").to_owned(),
-            created_at_ms: now,
-            updated_at_ms: now,
-            cwd,
-            intent,
-            items,
-        };
+        let record = new_record(cwd, intent, items)?;
         let content = record.to_json()?;
         let _guard = self
             .mutation
@@ -579,7 +574,7 @@ impl RecoveryStore {
             .because(error.to_string())
         })?;
         let path = directory.join(format!("{}.json", record.id));
-        let lock = match BatchLock::try_acquire(&path)? {
+        let lock = match self.try_lock_id(&record.id, &path)? {
             LockAttempt::Acquired(lock) => lock,
             LockAttempt::Busy => {
                 return Err(CueError::general(format!(
@@ -592,6 +587,7 @@ impl RecoveryStore {
         Ok((StoredBatch { path, record }, lock))
     }
 
+    #[cfg(test)]
     pub(crate) fn save(&self, record: &BatchRecord) -> Result<PathBuf> {
         let _guard = self
             .mutation
@@ -600,6 +596,7 @@ impl RecoveryStore {
         self.save_locked(record)
     }
 
+    #[cfg(test)]
     fn save_locked(&self, record: &BatchRecord) -> Result<PathBuf> {
         let content = record.to_json()?;
         let scope = scope_key(&record.cwd);
@@ -636,14 +633,14 @@ impl RecoveryStore {
     }
 
     pub(crate) fn load_path(&self, path: &Path) -> Result<StoredBatch> {
-        let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        let is_regular = crate::run_contract::is_regular_file(path, false).map_err(|error| {
             CueError::general(format!(
                 "could not inspect batch recovery state {}",
                 path.display()
             ))
             .because(error.to_string())
         })?;
-        if !metadata.file_type().is_file() {
+        if !is_regular {
             return Err(CueError::general(format!(
                 "batch recovery target {} is not a regular file",
                 path.display()
@@ -764,7 +761,7 @@ impl RecoveryStore {
         if !stored.record.has_running_items() {
             return Ok(BatchActivity::Incomplete);
         }
-        match BatchLock::try_acquire(&stored.path)? {
+        match self.try_lock(stored)? {
             LockAttempt::Busy => Ok(BatchActivity::Active),
             LockAttempt::Acquired(lock) => {
                 drop(lock);
@@ -772,14 +769,6 @@ impl RecoveryStore {
             }
         }
     }
-}
-
-fn lock_path(record_path: &Path) -> Result<PathBuf> {
-    let name = record_path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| CueError::general("batch recovery state has an invalid file name"))?;
-    Ok(record_path.with_file_name(format!(".{name}.lock")))
 }
 
 fn listing_order(listing: &BatchListing) -> (u64, &str) {
@@ -808,7 +797,7 @@ fn scope_key(cwd: &Path) -> String {
     format!("cwd-{hash:016x}")
 }
 
-fn unix_time_ms() -> Result<u64> {
+pub(crate) fn unix_time_ms() -> Result<u64> {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|error| {
@@ -816,6 +805,20 @@ fn unix_time_ms() -> Result<u64> {
         })?
         .as_millis();
     u64::try_from(millis).map_err(|_| CueError::general("system clock value is too large"))
+}
+
+fn new_record(cwd: &Path, intent: ProcessingIntent, items: Vec<BatchItem>) -> Result<BatchRecord> {
+    let now = unix_time_ms()?;
+    Ok(BatchRecord {
+        schema_version: BATCH_SCHEMA_VERSION,
+        id: new_batch_id(now),
+        cue_version: env!("CARGO_PKG_VERSION").to_owned(),
+        created_at_ms: now,
+        updated_at_ms: now,
+        cwd: canonical_cwd(cwd)?,
+        intent,
+        items,
+    })
 }
 
 fn new_batch_id(now_ms: u64) -> String {
@@ -1043,17 +1046,42 @@ mod tests {
         let stored = store.load_path(&path).unwrap();
 
         assert_eq!(store.activity(&stored).unwrap(), BatchActivity::Interrupted);
-        let lock = match BatchLock::try_acquire(&path).unwrap() {
+        let lock = match store.try_lock(&stored).unwrap() {
             LockAttempt::Acquired(lock) => lock,
             LockAttempt::Busy => panic!("first lock should be available"),
         };
         assert!(matches!(
-            BatchLock::try_acquire(&path).unwrap(),
+            store.try_lock(&stored).unwrap(),
             LockAttempt::Busy
         ));
         assert_eq!(store.activity(&stored).unwrap(), BatchActivity::Active);
         drop(lock);
         assert_eq!(store.activity(&stored).unwrap(), BatchActivity::Interrupted);
+    }
+
+    #[test]
+    fn hard_linked_journal_aliases_share_the_batch_id_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::new(temp.path().join("state"));
+        let mut record = test_record(vec![ItemState::Pending]);
+        record.cwd = std::fs::canonicalize(temp.path()).unwrap();
+        absolutize_items(&mut record, temp.path());
+        let path = store.save(&record).unwrap();
+        let alias = temp.path().join("external-alias.json");
+        std::fs::hard_link(&path, &alias).unwrap();
+        let stored = store.load_path(&path).unwrap();
+        let aliased = store.load_path(&alias).unwrap();
+
+        let lock = match store.try_lock(&stored).unwrap() {
+            LockAttempt::Acquired(lock) => lock,
+            LockAttempt::Busy => panic!("first lock should be available"),
+        };
+
+        assert!(matches!(
+            store.try_lock(&aliased).unwrap(),
+            LockAttempt::Busy
+        ));
+        drop(lock);
     }
 
     #[test]
@@ -1068,12 +1096,12 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            BatchLock::try_acquire(&stored.path).unwrap(),
+            store.try_lock(&stored).unwrap(),
             LockAttempt::Busy
         ));
         drop(lock);
         assert!(matches!(
-            BatchLock::try_acquire(&stored.path).unwrap(),
+            store.try_lock(&stored).unwrap(),
             LockAttempt::Acquired(_)
         ));
     }
