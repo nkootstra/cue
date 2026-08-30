@@ -627,9 +627,10 @@ impl RecoveryStore {
         let mut record = self.load_path(path)?.record;
         update(&mut record)?;
         record.updated_at_ms = unix_time_ms()?.max(record.updated_at_ms);
-        let published = self.save_locked(&record)?;
+        let content = record.to_json()?;
+        self.writer.write(path, &content)?;
         Ok(StoredBatch {
-            path: published,
+            path: path.to_owned(),
             record,
         })
     }

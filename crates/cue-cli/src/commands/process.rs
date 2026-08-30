@@ -467,8 +467,8 @@ fn absolute_path(cwd: &Path, path: &Path) -> PathBuf {
 pub(crate) async fn resume_stored_batch(
     store: RecoveryStore,
     stored: StoredBatch,
-    config: &cue_core::Config,
     jobs: NonZeroUsize,
+    config: impl FnOnce() -> Result<cue_core::Config>,
 ) -> Result<i32> {
     let lock = match BatchLock::try_acquire(&stored.path)? {
         LockAttempt::Acquired(lock) => lock,
@@ -510,8 +510,9 @@ pub(crate) async fn resume_stored_batch(
         return Ok(0);
     }
 
+    let config = config()?;
     let request = ProcessingRequest::from_recovery(&stored.record.intent, jobs);
-    let mut effective_config = config.clone();
+    let mut effective_config = config;
     if request.mode == ProcessMode::Full {
         effective_config.subtitles.formats = stored.record.intent.subtitle_formats.clone();
     }

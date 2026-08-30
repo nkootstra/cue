@@ -34,6 +34,21 @@ async fn main() -> ExitCode {
 }
 
 async fn dispatch(mut cli: Cue) -> cue_core::Result<i32> {
+    if matches!(&cli.command, Some(Command::Resume(_)))
+        && (cli.language.is_some()
+            || cli.output.is_some()
+            || !cli.format.is_empty()
+            || cli.summary
+            || cli.stream
+            || cli.recursive
+            || cli.corrections.is_some()
+            || !cli.paths.is_empty())
+    {
+        return Err(cue_core::CueError::general(
+            "cue resume accepts only --jobs as a processing-policy override",
+        )
+        .remedy("remove media paths and artifact-affecting processing flags"));
+    }
     if cli.stream && !cli.summary {
         return Err(cue_core::CueError::general("--stream requires --summary"));
     }
@@ -101,6 +116,10 @@ async fn dispatch(mut cli: Cue) -> cue_core::Result<i32> {
             args,
             cli.output.as_deref().map(std::path::Path::new),
         )),
+        Some(Command::Resume(args)) => {
+            commands::resume::run(args.target.as_deref(), cli.jobs, load_resolved_config).await
+        }
+        Some(Command::Batches(args)) => commands::batches::run(args.command),
         None => {
             let mut config = load_resolved_config()?;
             if !cli.format.is_empty() {
