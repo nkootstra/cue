@@ -155,7 +155,7 @@ def is_review_report(path: Path) -> bool:
     if (
         not isinstance(report, dict)
         or type(report.get("schema_version")) is not int
-        or report["schema_version"] != 1
+        or report["schema_version"] not in {1, 2}
         or not isinstance(report.get("output"), str)
         or not report["output"]
         or not isinstance(report.get("confidence_below"), (int, float))

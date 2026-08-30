@@ -430,7 +430,7 @@ PY
     "$workspace/.baselines/with_skill-flywheel-transcript.json"
   printf 'open telemetry -> OpenTelemetry\n' > "$output/corrections.md"
   write_correction_receipt "$output/lesson.cue/corrections.applied.json"
-  printf '{"schema_version": 1, "output": "lesson.cue", "confidence_below": 0.75, "diagnostics": [{"id": "CUE-REVIEW-LOW-CONFIDENCE", "word": "open", "word_index": 0, "confidence": 0.4, "start_ms": 0, "end_ms": 300}]}\n' > "$output/review.json"
+  printf '{"schema_version": 2, "output": "lesson.cue", "confidence_below": 0.75, "diagnostics": [{"id": "CUE-REVIEW-LOW-CONFIDENCE", "word": "open", "word_index": 0, "confidence": 0.4, "start_ms": 0, "end_ms": 300}]}\n' > "$output/review.json"
   RECEIPT_HASH="$(python3 - "$output/lesson.cue/corrections.applied.json" "$GRADER" <<'PY'
 import importlib.util, pathlib, sys
 spec = importlib.util.spec_from_file_location("grader", sys.argv[2])
