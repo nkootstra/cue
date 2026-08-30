@@ -9,6 +9,7 @@
 //! Subtitles, normalization, and analysis come online in later phases.
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use cue_analysis::Analyzer as _;
@@ -18,8 +19,12 @@ use cue_core::{CueError, PipelineStage, Result};
 use cue_media::extract::extract_audio;
 use cue_transcription::Transcriber;
 
+use crate::batch_recovery::{
+    BatchItem, BatchLock, ItemState, LockAttempt, ProcessingIntent, RecoveryProcessMode,
+    RecoveryStore, StoredBatch,
+};
 use crate::cli::Cue;
-use crate::commands::batch::{KeyedLocks, MediaProcessor, process_inputs};
+use crate::commands::batch::{KeyedLocks, MediaProcessor, RecoverableProcessor, process_inputs};
 use crate::commands::inputs::{ResolvedInput, resolve_inputs};
 use crate::corrections::{CorrectionPlan, CorrectionScope};
 use crate::events::{FileEvents, FilePipelineEvent, RendererEvent};
@@ -97,6 +102,81 @@ pub enum ProcessMode {
     TranscriptOnly,
 }
 
+impl From<ProcessMode> for RecoveryProcessMode {
+    fn from(mode: ProcessMode) -> Self {
+        match mode {
+            ProcessMode::Full => Self::Full,
+            ProcessMode::TranscriptOnly => Self::TranscriptOnly,
+        }
+    }
+}
+
+impl From<RecoveryProcessMode> for ProcessMode {
+    fn from(mode: RecoveryProcessMode) -> Self {
+        match mode {
+            RecoveryProcessMode::Full => Self::Full,
+            RecoveryProcessMode::TranscriptOnly => Self::TranscriptOnly,
+        }
+    }
+}
+
+/// Artifact-affecting processing intent separated from parsed CLI state.
+#[derive(Debug, Clone)]
+pub(crate) struct ProcessingRequest {
+    mode: ProcessMode,
+    language: Option<String>,
+    summary: bool,
+    stream: bool,
+    jobs: NonZeroUsize,
+    corrections: Option<PathBuf>,
+}
+
+impl ProcessingRequest {
+    fn from_cli(cli: &Cue, mode: ProcessMode, cwd: &Path) -> Self {
+        Self {
+            mode,
+            language: cli.language.clone(),
+            summary: cli.summary,
+            stream: cli.stream,
+            jobs: cli.jobs,
+            corrections: cli
+                .corrections
+                .as_deref()
+                .map(|path| absolute_path(cwd, path)),
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "U4 wires the internal resume entrypoint into CLI dispatch"
+    )]
+    fn from_recovery(intent: &ProcessingIntent, jobs: NonZeroUsize) -> Self {
+        Self {
+            mode: intent.mode.into(),
+            language: intent.language.clone(),
+            summary: intent.summary,
+            stream: intent.stream,
+            jobs,
+            corrections: intent.corrections.clone(),
+        }
+    }
+
+    fn intent(&self, config: &cue_core::Config) -> ProcessingIntent {
+        ProcessingIntent {
+            mode: self.mode.into(),
+            language: self.language.clone(),
+            subtitle_formats: if self.mode == ProcessMode::Full {
+                config.subtitles.formats.clone()
+            } else {
+                Vec::new()
+            },
+            summary: self.summary,
+            stream: self.stream,
+            corrections: self.corrections.clone(),
+        }
+    }
+}
+
 impl ProcessMode {
     fn includes(self, stage: cue_core::PipelineStage) -> bool {
         use cue_core::PipelineStage;
@@ -147,15 +227,44 @@ async fn run_inner(
     cli: &Cue,
     config: &cue_core::Config,
 ) -> Result<i32> {
+    run_inner_with_store_factory(paths, mode, cli, config, RecoveryStore::from_environment).await
+}
+
+#[cfg(test)]
+async fn run_inner_with_store(
+    paths: &[PathBuf],
+    mode: ProcessMode,
+    cli: &Cue,
+    config: &cue_core::Config,
+    store: RecoveryStore,
+) -> Result<i32> {
+    run_inner_with_store_factory(paths, mode, cli, config, || Ok(store)).await
+}
+
+async fn run_inner_with_store_factory<F>(
+    paths: &[PathBuf],
+    mode: ProcessMode,
+    cli: &Cue,
+    config: &cue_core::Config,
+    recovery_store: F,
+) -> Result<i32>
+where
+    F: FnOnce() -> Result<RecoveryStore>,
+{
     if paths.is_empty() {
         print_usage_hint();
         return Ok(0);
     }
 
+    let cwd = std::env::current_dir().map_err(|error| {
+        CueError::general("could not determine the current directory").because(error.to_string())
+    })?;
+    let request = ProcessingRequest::from_cli(cli, mode, &cwd);
+
     // Resolve the complete batch before starting any media work. This keeps
     // discovery and output collisions from producing partial batches.
     let plan = resolve_inputs(paths, cli.recursive, cli.output.as_deref().map(Path::new))?;
-    preflight_summary(mode, cli.summary, config)?;
+    preflight_summary(request.mode, request.summary, config)?;
     if mode == ProcessMode::Full {
         for input in &plan.inputs {
             let layout = crate::commands::output::OutputLayout {
@@ -171,37 +280,109 @@ async fn run_inner(
     }
     let corrections = CorrectionPlan::prepare_batch(
         plan.inputs.iter().map(|input| input.workspace.as_path()),
-        cli.corrections.as_deref(),
+        request.corrections.as_deref(),
     )?;
 
+    if !plan.is_batch {
+        return run_resolved_plan(&request, &plan.inputs, false, config, corrections, None).await;
+    }
+
+    let store = recovery_store()?;
+    let (stored, lock) = store.create_and_lock(
+        &cwd,
+        request.intent(config),
+        recovery_items(&cwd, &plan.inputs)?,
+    )?;
+    let recovery = RecoveryExecution {
+        store,
+        positions: plan
+            .inputs
+            .iter()
+            .enumerate()
+            .map(|(position, input)| (input.source.clone(), position as u32))
+            .collect(),
+        stored,
+        _lock: lock,
+    };
+    run_resolved_plan(
+        &request,
+        &plan.inputs,
+        true,
+        config,
+        corrections,
+        Some(recovery),
+    )
+    .await
+}
+
+struct RecoveryExecution {
+    store: RecoveryStore,
+    positions: HashMap<PathBuf, u32>,
+    stored: StoredBatch,
+    _lock: BatchLock,
+}
+
+#[cfg(test)]
+fn create_recovery_batch(
+    store: &RecoveryStore,
+    cwd: &Path,
+    request: &ProcessingRequest,
+    config: &cue_core::Config,
+    inputs: &[ResolvedInput],
+) -> Result<StoredBatch> {
+    store.create(cwd, request.intent(config), recovery_items(cwd, inputs)?)
+}
+
+fn recovery_items(cwd: &Path, inputs: &[ResolvedInput]) -> Result<Vec<BatchItem>> {
+    inputs
+        .iter()
+        .enumerate()
+        .map(|(position, input)| {
+            Ok(BatchItem {
+                position: u32::try_from(position)
+                    .map_err(|_| CueError::general("batch has too many media items"))?,
+                source: absolute_path(cwd, &input.source),
+                workspace: absolute_path(cwd, &input.workspace),
+                published_base: absolute_path(cwd, &input.published_base),
+                state: ItemState::Pending,
+            })
+        })
+        .collect()
+}
+
+async fn run_resolved_plan(
+    request: &ProcessingRequest,
+    inputs: &[ResolvedInput],
+    is_batch: bool,
+    config: &cue_core::Config,
+    corrections: HashMap<PathBuf, CorrectionPlan>,
+    recovery: Option<RecoveryExecution>,
+) -> Result<i32> {
     // Stage logic emits events; the renderer decides presentation. Core
     // pipeline behavior never depends on terminal output.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let renderer = tokio::spawn(crate::events::run_renderer(rx, plan.is_batch, cli.summary));
+    let renderer = tokio::spawn(crate::events::run_renderer(rx, is_batch, request.summary));
 
     let processor = PipelineProcessor {
-        cli,
+        request,
         config,
         events: &tx,
-        mode,
         corrections,
         s1_readiness: tokio::sync::OnceCell::new(),
         cache_work: KeyedLocks::default(),
-        batch_attempts: HashMap::new(),
     };
-    let result = process_inputs(
-        &plan.inputs,
-        plan.is_batch,
-        cli.jobs,
-        &processor,
-        |input, result| {
-            if cli.summary && cli.stream {
-                print_summary(input, result);
-            }
-            cli.summary && !cli.stream
-        },
-    )
-    .await;
+    let result = if let Some(recovery) = recovery {
+        let recovered = RecoverableProcessor::new(
+            &processor,
+            recovery.store,
+            recovery.stored.path,
+            recovery.stored.record.id,
+            recovery.positions,
+        );
+        process_with_renderer(inputs, is_batch, request, &recovered).await
+    } else {
+        process_with_renderer(inputs, is_batch, request, &processor).await
+    };
 
     if let Ok(outcome) = &result {
         for failure in &outcome.failures {
@@ -223,18 +404,18 @@ async fn run_inner(
     }
 
     result.map(|outcome| {
-        if cli.summary && !cli.stream {
+        if request.summary && !request.stream {
             for success in &outcome.successes {
                 print_summary(success.input, &success.value);
             }
         }
-        if plan.is_batch {
+        if is_batch {
             let batch_line = format!(
                 "Batch complete: {} succeeded, {} failed",
                 outcome.succeeded(),
                 outcome.failures.len()
             );
-            if cli.summary {
+            if request.summary {
                 eprintln!("{batch_line}");
             } else {
                 println_line(&batch_line);
@@ -242,6 +423,169 @@ async fn run_inner(
         }
         outcome.exit_code()
     })
+}
+
+async fn process_with_renderer<'a, P>(
+    inputs: &'a [ResolvedInput],
+    is_batch: bool,
+    request: &ProcessingRequest,
+    processor: &P,
+) -> Result<crate::commands::batch::BatchOutcome<'a, ProcessResult>>
+where
+    P: MediaProcessor<Output = ProcessResult>,
+{
+    process_inputs(
+        inputs,
+        is_batch,
+        request.jobs,
+        processor,
+        |input, result| {
+            if request.summary && request.stream {
+                print_summary(input, result);
+            }
+            request.summary && !request.stream
+        },
+    )
+    .await
+}
+
+fn absolute_path(cwd: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_owned()
+    } else {
+        cwd.join(path)
+    }
+}
+
+/// Resume a selected recovery record without rediscovering directory inputs.
+/// Selection and user-facing command rendering are owned by the command layer
+/// added in U4; this entrypoint owns resolved-plan reconstruction and execution.
+#[allow(
+    dead_code,
+    reason = "U4 wires this internal entrypoint into CLI dispatch"
+)]
+pub(crate) async fn resume_stored_batch(
+    store: RecoveryStore,
+    stored: StoredBatch,
+    config: &cue_core::Config,
+    jobs: NonZeroUsize,
+) -> Result<i32> {
+    let lock = match BatchLock::try_acquire(&stored.path)? {
+        LockAttempt::Acquired(lock) => lock,
+        LockAttempt::Busy => {
+            return Err(CueError::general(format!(
+                "batch {} is already being processed",
+                stored.record.id
+            ))
+            .remedy("wait for the active cue process to finish"));
+        }
+    };
+
+    let fresh = store.load_path(&stored.path)?;
+    let mut reconciled = false;
+    let updated = store.update(&fresh.path, |record| {
+        let positions = record
+            .items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.state,
+                    ItemState::Running { .. } | ItemState::Complete { .. }
+                )
+            })
+            .map(|item| item.position)
+            .collect::<Vec<_>>();
+        for position in positions {
+            if record.reconcile_item(position, current_time_ms()?)?
+                != crate::batch_recovery::Reconciliation::Unchanged
+            {
+                reconciled = true;
+            }
+        }
+        Ok(())
+    })?;
+    let stored = if reconciled { updated } else { fresh };
+
+    if stored.record.is_complete() {
+        return Ok(0);
+    }
+
+    let request = ProcessingRequest::from_recovery(&stored.record.intent, jobs);
+    let mut effective_config = config.clone();
+    if request.mode == ProcessMode::Full {
+        effective_config.subtitles.formats = stored.record.intent.subtitle_formats.clone();
+    }
+    preflight_summary(request.mode, request.summary, &effective_config)?;
+
+    let eligible = recovered_inputs(&stored.record);
+    if request.mode == ProcessMode::Full {
+        for input in &eligible {
+            let layout = crate::commands::output::OutputLayout {
+                workspace: input.workspace.clone(),
+                published_base: input.published_base.clone(),
+            };
+            crate::commands::output::preflight_subtitles(
+                &layout,
+                effective_config.subtitles.formats.iter().copied(),
+                false,
+            )?;
+        }
+    }
+    let corrections = CorrectionPlan::prepare_batch_from_cwd(
+        eligible.iter().map(|input| input.workspace.as_path()),
+        request.corrections.as_deref(),
+        &stored.record.cwd,
+    )?;
+    let positions = stored
+        .record
+        .items
+        .iter()
+        .map(|item| (item.source.clone(), item.position))
+        .collect();
+    let recovery = RecoveryExecution {
+        store,
+        positions,
+        stored,
+        _lock: lock,
+    };
+    run_resolved_plan(
+        &request,
+        &eligible,
+        true,
+        &effective_config,
+        corrections,
+        Some(recovery),
+    )
+    .await
+}
+
+#[allow(dead_code, reason = "used by the U4 resume entrypoint")]
+fn recovered_inputs(record: &crate::batch_recovery::BatchRecord) -> Vec<ResolvedInput> {
+    let mut items = record
+        .items
+        .iter()
+        .filter(|item| !item.state.is_complete())
+        .collect::<Vec<_>>();
+    items.sort_unstable_by_key(|item| item.position);
+    items
+        .into_iter()
+        .map(|item| ResolvedInput {
+            source: item.source.clone(),
+            workspace: item.workspace.clone(),
+            published_base: item.published_base.clone(),
+        })
+        .collect()
+}
+
+#[allow(dead_code, reason = "used by the U4 resume entrypoint")]
+fn current_time_ms() -> Result<u64> {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| {
+            CueError::general("system clock is before the Unix epoch").because(error.to_string())
+        })?
+        .as_millis();
+    u64::try_from(millis).map_err(|_| CueError::general("system clock value is too large"))
 }
 
 fn preflight_summary(mode: ProcessMode, summary: bool, config: &cue_core::Config) -> Result<()> {
@@ -287,20 +631,22 @@ struct ProcessResult {
 }
 
 struct PipelineProcessor<'a> {
-    cli: &'a Cue,
+    request: &'a ProcessingRequest,
     config: &'a cue_core::Config,
     events: &'a tokio::sync::mpsc::UnboundedSender<FilePipelineEvent>,
-    mode: ProcessMode,
     corrections: HashMap<PathBuf, CorrectionPlan>,
     s1_readiness: tokio::sync::OnceCell<bool>,
     cache_work: KeyedLocks,
-    batch_attempts: HashMap<PathBuf, BatchAttemptRef>,
 }
 
 impl MediaProcessor for PipelineProcessor<'_> {
     type Output = ProcessResult;
 
-    async fn process(&self, input: &ResolvedInput) -> Result<ProcessResult> {
+    async fn process(
+        &self,
+        input: &ResolvedInput,
+        batch_attempt: Option<BatchAttemptRef>,
+    ) -> Result<ProcessResult> {
         let correction = self.corrections.get(&input.workspace).ok_or_else(|| {
             CueError::general(format!(
                 "no correction plan prepared for {}",
@@ -308,23 +654,21 @@ impl MediaProcessor for PipelineProcessor<'_> {
             ))
         })?;
         let context = FileContext {
-            cli: self.cli,
+            request: self.request,
             config: self.config,
             events: FileEvents::new(input.source.clone(), self.events.clone()),
-            mode: self.mode,
             correction,
             cache_work: &self.cache_work,
-            batch_attempt: self.batch_attempts.get(&input.workspace).cloned(),
+            batch_attempt,
         };
         process_file(input, &context, &self.s1_readiness).await
     }
 }
 
 struct FileContext<'a> {
-    cli: &'a Cue,
+    request: &'a ProcessingRequest,
     config: &'a cue_core::Config,
     events: FileEvents,
-    mode: ProcessMode,
     correction: &'a CorrectionPlan,
     cache_work: &'a KeyedLocks,
     batch_attempt: Option<BatchAttemptRef>,
@@ -337,9 +681,8 @@ fn initial_run_receipt(
     context: &FileContext<'_>,
 ) -> Result<RunReceipt> {
     let FileContext {
-        cli,
+        request,
         config,
-        mode,
         correction,
         ..
     } = context;
@@ -363,7 +706,7 @@ fn initial_run_receipt(
             endpoint: None,
         },
     ];
-    if *mode == ProcessMode::Full {
+    if request.mode == ProcessMode::Full {
         providers.push(ProviderIdentity {
             stage: cue_core::PipelineStage::Normalize,
             provider: config.normalization.provider.clone(),
@@ -384,12 +727,15 @@ fn initial_run_receipt(
     Ok(RunReceipt {
         schema_version: crate::run_contract::SCHEMA_VERSION,
         cue_version: env!("CARGO_PKG_VERSION").into(),
-        mode: mode.receipt_name(),
+        mode: request.mode.receipt_name(),
         source: TrackedFile::from_digest(
             crate::run_contract::tracked_reference(output_dir, source)?,
             source_hash,
         ),
-        configuration: crate::run_contract::configuration_snapshot(config, cli.language.as_deref()),
+        configuration: crate::run_contract::configuration_snapshot(
+            config,
+            request.language.as_deref(),
+        ),
         providers,
         stages: vec![StageRecord::new(
             cue_core::PipelineStage::Inspect,
@@ -420,10 +766,10 @@ async fn process_file(
 ) -> Result<ProcessResult> {
     use cue_core::{PipelineEvent, PipelineStage};
 
-    let cli = context.cli;
+    let request = context.request;
     let config = context.config;
     let events = &context.events;
-    let mode = context.mode;
+    let mode = request.mode;
     let correction = context.correction;
     let path = &input.source;
     let out_dir = &input.workspace;
@@ -487,7 +833,7 @@ async fn process_file(
     // ---- Transcribe -----------------------------------------------------
     let options = cue_transcription::TranscriptionOptions {
         model: config.transcription.model.clone(),
-        language: cli.language.clone(),
+        language: request.language.clone(),
     };
 
     // Any output-affecting input participates in the logical key. JsonCache
@@ -879,7 +1225,7 @@ async fn process_file(
         "\nDone. Transcript and subtitles written to {}/",
         out_dir.display()
     ));
-    if cli.summary {
+    if request.summary {
         let Some(analysis) = &analysis else {
             return Err(CueError::new(
                 PipelineStage::Analyze,
@@ -1020,7 +1366,189 @@ fn media_summary(media: &Media) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
+
     use super::*;
+
+    fn test_cli(paths: Vec<PathBuf>) -> Cue {
+        Cue {
+            verbose: false,
+            language: None,
+            output: None,
+            format: Vec::new(),
+            summary: false,
+            stream: false,
+            recursive: false,
+            jobs: NonZeroUsize::new(1).unwrap(),
+            corrections: None,
+            paths,
+            command: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn correction_preflight_failure_creates_no_recovery_journal() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first.mp4");
+        let second = temp.path().join("second.mp4");
+        std::fs::write(&first, b"media").unwrap();
+        std::fs::write(&second, b"media").unwrap();
+        let mut cli = test_cli(vec![first.clone(), second.clone()]);
+        cli.corrections = Some(temp.path().join("missing-corrections.md"));
+        let store = RecoveryStore::new(temp.path().join("state"));
+
+        let result = run_inner_with_store(
+            &[first, second],
+            ProcessMode::Full,
+            &cli,
+            &cue_core::Config::default(),
+            store.clone(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(
+            store
+                .list_scope(&std::env::current_dir().unwrap())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn summary_readiness_failure_creates_no_recovery_journal() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = [
+            temp.path().join("first.mp4"),
+            temp.path().join("second.mp4"),
+        ];
+        for path in &paths {
+            std::fs::write(path, b"media").unwrap();
+        }
+        let mut cli = test_cli(paths.to_vec());
+        cli.summary = true;
+        let store = RecoveryStore::new(temp.path().join("state"));
+
+        let result = run_inner_with_store(
+            &paths,
+            ProcessMode::Full,
+            &cli,
+            &cue_core::Config::default(),
+            store.clone(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(
+            store
+                .list_scope(&std::env::current_dir().unwrap())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn recovered_inputs_use_frozen_membership_in_original_position_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let request = ProcessingRequest {
+            mode: ProcessMode::TranscriptOnly,
+            language: None,
+            summary: false,
+            stream: false,
+            jobs: NonZeroUsize::new(1).unwrap(),
+            corrections: None,
+        };
+        let originals = ["first.mp4", "second.mp4"]
+            .into_iter()
+            .map(|name| ResolvedInput {
+                source: temp.path().join(name),
+                workspace: temp.path().join(format!("{name}.cue")),
+                published_base: temp.path().join(name.trim_end_matches(".mp4")),
+            })
+            .collect::<Vec<_>>();
+        for input in &originals {
+            std::fs::write(&input.source, b"media").unwrap();
+        }
+        let store = RecoveryStore::new(temp.path().join("state"));
+        let mut stored = create_recovery_batch(
+            &store,
+            temp.path(),
+            &request,
+            &cue_core::Config::default(),
+            &originals,
+        )
+        .unwrap();
+        stored.record.items.reverse();
+        std::fs::write(temp.path().join("added-later.mp4"), b"new media").unwrap();
+
+        let inputs = recovered_inputs(&stored.record);
+
+        assert_eq!(
+            inputs
+                .iter()
+                .map(|input| input.source.file_name().unwrap())
+                .collect::<Vec<_>>(),
+            ["first.mp4", "second.mp4"]
+        );
+    }
+
+    #[test]
+    fn full_batch_intent_records_resolved_formats_and_absolute_artifact_paths() {
+        use cue_core::config::SubtitleFormat;
+
+        let temp = tempfile::tempdir().unwrap();
+        let request = ProcessingRequest {
+            mode: ProcessMode::Full,
+            language: Some("nl".into()),
+            summary: true,
+            stream: true,
+            jobs: NonZeroUsize::new(2).unwrap(),
+            corrections: Some(temp.path().join("corrections.md")),
+        };
+        let mut config = cue_core::Config::default();
+        config.subtitles.formats = vec![SubtitleFormat::Vtt, SubtitleFormat::Srt];
+        let input = ResolvedInput {
+            source: PathBuf::from("lesson.mp4"),
+            workspace: PathBuf::from("lesson.cue"),
+            published_base: PathBuf::from("lesson"),
+        };
+        let store = RecoveryStore::new(temp.path().join("state"));
+
+        let stored =
+            create_recovery_batch(&store, temp.path(), &request, &config, &[input]).unwrap();
+
+        assert_eq!(
+            stored.record.intent.subtitle_formats,
+            [SubtitleFormat::Vtt, SubtitleFormat::Srt]
+        );
+        assert_eq!(stored.record.intent.language.as_deref(), Some("nl"));
+        assert!(stored.record.intent.summary);
+        assert!(stored.record.intent.stream);
+        assert!(stored.record.items[0].source.is_absolute());
+        assert!(stored.record.items[0].workspace.is_absolute());
+        assert!(stored.record.items[0].published_base.is_absolute());
+    }
+
+    #[test]
+    fn recovered_request_changes_only_current_job_limit() {
+        let intent = ProcessingIntent {
+            mode: RecoveryProcessMode::Full,
+            language: Some("en".into()),
+            subtitle_formats: vec![cue_core::config::SubtitleFormat::Vtt],
+            summary: true,
+            stream: false,
+            corrections: Some(PathBuf::from("/recorded/corrections.md")),
+        };
+
+        let request = ProcessingRequest::from_recovery(&intent, NonZeroUsize::new(4).unwrap());
+
+        assert_eq!(request.jobs.get(), 4);
+        assert_eq!(request.mode, ProcessMode::Full);
+        assert_eq!(request.language, intent.language);
+        assert_eq!(request.summary, intent.summary);
+        assert_eq!(request.stream, intent.stream);
+        assert_eq!(request.corrections, intent.corrections);
+    }
 
     #[test]
     fn output_directory_failures_are_attributed_to_render() {

@@ -544,6 +544,54 @@ impl RecoveryStore {
         Ok(StoredBatch { path, record })
     }
 
+    /// Publish a new batch only after acquiring the lock that will guard its
+    /// initial execution. Readers can therefore never observe a new journal
+    /// in an unlocked handoff window.
+    pub(crate) fn create_and_lock(
+        &self,
+        cwd: &Path,
+        intent: ProcessingIntent,
+        items: Vec<BatchItem>,
+    ) -> Result<(StoredBatch, BatchLock)> {
+        let cwd = canonical_cwd(cwd)?;
+        let now = unix_time_ms()?;
+        let record = BatchRecord {
+            schema_version: BATCH_SCHEMA_VERSION,
+            id: new_batch_id(now),
+            cue_version: env!("CARGO_PKG_VERSION").to_owned(),
+            created_at_ms: now,
+            updated_at_ms: now,
+            cwd,
+            intent,
+            items,
+        };
+        let content = record.to_json()?;
+        let _guard = self
+            .mutation
+            .lock()
+            .map_err(|_| CueError::general("batch recovery state lock was poisoned"))?;
+        let directory = self.root.join(BATCH_DIRECTORY).join(scope_key(&record.cwd));
+        std::fs::create_dir_all(&directory).map_err(|error| {
+            CueError::general(format!(
+                "could not create batch recovery directory {}",
+                directory.display()
+            ))
+            .because(error.to_string())
+        })?;
+        let path = directory.join(format!("{}.json", record.id));
+        let lock = match BatchLock::try_acquire(&path)? {
+            LockAttempt::Acquired(lock) => lock,
+            LockAttempt::Busy => {
+                return Err(CueError::general(format!(
+                    "new batch recovery state {} is unexpectedly busy",
+                    record.id
+                )));
+            }
+        };
+        self.writer.write(&path, &content)?;
+        Ok((StoredBatch { path, record }, lock))
+    }
+
     pub(crate) fn save(&self, record: &BatchRecord) -> Result<PathBuf> {
         let _guard = self
             .mutation
@@ -1005,6 +1053,28 @@ mod tests {
         assert_eq!(store.activity(&stored).unwrap(), BatchActivity::Active);
         drop(lock);
         assert_eq!(store.activity(&stored).unwrap(), BatchActivity::Interrupted);
+    }
+
+    #[test]
+    fn create_and_lock_publishes_state_with_its_execution_lock_held() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::new(temp.path().join("state"));
+        let mut record = test_record(vec![ItemState::Pending]);
+        absolutize_items(&mut record, temp.path());
+
+        let (stored, lock) = store
+            .create_and_lock(temp.path(), record.intent, record.items)
+            .unwrap();
+
+        assert!(matches!(
+            BatchLock::try_acquire(&stored.path).unwrap(),
+            LockAttempt::Busy
+        ));
+        drop(lock);
+        assert!(matches!(
+            BatchLock::try_acquire(&stored.path).unwrap(),
+            LockAttempt::Acquired(_)
+        ));
     }
 
     #[test]

@@ -63,6 +63,20 @@ impl CorrectionPlan {
         output_dirs: impl IntoIterator<Item = &'a Path>,
         explicit: Option<&Path>,
     ) -> Result<HashMap<PathBuf, Self>> {
+        let current_dir = std::env::current_dir().map_err(|error| {
+            CueError::general("could not determine the current directory")
+                .because(error.to_string())
+        })?;
+        Self::prepare_batch_from_cwd(output_dirs, explicit, &current_dir)
+    }
+
+    /// Prepare a recovered batch using the original invocation directory as
+    /// the boundary for implicit manifest discovery.
+    pub(crate) fn prepare_batch_from_cwd<'a>(
+        output_dirs: impl IntoIterator<Item = &'a Path>,
+        explicit: Option<&Path>,
+        discovery_cwd: &Path,
+    ) -> Result<HashMap<PathBuf, Self>> {
         if let Some(path) = explicit {
             if !path.exists() {
                 return Err(CueError::general(format!(
@@ -89,7 +103,7 @@ impl CorrectionPlan {
         output_dirs
             .into_iter()
             .map(|output_dir| {
-                let manifests = find_manifests(output_dir, None)?;
+                let manifests = find_manifests_from_cwd(output_dir, None, discovery_cwd)?;
                 if manifests.is_empty() {
                     return Ok((output_dir.to_path_buf(), Self::None));
                 }
@@ -257,6 +271,17 @@ fn find_manifests(
     output_dir: &Path,
     explicit: Option<&Path>,
 ) -> Result<Vec<(PathBuf, ManifestSource)>> {
+    let current_dir = std::env::current_dir().map_err(|error| {
+        CueError::general("could not determine the current directory").because(error.to_string())
+    })?;
+    find_manifests_from_cwd(output_dir, explicit, &current_dir)
+}
+
+fn find_manifests_from_cwd(
+    output_dir: &Path,
+    explicit: Option<&Path>,
+    discovery_cwd: &Path,
+) -> Result<Vec<(PathBuf, ManifestSource)>> {
     if let Some(path) = explicit {
         if !path.exists() {
             return Err(CueError::general(format!(
@@ -273,19 +298,12 @@ fn find_manifests(
         manifests.push((in_output, ManifestSource::OutputDirectory));
     }
 
-    let current_dir = std::env::current_dir().map_err(|error| {
-        CueError::general("could not determine the current directory").because(error.to_string())
-    })?;
-    let current_dir = std::fs::canonicalize(&current_dir).unwrap_or(current_dir);
+    let current_dir =
+        std::fs::canonicalize(discovery_cwd).unwrap_or_else(|_| discovery_cwd.to_path_buf());
     let absolute_output = if output_dir.is_absolute() {
         output_dir.to_path_buf()
     } else {
-        std::env::current_dir()
-            .map_err(|error| {
-                CueError::general("could not determine the current directory")
-                    .because(error.to_string())
-            })?
-            .join(output_dir)
+        current_dir.join(output_dir)
     };
     let absolute_output = std::fs::canonicalize(&absolute_output).unwrap_or_else(|_| {
         absolute_output
@@ -1031,6 +1049,24 @@ mod tests {
         let plans = CorrectionPlan::prepare_batch([output.as_path()], None).unwrap();
 
         assert!(matches!(plans.get(&output), Some(CorrectionPlan::None)));
+    }
+
+    #[test]
+    fn recovered_batch_discovers_corrections_from_the_recorded_working_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let recorded_cwd = temp.path().join("recorded");
+        let output = recorded_cwd.join("course/lesson.cue");
+        std::fs::create_dir_all(&output).unwrap();
+        let manifest = recorded_cwd.join("corrections.md");
+        std::fs::write(&manifest, "open telemetry -> OpenTelemetry\n").unwrap();
+
+        let plans = CorrectionPlan::prepare_batch_from_cwd([output.as_path()], None, &recorded_cwd)
+            .unwrap();
+        let CorrectionPlan::Apply(plan) = plans.get(&output).unwrap() else {
+            panic!("expected correction discovery to use the recorded cwd");
+        };
+
+        assert_eq!(plan.manifests[0].path, manifest.canonicalize().unwrap());
     }
 
     #[test]
