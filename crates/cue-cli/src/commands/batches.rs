@@ -4,13 +4,14 @@ use crate::batch_recovery::{
     BatchActivity, BatchListing, ItemState, RecoveryProcessMode, RecoveryStore,
 };
 use crate::cli::BatchesCommand;
+use crate::render::println_line;
 
 pub fn run(command: Option<BatchesCommand>) -> Result<i32> {
     match command {
         Some(BatchesCommand::List) => list(),
         Some(BatchesCommand::Show(args)) => show(&args.target),
         None => {
-            println!("Usage: cue batches <COMMAND>\n\nCommands:\n  list\n  show <ID-OR-PATH>");
+            println_line("Usage: cue batches <COMMAND>\n\nCommands:\n  list\n  show <ID-OR-PATH>");
             Ok(0)
         }
     }
@@ -20,27 +21,27 @@ fn list() -> Result<i32> {
     let store = RecoveryStore::from_environment()?;
     let listings = store.list_scope(&std::env::current_dir()?)?;
     if listings.is_empty() {
-        println!("No batches found for the current directory.");
+        println_line("No batches found for the current directory.");
         return Ok(0);
     }
     for listing in listings {
         match listing {
             BatchListing::Readable(stored) => {
                 let counts = stored.record.counts();
-                println!(
+                println_line(&format!(
                     "{}  {}  {}/{} complete",
                     stored.record.id,
                     activity_label(store.activity(&stored)?),
                     counts.complete,
                     stored.record.items.len()
-                );
+                ));
             }
             BatchListing::Unreadable { path, reason } => {
-                println!(
+                println_line(&format!(
                     "{}  unreadable  {}",
                     display_path(&path),
                     terminal_text(&reason)
-                );
+                ));
             }
         }
     }
@@ -52,29 +53,29 @@ fn show(target: &std::path::Path) -> Result<i32> {
     let stored = crate::commands::resume::select_explicit(&store, target)?;
     let record = &stored.record;
     let activity = store.activity(&stored)?;
-    println!("Batch: {}", record.id);
-    println!("Status: {}", activity_label(activity));
+    println_line(&format!("Batch: {}", record.id));
+    println_line(&format!("Status: {}", activity_label(activity)));
     match activity {
-        BatchActivity::Complete => println!("Next action: none; this batch is complete"),
-        BatchActivity::Active => println!("Next action: wait for the active cue process"),
+        BatchActivity::Complete => println_line("Next action: none; this batch is complete"),
+        BatchActivity::Active => println_line("Next action: wait for the active cue process"),
         BatchActivity::Incomplete | BatchActivity::Interrupted => {
-            println!("Next action: cue resume {}", display_path(target));
+            println_line(&format!("Next action: cue resume {}", display_path(target)));
         }
     }
-    println!("Recovery state: {}", display_path(&stored.path));
-    println!("Working directory: {}", display_path(&record.cwd));
-    println!(
+    println_line(&format!("Recovery state: {}", display_path(&stored.path)));
+    println_line(&format!("Working directory: {}", display_path(&record.cwd)));
+    println_line(&format!(
         "Mode: {}",
         match record.intent.mode {
             RecoveryProcessMode::Full => "full",
             RecoveryProcessMode::TranscriptOnly => "transcript-only",
         }
-    );
-    println!(
+    ));
+    println_line(&format!(
         "Language: {}",
         terminal_text(record.intent.language.as_deref().unwrap_or("auto"))
-    );
-    println!(
+    ));
+    println_line(&format!(
         "Subtitle formats: {}",
         record
             .intent
@@ -83,18 +84,18 @@ fn show(target: &std::path::Path) -> Result<i32> {
             .map(|format| format.extension())
             .collect::<Vec<_>>()
             .join(", ")
-    );
-    println!("Summary: {}", yes_no(record.intent.summary));
-    println!("Stream: {}", yes_no(record.intent.stream));
-    println!(
+    ));
+    println_line(&format!("Summary: {}", yes_no(record.intent.summary)));
+    println_line(&format!("Stream: {}", yes_no(record.intent.stream)));
+    println_line(&format!(
         "Corrections: {}",
         record
             .intent
             .corrections
             .as_deref()
             .map_or_else(|| "automatic".to_owned(), display_path)
-    );
-    println!("Items:");
+    ));
+    println_line("Items:");
     let mut items = record.items.iter().collect::<Vec<_>>();
     items.sort_unstable_by_key(|item| item.position);
     for item in items {
@@ -107,21 +108,24 @@ fn show(target: &std::path::Path) -> Result<i32> {
         } else {
             ""
         };
-        println!(
+        println_line(&format!(
             "  {}. {} — {}, {}{}",
             item.position + 1,
             display_path(&item.source),
             item_state_label(&item.state),
             attempt,
             verification
-        );
+        ));
         if let Some(failure) = item_failure(&item.state) {
             let stage = failure
                 .stage
                 .map_or_else(|| "batch".to_owned(), |stage| stage.to_string());
-            println!("     {stage}: {}", terminal_text(&failure.summary));
+            println_line(&format!(
+                "     {stage}: {}",
+                terminal_text(&failure.summary)
+            ));
             if let Some(remedy) = &failure.remedy {
-                println!("     Remedy: {}", terminal_text(remedy));
+                println_line(&format!("     Remedy: {}", terminal_text(remedy)));
             }
         }
     }

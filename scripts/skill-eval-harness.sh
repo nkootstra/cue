@@ -460,7 +460,7 @@ PY
 
   output="$workspace/eval-recover-batch/with_skill/outputs"
   mkdir -p "$output"
-  printf 'export CUE_STATE_DIR="$PWD/.cue-state"\n1. cue batches show\n2. cue resume\n3. cue batches show\n' \
+  printf 'export CUE_STATE_DIR="$PWD/.cue-state"\n1. cue batches show batch-eval-recovery\n2. cue resume batch-eval-recovery\n3. cue batches show batch-eval-recovery\n' \
     > "$output/recovery-steps.txt"
   printf 'Batch remains incomplete: missing lesson-03.mp4\n' \
     > "$output/recovery-report.txt"

@@ -41,6 +41,16 @@ check_fail() {
   fi
 }
 
+mtime_ns() {
+  python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$1"
+}
+
+mtime_is_unchanged() {
+  local path="$1"
+  local expected="$2"
+  test -f "$path" && test "$(mtime_ns "$path")" = "$expected"
+}
+
 echo "== build gates =="
 check "fmt"        bash -c "cd $ROOT && cargo fmt --check"
 check "build"      bash -c "cd $ROOT && cargo build --workspace --all-targets -q"
@@ -226,12 +236,12 @@ check "batches list exposes incomplete ID" bash -c "recovery_output=\"\$(cd '$RE
 check "batches show exposes missing retry" bash -c "cd '$RECOVERY_CWD' && env CUE_STATE_DIR='$RECOVERY_STATE' '$CUE' batches show '$RECOVERY_BATCH_ID' | grep -q '02-retry.mp3.*missing'"
 check "first batch receipt is attempt-bound schema v3" bash -c "python3 -c \"import json; d=json.load(open('$RECOVERY_FIRST_RECEIPT')); assert d['schema_version']==3; assert d['batch_attempt']['batch_id']=='$RECOVERY_BATCH_ID'; assert d['batch_attempt']['item_position']==0; assert d['batch_attempt']['attempt_number']==1\""
 touch -t 200001010000 "$RECOVERY_FIRST_RECEIPT"
-RECOVERY_FIRST_MTIME="$(stat -f '%m' "$RECOVERY_FIRST_RECEIPT")"
+RECOVERY_FIRST_MTIME="$(mtime_ns "$RECOVERY_FIRST_RECEIPT")"
 
 cp "$RECOVERY_ROOT/02-retry.mp3" "$RECOVERY_MEDIA/02-retry.mp3"
 cp "$SPEECH_MP3" "$RECOVERY_MEDIA/03-added-later.mp3"
 check "default resume repairs only original membership" recovery_cue resume
-check "verified prior success is not regenerated" bash -c "test -f '$RECOVERY_FIRST_RECEIPT' && test \"\$(stat -f '%m' '$RECOVERY_FIRST_RECEIPT')\" = '$RECOVERY_FIRST_MTIME'"
+check "verified prior success is not regenerated" mtime_is_unchanged "$RECOVERY_FIRST_RECEIPT" "$RECOVERY_FIRST_MTIME"
 check "failed original receives a second attempt" bash -c "python3 -c \"import json; d=json.load(open('$RECOVERY_SECOND_WORKSPACE/cue.run.json')); assert d['schema_version']==3; assert d['batch_attempt']['batch_id']=='$RECOVERY_BATCH_ID'; assert d['batch_attempt']['item_position']==1; assert d['batch_attempt']['attempt_number']==2\""
 check_fail "new directory media is excluded from frozen batch" test -e "$RECOVERY_OUT/03-added-later.srt"
 check_fail "new directory media gets no hidden workspace" test -e "$RECOVERY_OUT/.cue/03-added-later"
@@ -241,7 +251,7 @@ check "transcript-only recovery dispatch seam" bash -c "cd '$ROOT' && cargo test
 
 echo
 echo "== skill =="
-check "skill help"         $CUE skill --help
+check "skill help"         "$CUE" skill --help
 check "skill smoke script"  bash -n scripts/test_skill_install.sh
 check "SKILL.md frontmatter" bash -c "grep -q '^name: transcribe' skills/transcribe/SKILL.md && grep -q '^description:' skills/transcribe/SKILL.md"
 check "evals.json valid"   bash -c "python3 -c \"import json; d=json.load(open('skills/transcribe/evals/evals.json')); assert len(d['evals'])>=2; assert all(c['assertions'] for c in d['evals'])\""

@@ -1081,6 +1081,8 @@ async fn process_file(
         }
     };
 
+    let requested_summary = validate_requested_summary(request.summary, analysis.as_ref(), path)?;
+
     // ---- Render ---------------------------------------------------------
     drop(cache_work);
     events.send(PipelineEvent::Started(PipelineStage::Render));
@@ -1176,17 +1178,6 @@ async fn process_file(
         artifacts.push(format!("subtitles.{}", format.extension()));
     }
     include_if_present(out_dir, &mut artifacts, "corrections.applied.json");
-    let requested_summary = if request.summary {
-        Some(analysis.as_ref().ok_or_else(|| {
-            CueError::new(
-                PipelineStage::Analyze,
-                format!("could not produce requested summary for {}", path.display()),
-            )
-            .remedy("configure a working analysis gateway and local S1 normalization model")
-        })?)
-    } else {
-        None
-    };
     crate::commands::output::remove_stale_published_outputs(
         &previous_published,
         &published_outputs,
@@ -1200,6 +1191,24 @@ async fn process_file(
     ));
     Ok(ProcessResult {
         summary: requested_summary.map(cue_analysis::render_summary),
+    })
+}
+
+fn validate_requested_summary<'a>(
+    requested: bool,
+    analysis: Option<&'a cue_core::Analysis>,
+    path: &Path,
+) -> Result<Option<&'a cue_core::Analysis>> {
+    if !requested {
+        return Ok(None);
+    }
+
+    analysis.map(Some).ok_or_else(|| {
+        CueError::new(
+            PipelineStage::Analyze,
+            format!("could not produce requested summary for {}", path.display()),
+        )
+        .remedy("configure a working analysis gateway and local S1 normalization model")
     })
 }
 
@@ -1533,6 +1542,29 @@ mod tests {
 
         assert_eq!(text_err.stage(), Some(cue_core::PipelineStage::Render));
         assert_eq!(json_err.stage(), Some(cue_core::PipelineStage::Render));
+    }
+
+    #[test]
+    fn requested_summary_requires_analysis_before_rendering() {
+        let input = Path::new("lesson.mp4");
+
+        let error = validate_requested_summary(true, None, input).unwrap_err();
+        let failure = error.persistent_failure();
+
+        assert_eq!(failure.stage, Some(PipelineStage::Analyze));
+        assert_eq!(
+            failure.summary,
+            "could not produce requested summary for lesson.mp4"
+        );
+        assert_eq!(
+            failure.remedy.as_deref(),
+            Some("configure a working analysis gateway and local S1 normalization model")
+        );
+        assert!(
+            validate_requested_summary(false, None, input)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

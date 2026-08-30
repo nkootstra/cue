@@ -105,7 +105,7 @@
       "files": [],
       "assertions": [
         {"name": "recovery uses the isolated seeded state", "type": "contains", "path": "eval-recover-batch/with_skill/outputs/recovery-steps.txt", "value": "export CUE_STATE_DIR=\"$PWD/.cue-state\"", "case_insensitive": false},
-        {"name": "recovery follows inspect resume inspect order", "type": "contains", "path": "eval-recover-batch/with_skill/outputs/recovery-steps.txt", "value": "1. cue batches show\n2. cue resume\n3. cue batches show", "case_insensitive": false},
+        {"name": "recovery follows inspect resume inspect order", "type": "contains", "path": "eval-recover-batch/with_skill/outputs/recovery-steps.txt", "value": "1. cue batches show batch-eval-recovery\n2. cue resume batch-eval-recovery\n3. cue batches show batch-eval-recovery", "case_insensitive": false},
         {"name": "final report remains truthful about missing work", "type": "contains", "path": "eval-recover-batch/with_skill/outputs/recovery-report.txt", "value": "Batch remains incomplete: missing lesson-03.mp4", "case_insensitive": false},
         {"name": "final report does not claim completion", "type": "not_contains", "path": "eval-recover-batch/with_skill/outputs/recovery-report.txt", "value": "Batch complete", "case_insensitive": true}
       ]
