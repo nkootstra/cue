@@ -109,9 +109,14 @@ impl ReviewDiagnostic {
                 format!("segment {segment_index} has ambiguous speaker assignments")
             }
             Self::TermMismatch {
-                observed, proposed, ..
+                candidate_id,
+                observed,
+                proposed,
+                ..
             } => {
-                format!("possible terminology mismatch: {observed:?} -> {proposed:?}")
+                format!(
+                    "possible terminology mismatch [{candidate_id}]: {observed:?} -> {proposed:?}"
+                )
             }
         }
     }
@@ -399,11 +404,38 @@ mod tests {
                 speakers: vec!["speaker-1".to_owned(), "speaker-2".to_owned()],
                 has_unassigned_words: false,
             },
+            ReviewDiagnostic::TermMismatch {
+                candidate_id: "term-0".to_owned(),
+                observed: ".tomo".to_owned(),
+                proposed: "cargo.toml".to_owned(),
+                word_index: 0,
+                confidence: Some(0.7),
+                score: 0.75,
+                evidence: Vec::new(),
+            },
         ];
 
         for diagnostic in diagnostics {
             let serialized = serde_json::to_value(&diagnostic).unwrap();
             assert_eq!(serialized["id"], diagnostic.id());
         }
+    }
+
+    #[test]
+    fn terminology_message_includes_acceptance_id() {
+        let diagnostic = ReviewDiagnostic::TermMismatch {
+            candidate_id: "term-7".to_owned(),
+            observed: ".tomo".to_owned(),
+            proposed: "cargo.toml".to_owned(),
+            word_index: 7,
+            confidence: Some(0.7),
+            score: 0.75,
+            evidence: Vec::new(),
+        };
+
+        assert_eq!(
+            diagnostic.message(),
+            "possible terminology mismatch [term-7]: \".tomo\" -> \"cargo.toml\""
+        );
     }
 }
