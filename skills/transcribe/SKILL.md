@@ -253,11 +253,17 @@ reapply the same decisions without changing the raw transcript.
    ```bash
    cue review <file>.cue
    cue review <file>.cue --json
+   cue review <file>.cue --context-root /path/to/project --json
    ```
 
    The report is read-only. Low confidence, possible fallback timing,
-   unmatched rules, scoped conflicts, and speaker ambiguity are candidates to
-   investigate—not facts and not permission to guess.
+   unmatched rules, scoped conflicts, speaker ambiguity, and likely technical
+   term mismatches are candidates to investigate—not facts and not permission
+   to guess. Terminology discovery uses bounded local source, configuration,
+   documentation, and non-authoritative sibling transcripts; it does not ship
+   a fixed language or framework vocabulary. Use `--no-terms` to disable it.
+   Approve a candidate explicitly with `cue review <file>.cue --accept
+   <candidate-id>`, then run `cue correct` to rebuild derived artifacts.
 2. Identify **only** places where the text conflicts with known context —
    misheard names, wrong technical terms, garbled proper nouns. Do **not**
    rewrite style, fillers, phrasing, or anything that does not conflict with

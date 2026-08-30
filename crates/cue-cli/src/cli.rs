@@ -231,6 +231,15 @@ pub struct ReviewArgs {
     /// Report words with confidence below this value
     #[usage(long, default = "0.75")]
     pub confidence_below: f32,
+    /// Add a project root to the local terminology evidence search
+    #[usage(long)]
+    pub context_root: Option<PathBuf>,
+    /// Disable local terminology discovery for this review
+    #[usage(long)]
+    pub no_terms: bool,
+    /// Accept a terminology candidate by its stable review ID
+    #[usage(long)]
+    pub accept: Option<String>,
     /// Emit a machine-readable JSON report
     #[usage(long)]
     pub json: bool,

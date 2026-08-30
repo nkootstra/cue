@@ -9,6 +9,7 @@ mod events;
 mod logging;
 mod render;
 mod run_contract;
+mod terminology;
 mod verification;
 
 use std::process::ExitCode;

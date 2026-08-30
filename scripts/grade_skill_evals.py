@@ -116,6 +116,7 @@ REVIEW_DIAGNOSTICS = {
     "CUE-REVIEW-UNMATCHED-RULE",
     "CUE-REVIEW-SCOPE-CONFLICT",
     "CUE-REVIEW-AMBIGUOUS-SPEAKER-TURN",
+    "CUE-REVIEW-TERM-MISMATCH",
 }
 
 
@@ -155,7 +156,7 @@ def is_review_report(path: Path) -> bool:
     if (
         not isinstance(report, dict)
         or type(report.get("schema_version")) is not int
-        or report["schema_version"] != 1
+        or report["schema_version"] not in {1, 2}
         or not isinstance(report.get("output"), str)
         or not report["output"]
         or not isinstance(report.get("confidence_below"), (int, float))
@@ -194,6 +195,37 @@ def is_review_report(path: Path) -> bool:
             return all(
                 isinstance(diagnostic.get(field), str)
                 for field in ("find", "winner", "shadowed", "winner_manifest", "shadowed_manifest")
+            )
+        if diagnostic_id == "CUE-REVIEW-TERM-MISMATCH":
+            confidence = diagnostic.get("confidence")
+            score = diagnostic.get("score")
+            evidence = diagnostic.get("evidence")
+            return (
+                all(
+                    isinstance(diagnostic.get(field), str)
+                    for field in ("candidate_id", "observed", "proposed")
+                )
+                and is_int(diagnostic.get("word_index"))
+                and (
+                    confidence is None
+                    or (
+                        isinstance(confidence, (int, float))
+                        and not isinstance(confidence, bool)
+                        and 0 <= confidence <= 1
+                    )
+                )
+                and isinstance(score, (int, float))
+                and not isinstance(score, bool)
+                and 0 <= score <= 1
+                and isinstance(evidence, list)
+                and all(
+                    isinstance(item, dict)
+                    and isinstance(item.get("path"), str)
+                    and is_int(item.get("line"))
+                    and isinstance(item.get("source_kind"), str)
+                    and type(item.get("authoritative")) is bool
+                    for item in evidence
+                )
             )
         return (
             is_int(diagnostic.get("segment_index"))

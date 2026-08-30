@@ -14,6 +14,16 @@ struct ReviewReport {
     output: String,
     confidence_below: f32,
     diagnostics: Vec<ReviewDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    accepted: Option<AcceptedCandidate>,
+}
+
+#[derive(serde::Serialize)]
+struct AcceptedCandidate {
+    id: String,
+    find: String,
+    replace: String,
+    manifest: String,
 }
 
 #[derive(serde::Serialize)]
@@ -54,6 +64,16 @@ enum ReviewDiagnostic {
         speakers: Vec<String>,
         has_unassigned_words: bool,
     },
+    #[serde(rename = "CUE-REVIEW-TERM-MISMATCH")]
+    TermMismatch {
+        candidate_id: String,
+        observed: String,
+        proposed: String,
+        word_index: usize,
+        confidence: Option<f32>,
+        score: f32,
+        evidence: Vec<crate::terminology::Evidence>,
+    },
 }
 
 impl ReviewDiagnostic {
@@ -64,6 +84,7 @@ impl ReviewDiagnostic {
             Self::UnmatchedRule { .. } => "CUE-REVIEW-UNMATCHED-RULE",
             Self::ScopeConflict { .. } => "CUE-REVIEW-SCOPE-CONFLICT",
             Self::AmbiguousSpeakerTurn { .. } => "CUE-REVIEW-AMBIGUOUS-SPEAKER-TURN",
+            Self::TermMismatch { .. } => "CUE-REVIEW-TERM-MISMATCH",
         }
     }
 
@@ -87,13 +108,36 @@ impl ReviewDiagnostic {
             Self::AmbiguousSpeakerTurn { segment_index, .. } => {
                 format!("segment {segment_index} has ambiguous speaker assignments")
             }
+            Self::TermMismatch {
+                candidate_id,
+                observed,
+                proposed,
+                ..
+            } => {
+                format!(
+                    "possible terminology mismatch [{candidate_id}]: {observed:?} -> {proposed:?}"
+                )
+            }
         }
     }
 }
 
 pub fn run(args: ReviewArgs, corrections: Option<&Path>, output_root: Option<&Path>) -> i32 {
     let result = crate::commands::correct::resolve_output_dir_at(&args.output, output_root)
-        .and_then(|output_dir| review_output(&output_dir, corrections, args.confidence_below));
+        .and_then(|output_dir| {
+            let mut report = review_output(
+                &output_dir,
+                corrections,
+                args.confidence_below,
+                !args.no_terms,
+                args.context_root.as_deref(),
+            )?;
+            if let Some(id) = args.accept.as_deref() {
+                let _output_lock = crate::run_contract::OutputLock::acquire(&output_dir)?;
+                report.accepted = Some(accept_candidate(&output_dir, &report, id)?);
+            }
+            Ok(report)
+        });
 
     match result {
         Ok(report) if args.json => match serde_json::to_string_pretty(&report) {
@@ -118,6 +162,13 @@ pub fn run(args: ReviewArgs, corrections: Option<&Path>, output_root: Option<&Pa
                     report.diagnostics.len()
                 ));
             }
+            if let Some(accepted) = &report.accepted {
+                println_line(&format!(
+                    "Accepted {}: {} -> {}",
+                    accepted.id, accepted.find, accepted.replace
+                ));
+                println_line("Run `cue correct` for this output to rebuild derived artifacts.");
+            }
             0
         }
         Err(error) => {
@@ -131,6 +182,8 @@ fn review_output(
     output_dir: &Path,
     explicit: Option<&Path>,
     confidence_below: f32,
+    terms_enabled: bool,
+    context_root: Option<&Path>,
 ) -> Result<ReviewReport> {
     if !(0.0..=1.0).contains(&confidence_below) {
         return Err(CueError::general(
@@ -163,6 +216,25 @@ fn review_output(
                 });
             }
             _ => {}
+        }
+    }
+
+    if terms_enabled {
+        for candidate in crate::terminology::find_candidates(
+            output_dir,
+            &transcript,
+            confidence_below,
+            context_root,
+        )? {
+            diagnostics.push(ReviewDiagnostic::TermMismatch {
+                candidate_id: candidate.id,
+                observed: candidate.observed,
+                proposed: candidate.proposed,
+                word_index: candidate.word_index,
+                confidence: candidate.confidence,
+                score: candidate.score,
+                evidence: candidate.evidence,
+            });
         }
     }
 
@@ -235,10 +307,63 @@ fn review_output(
     }
 
     Ok(ReviewReport {
-        schema_version: 1,
+        schema_version: 2,
         output: output_dir.to_string_lossy().into_owned(),
         confidence_below,
         diagnostics,
+        accepted: None,
+    })
+}
+
+fn accept_candidate(
+    output_dir: &Path,
+    report: &ReviewReport,
+    id: &str,
+) -> Result<AcceptedCandidate> {
+    let ReviewDiagnostic::TermMismatch { observed, proposed, candidate_id, .. } = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| matches!(diagnostic, ReviewDiagnostic::TermMismatch { candidate_id, .. } if candidate_id == id))
+        .ok_or_else(|| CueError::general(format!("unknown or stale terminology candidate {id:?}")))? else {
+        unreachable!()
+    };
+    let manifest = output_dir.join("corrections.md");
+    let mut content = match std::fs::read_to_string(&manifest) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(
+                CueError::general(format!("could not read {}", manifest.display()))
+                    .because(error.to_string()),
+            );
+        }
+    };
+    let find = observed.trim_end_matches(|c: char| c.is_ascii_punctuation());
+    let rule = format!("{} -> {}", find, proposed);
+    let existing = cue_core::correct::parse_manifest(&content)?;
+    if let Some(current) = existing
+        .iter()
+        .find(|current| current.old.eq_ignore_ascii_case(find))
+    {
+        if !current.new.eq_ignore_ascii_case(proposed) {
+            return Err(CueError::general(format!(
+                "corrections.md already maps {find:?} to {:?}",
+                current.new
+            )));
+        }
+    } else {
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str(&rule);
+        content.push('\n');
+        crate::run_contract::write_atomic(&manifest, content.as_bytes())?;
+    }
+    Ok(AcceptedCandidate {
+        id: candidate_id.clone(),
+        find: find.to_owned(),
+        replace: proposed.clone(),
+        manifest: manifest.display().to_string(),
     })
 }
 
@@ -279,11 +404,38 @@ mod tests {
                 speakers: vec!["speaker-1".to_owned(), "speaker-2".to_owned()],
                 has_unassigned_words: false,
             },
+            ReviewDiagnostic::TermMismatch {
+                candidate_id: "term-0".to_owned(),
+                observed: ".tomo".to_owned(),
+                proposed: "cargo.toml".to_owned(),
+                word_index: 0,
+                confidence: Some(0.7),
+                score: 0.75,
+                evidence: Vec::new(),
+            },
         ];
 
         for diagnostic in diagnostics {
             let serialized = serde_json::to_value(&diagnostic).unwrap();
             assert_eq!(serialized["id"], diagnostic.id());
         }
+    }
+
+    #[test]
+    fn terminology_message_includes_acceptance_id() {
+        let diagnostic = ReviewDiagnostic::TermMismatch {
+            candidate_id: "term-7".to_owned(),
+            observed: ".tomo".to_owned(),
+            proposed: "cargo.toml".to_owned(),
+            word_index: 7,
+            confidence: Some(0.7),
+            score: 0.75,
+            evidence: Vec::new(),
+        };
+
+        assert_eq!(
+            diagnostic.message(),
+            "possible terminology mismatch [term-7]: \".tomo\" -> \"cargo.toml\""
+        );
     }
 }

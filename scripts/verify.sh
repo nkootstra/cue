@@ -302,7 +302,7 @@ check "correct wrote receipt"          bash -c "python3 -c \"import json; d=json
 check "correct kept canonical json"   bash -c "grep -q 'John Dough' $VERIFY_DIR/talk.cue/transcript.json"
 check "correct kept normalized"        bash -c "grep -q 'UNCHANGED' '$VERIFY_DIR/talk.cue/normalized.json'"
 check "correct kept analysis"         bash -c "grep -q 'UNCHANGED' $VERIFY_DIR/talk.cue/analysis.json"
-check "review emits versioned JSON" bash -c "$CUE review '$VERIFY_DIR/talk.cue' --json | python3 -c \"import json,sys; d=json.load(sys.stdin); assert d['schema_version']==1; assert isinstance(d['diagnostics'], list)\""
+check "review emits versioned JSON" bash -c "$CUE review '$VERIFY_DIR/talk.cue' --json | python3 -c \"import json,sys; d=json.load(sys.stdin); assert d['schema_version']==2; assert isinstance(d['diagnostics'], list)\""
 mkdir "$VERIFY_DIR/promoted"
 check "promote verified correction" "$CUE" lexicon promote "$VERIFY_DIR/talk.cue" --rule "open telemetry" --to "$VERIFY_DIR/promoted"
 check "promoted lexicon contains rule" grep -q "open telemetry -> OpenTelemetry" "$VERIFY_DIR/promoted/corrections.md"
