@@ -1,6 +1,7 @@
 //! cue — turn video and audio files into transcripts, subtitles, and
 //! descriptions.
 
+mod batch_recovery;
 mod cli;
 mod commands;
 mod corrections;
