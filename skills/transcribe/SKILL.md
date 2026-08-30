@@ -61,6 +61,18 @@ Attested output verification requires `cue verify` to appear in `cue --help`.
 Upgrade cue before claiming that generated files still match their completed
 run receipt when that command is absent.
 
+Recoverable batches require cue 0.13.0 or newer. Before using recovery,
+feature-detect both commands in `cue --help`:
+
+```bash
+cue --version
+cue --help | grep -E '^[[:space:]]+(resume|batches)[[:space:]]'
+```
+
+Upgrade cue when either command is absent or the installed release is older
+than 0.13.0. Do not imitate recovery by reconstructing a directory command:
+that would rescan the directory and could silently change the batch membership.
+
 If the required tools are fine but the Python worker is missing, provision it:
 
 ```bash
@@ -146,6 +158,56 @@ cue keeps progress attributable to each file, continues after individual media
 failures, reports failures in input order, and exits with status 1 after its
 summary if anything failed. If two inputs would have the same destination,
 resolve the name collision before retrying.
+
+### Recover an interrupted or mixed-result batch
+
+cue automatically creates hidden recovery state after preflight for multiple
+explicit files and every directory input. The state root is resolved from
+`CUE_STATE_DIR`, then `$XDG_STATE_HOME/cue`, then `~/.local/state/cue`. It is
+separate from the content cache and output workspaces.
+
+When `cue batches list` shows recovery state for the user's current task,
+inspect and resume that record instead of rebuilding or rerunning the original
+multi-file or directory command:
+
+```bash
+cue batches list
+cue batches show <ID-OR-PATH>
+cue resume [ID-OR-PATH]
+cue batches show <ID-OR-PATH>
+```
+
+Follow this sequence every time:
+
+1. Run `cue batches list` from the original working directory. With no target,
+   `cue resume` selects that directory's newest incomplete batch.
+2. Run `cue batches show <ID-OR-PATH>` before recovery. Confirm its mode,
+   original ordered paths, and unresolved items match the user's intended job.
+3. Run `cue resume` for the current scope, or use the confirmed ID/path. The
+   only allowed processing override is current concurrency, written as
+   `cue --jobs <N> resume [ID-OR-PATH]`.
+4. Run `cue batches show <ID-OR-PATH>` again after the attempt. Report every
+   remaining failed or missing item and its remedy.
+
+Ask the user before selecting an explicit ID or recovery-state path whose
+recorded working directory is outside the current task or directory scope.
+Never hand-edit a recovery journal.
+
+Resume uses the frozen original path membership and never rescans a directory,
+so newly added media is excluded. It verifies completed outputs before skipping
+them, reprocesses an original whose contents changed, retries failed or
+interrupted work, and leaves a missing original marked missing while unaffected
+items continue. The recorded mode, language, resolved subtitle formats, output,
+corrections, summary, and stream intent remain fixed. Retries intentionally use
+the current provider/model configuration and current `--jobs` value.
+
+Exit status 1 can mean useful work completed but failed or missing items remain.
+Never claim the batch is complete until the final `cue batches show` reports it
+complete; name all unresolved items truthfully. A no-target resume with no
+incomplete batch and an explicitly complete target are exit-0 no-ops. Inspection
+can reveal absolute local paths. It excludes credentials and transcript text,
+but it is local diagnostic information and must not be described as safe to
+share without review.
 
 When the user requests an inline summary, use `--summary`. Treat stdout as the
 requested artifact: do not mix commentary into it. For concurrent batches,

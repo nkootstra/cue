@@ -97,6 +97,18 @@
         {"name": "promotion attestation matches its source and target", "type": "promotion_attestation", "path": "eval-lexicon-flywheel/with_skill/outputs/promotion.json", "receipt_path": "eval-lexicon-flywheel/with_skill/outputs/lesson.cue/corrections.applied.json", "lexicon_path": "eval-lexicon-flywheel/with_skill/outputs/corrections.md"},
         {"name": "canonical transcript remains unchanged", "type": "files_equal", "path": "eval-lexicon-flywheel/with_skill/outputs/lesson.cue/transcript.json", "other_path": ".baselines/with_skill-flywheel-transcript.json"}
       ]
+    },
+    {
+      "id": 7,
+      "prompt": "A previous cue directory batch in the current working directory was interrupted after one file completed and another failed. Inspect the recovery record, resume it instead of reconstructing the directory command, inspect it again, and save the commands you ran in recovery-steps.txt plus a truthful outcome in recovery-report.txt. If any item is still failed or missing, say so instead of claiming the batch completed.",
+      "expected_output": "An inspect-resume-inspect command trace and a final report that names every unresolved failed or missing item without claiming completion while unresolved work remains.",
+      "files": [],
+      "assertions": [
+        {"name": "recovery uses the isolated seeded state", "type": "contains", "path": "eval-recover-batch/with_skill/outputs/recovery-steps.txt", "value": "export CUE_STATE_DIR=\"$PWD/.cue-state\"", "case_insensitive": false},
+        {"name": "recovery follows inspect resume inspect order", "type": "contains", "path": "eval-recover-batch/with_skill/outputs/recovery-steps.txt", "value": "1. cue batches show\n2. cue resume\n3. cue batches show", "case_insensitive": false},
+        {"name": "final report remains truthful about missing work", "type": "contains", "path": "eval-recover-batch/with_skill/outputs/recovery-report.txt", "value": "Batch remains incomplete: missing lesson-03.mp4", "case_insensitive": false},
+        {"name": "final report does not claim completion", "type": "not_contains", "path": "eval-recover-batch/with_skill/outputs/recovery-report.txt", "value": "Batch complete", "case_insensitive": true}
+      ]
     }
   ]
 }
