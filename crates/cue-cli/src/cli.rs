@@ -82,6 +82,40 @@ pub enum Command {
     Subtitles(SubtitlesArgs),
     /// Verify a completed cue output against its run receipt
     Verify(VerifyArgs),
+    /// Resume an incomplete recoverable batch
+    Resume(ResumeArgs),
+    /// Inspect recoverable batches
+    Batches(BatchesArgs),
+}
+
+/// Resume a recoverable batch
+#[derive(Debug, Args)]
+pub struct ResumeArgs {
+    /// Batch ID or recovery-state file; defaults to the newest incomplete batch
+    pub target: Option<PathBuf>,
+}
+
+/// Inspect recoverable batches
+#[derive(Debug, Args)]
+pub struct BatchesArgs {
+    /// Which batch inspection action to run
+    #[usage(subcommand)]
+    pub command: Option<BatchesCommand>,
+}
+
+#[derive(Debug, Subcommands)]
+pub enum BatchesCommand {
+    /// List recoverable batches for the current directory
+    List,
+    /// Show one recoverable batch
+    Show(BatchShowArgs),
+}
+
+/// Show a recoverable batch
+#[derive(Debug, Args)]
+pub struct BatchShowArgs {
+    /// Batch ID or recovery-state file
+    pub target: PathBuf,
 }
 
 /// Transcribe files or directories

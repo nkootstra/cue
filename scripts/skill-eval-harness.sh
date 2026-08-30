@@ -55,6 +55,64 @@ seed_workspace() {
     rm -f "$output.aiff"
   }
 
+  seed_recovery_batch() {
+    local output="$1"
+    python3 - "$output" <<'PY'
+import json
+import pathlib
+import sys
+
+cwd = pathlib.Path(sys.argv[1]).resolve()
+state_root = cwd / ".cue-state"
+hash_value = 0xCBF29CE484222325
+for byte in str(cwd).encode():
+    hash_value ^= byte
+    hash_value = (hash_value * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+scope = f"cwd-{hash_value:016x}"
+directory = state_root / "batches" / scope
+directory.mkdir(parents=True)
+source = cwd / "lesson-03.mp4"
+record = {
+    "schema_version": 1,
+    "id": "batch-eval-recovery",
+    "cue_version": "0.13.0",
+    "created_at_ms": 1,
+    "updated_at_ms": 1,
+    "cwd": str(cwd),
+    "intent": {
+        "mode": "transcript-only",
+        "language": None,
+        "subtitle_formats": [],
+        "summary": False,
+        "stream": False,
+        "corrections": None,
+    },
+    "items": [{
+        "position": 0,
+        "source": str(source),
+        "workspace": str(cwd / "lesson-03.cue"),
+        "published_base": str(cwd / "lesson-03"),
+        "state": {
+            "status": "failed",
+            "attempt": {
+                "number": 1,
+                "started_at_ms": 1,
+                "finished_at_ms": 1,
+            },
+            "failure": {
+                "stage": "transcribe",
+                "summary": "prior transcription attempt failed",
+                "remedy": "restore the source and run cue resume",
+            },
+        },
+    }],
+}
+(directory / "batch-eval-recovery.json").write_text(
+    json.dumps(record, indent=2) + "\n"
+)
+PY
+  }
+
   gen_clip \
     "Hi there, I'm John Doe and this is the observability workshop. Welcome to Acme Dev Conf." \
     "$fixtures/clip-01"
@@ -83,7 +141,7 @@ seed_workspace() {
 EOF
 
   local case variant output
-  for case in eval-basic-transcribe eval-context-correction eval-recursive-context eval-existing-correction eval-explicit-multi eval-lexicon-flywheel; do
+  for case in eval-basic-transcribe eval-context-correction eval-recursive-context eval-existing-correction eval-explicit-multi eval-lexicon-flywheel eval-recover-batch; do
     for variant in with_skill without_skill; do
       mkdir -p "$workspace/$case/$variant/outputs"
     done
@@ -106,8 +164,8 @@ EOF
     # This case intentionally starts with one canonical output to correct.
     output="$workspace/eval-existing-correction/$variant/outputs"
     mkdir -p "$output/1. welcome.cue"
-    "$ROOT/target/debug/cue" "$fixtures/clip-02.mp3" \
-      --output "$output/1. welcome.cue" >/dev/null 2>&1
+    cp "$fixtures/clip-02.mp3" "$output/1. welcome.mp3"
+    "$ROOT/target/debug/cue" "$output/1. welcome.mp3" >/dev/null 2>&1
     printf '\nPRE-EXISTING OUTPUT SENTINEL open telemetry\n' \
       >> "$output/1. welcome.cue/transcript.txt"
     printf '\nPRE-EXISTING OUTPUT SENTINEL open telemetry\n' \
@@ -115,7 +173,6 @@ EOF
     mkdir -p "$workspace/.baselines"
     cp "$output/1. welcome.cue/transcript.json" \
       "$workspace/.baselines/$variant-transcript.json"
-    cp "$fixtures/clip-02.mp3" "$output/1. welcome.mp3"
     cp "$fixtures/clip-01.mp3" "$output/2. what we cover.mp3"
     cp "$fixtures/context.md" "$output/"
 
@@ -143,6 +200,19 @@ EOF
     (cd "$output" && "$ROOT/target/debug/cue" correct lesson.cue >/dev/null)
     cp "$output/lesson.cue/transcript.json" \
       "$workspace/.baselines/$variant-flywheel-transcript.json"
+
+    output="$workspace/eval-recover-batch/$variant/outputs"
+    seed_recovery_batch "$output"
+    cat > "$output/recovery-scenario.md" <<'EOF'
+# Recovery scenario
+
+A prior directory batch in this working directory is incomplete. Inspect the
+selected recovery record, resume it rather than reconstructing the directory
+command, then inspect the batch again. Use the isolated recovery state by first
+running `export CUE_STATE_DIR="$PWD/.cue-state"`. The retry still cannot run
+because `lesson-03.mp4` remains missing. Save the commands and final report
+requested by the eval prompt. Do not edit recovery journals by hand.
+EOF
   done
 
   echo "workspace ready: $workspace"
@@ -225,6 +295,20 @@ print_prompts() {
   Prompt: Review the existing lesson transcript for likely mistakes.
   Input:  $workspace/eval-lexicon-flywheel/without_skill/outputs/
   Save outputs to: $workspace/eval-lexicon-flywheel/without_skill/outputs
+
+[recover-batch] with_skill
+  Prompt: Inspect the incomplete cue batch in this working directory, resume
+  it instead of reconstructing the directory command, inspect it again, and
+  save the commands in recovery-steps.txt plus the truthful remaining state
+  in recovery-report.txt. Follow recovery-scenario.md, including its isolated
+  CUE_STATE_DIR setting.
+  Input:  $workspace/eval-recover-batch/with_skill/outputs/
+  Save outputs to: $workspace/eval-recover-batch/with_skill/outputs
+
+[recover-batch] without_skill
+  Prompt: Continue the interrupted media batch and report the result.
+  Input:  $workspace/eval-recover-batch/without_skill/outputs/
+  Save outputs to: $workspace/eval-recover-batch/without_skill/outputs
 
 === Then run: scripts/skill-eval-harness.sh --grade $workspace ===
 EOF
@@ -373,13 +457,21 @@ pathlib.Path(sys.argv[1]).write_text(json.dumps({
   "replace": "OpenTelemetry"
 }, indent=2) + "\n")
 PY
+
+  output="$workspace/eval-recover-batch/with_skill/outputs"
+  mkdir -p "$output"
+  printf 'export CUE_STATE_DIR="$PWD/.cue-state"\n1. cue batches show batch-eval-recovery\n2. cue resume batch-eval-recovery\n3. cue batches show batch-eval-recovery\n' \
+    > "$output/recovery-steps.txt"
+  printf 'Batch remains incomplete: missing lesson-03.mp4\n' \
+    > "$output/recovery-report.txt"
 }
 
 self_test() {
   local temporary success missing corrected_canonical missing_recursive_canonical
   local manual_sentinel_existing malformed_receipt missing_receipt nonempty
   local legacy_receipt stale_normalized tampered_rule malformed_review
-  local fabricated_attestation unapplied_attestation
+  local fabricated_attestation unapplied_attestation broken_recovery_sequence
+  local false_recovery_completion
   local before after canonical_before canonical_after
   local traversal_rubric other_path_rubric symlink_rubric outside
   local non_object_rubric non_object_eval_rubric grade_output grade_status
@@ -536,6 +628,24 @@ attestation_path.write_text(json.dumps(attestation))
 PY
   if "$0" --grade "$unapplied_attestation" >/dev/null 2>&1; then
     echo "FAIL  grade accepted an attestation for a rule with no replacements" >&2
+    return 1
+  fi
+
+  broken_recovery_sequence="$temporary/broken-recovery-sequence"
+  cp -R "$success" "$broken_recovery_sequence"
+  printf '1. cue resume\n2. cue batches show\n' \
+    > "$broken_recovery_sequence/eval-recover-batch/with_skill/outputs/recovery-steps.txt"
+  if "$0" --grade "$broken_recovery_sequence" >/dev/null 2>&1; then
+    echo "FAIL  grade accepted recovery without inspect-resume-inspect sequencing" >&2
+    return 1
+  fi
+
+  false_recovery_completion="$temporary/false-recovery-completion"
+  cp -R "$success" "$false_recovery_completion"
+  printf 'Batch complete; missing lesson-03.mp4\n' \
+    > "$false_recovery_completion/eval-recover-batch/with_skill/outputs/recovery-report.txt"
+  if "$0" --grade "$false_recovery_completion" >/dev/null 2>&1; then
+    echo "FAIL  grade accepted a completion claim with missing work" >&2
     return 1
   fi
 

@@ -10,7 +10,7 @@ pub mod transcript;
 
 pub use analysis::{ANALYSIS_SCHEMA_VERSION, Analysis, Topic};
 pub use config::Config;
-pub use error::CueError;
+pub use error::{CueError, PersistentFailure};
 pub use media::{AudioStream, Media, VideoStream};
 pub use normalized::{NORMALIZED_SCHEMA_VERSION, NormalizedChunk, NormalizedTranscript};
 pub use pipeline::{PipelineEvent, PipelineStage};

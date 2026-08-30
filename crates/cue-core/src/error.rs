@@ -1,5 +1,17 @@
 use crate::pipeline::PipelineStage;
 
+/// The allowlisted part of an error that is safe to store in recovery state.
+///
+/// Causes are deliberately excluded because provider output can contain
+/// credentials or media-derived text.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PersistentFailure {
+    pub stage: Option<PipelineStage>,
+    pub summary: String,
+    pub remedy: Option<String>,
+}
+
 /// The single error type for cue.
 ///
 /// Every error explains four things:
@@ -56,6 +68,15 @@ impl CueError {
     pub fn at_stage(mut self, stage: PipelineStage) -> Self {
         self.stage = Some(stage);
         self
+    }
+
+    /// Return the allowlisted projection suitable for durable records.
+    pub fn persistent_failure(&self) -> PersistentFailure {
+        PersistentFailure {
+            stage: self.stage,
+            summary: self.summary.clone(),
+            remedy: self.remedy.clone(),
+        }
     }
 
     fn render(&self) -> String {
@@ -140,5 +161,19 @@ mod tests {
     fn io_error_can_be_attributed_to_stage() {
         let err = CueError::new(PipelineStage::Extract, "ffmpeg failed").because("exit status 1");
         assert_eq!(err.stage(), Some(PipelineStage::Extract));
+    }
+
+    #[test]
+    fn persistent_failure_excludes_the_cause() {
+        let failure = CueError::new(PipelineStage::Transcribe, "transcription failed")
+            .because("secret-token and private transcript text")
+            .remedy("check the transcription provider")
+            .persistent_failure();
+
+        let json = serde_json::to_string(&failure).unwrap();
+        assert!(json.contains("transcription failed"), "{json}");
+        assert!(json.contains("check the transcription provider"), "{json}");
+        assert!(!json.contains("secret-token"), "{json}");
+        assert!(!json.contains("private transcript text"), "{json}");
     }
 }

@@ -1,4 +1,5 @@
 mod batch;
+pub mod batches;
 pub mod cache_cmd;
 pub mod config_cmd;
 pub mod correct;
@@ -8,6 +9,7 @@ pub mod lexicon;
 pub mod models;
 pub(crate) mod output;
 pub mod process;
+pub mod resume;
 pub mod review;
 pub mod skill;
 pub mod subtitles;

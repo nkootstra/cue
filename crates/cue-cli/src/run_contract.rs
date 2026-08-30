@@ -7,12 +7,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cue_core::{CueError, Result};
 
 pub(crate) const RECEIPT_FILE: &str = "cue.run.json";
-pub(crate) const SCHEMA_VERSION: u32 = 2;
+pub(crate) const SCHEMA_VERSION: u32 = 3;
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const LOCK_FILE: &str = ".cue.lock";
 
 fn supported_schema(version: u32) -> bool {
-    matches!(version, 1 | SCHEMA_VERSION)
+    matches!(version, 1 | 2 | SCHEMA_VERSION)
 }
 
 pub(crate) struct OutputLock {
@@ -214,6 +214,16 @@ pub(crate) struct RunReceipt {
     pub(crate) artifacts: Vec<TrackedFile>,
     #[serde(default)]
     pub(crate) published_outputs: Vec<TrackedFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) batch_attempt: Option<BatchAttemptRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BatchAttemptRef {
+    pub(crate) batch_id: String,
+    pub(crate) item_position: u32,
+    pub(crate) attempt_number: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -451,6 +461,19 @@ impl RunReceipt {
         if self.schema_version == 1 && !self.published_outputs.is_empty() {
             return Err(CueError::general(
                 "run receipt schema version 1 cannot contain published outputs",
+            ));
+        }
+        if self.schema_version < 3 && self.batch_attempt.is_some() {
+            return Err(CueError::general(
+                "run receipt schemas before version 3 cannot contain batch attempt provenance",
+            ));
+        }
+        if let Some(attempt) = &self.batch_attempt
+            && (!crate::batch_recovery::is_valid_batch_id(&attempt.batch_id)
+                || attempt.attempt_number == 0)
+        {
+            return Err(CueError::general(
+                "run receipt contains invalid batch attempt provenance",
             ));
         }
         if self.source.path.is_empty() {
@@ -884,6 +907,7 @@ mod tests {
             corrections: Vec::new(),
             artifacts: Vec::new(),
             published_outputs: Vec::new(),
+            batch_attempt: None,
         }
     }
 
@@ -951,6 +975,41 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn attempt_bound_receipt_round_trips_provenance_without_output_text_or_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("lesson.mp4");
+        let output = temp.path().join("lesson.cue");
+        std::fs::create_dir(&output).unwrap();
+        std::fs::write(&source, b"media").unwrap();
+        std::fs::write(output.join("transcript.json"), b"{}\n").unwrap();
+        let spoken_text = "private customer phrase that must stay out of the receipt";
+        std::fs::write(output.join("transcript.txt"), spoken_text).unwrap();
+        let mut receipt = full_receipt(&source);
+        receipt.batch_attempt = Some(BatchAttemptRef {
+            batch_id: "batch-test".into(),
+            item_position: 7,
+            attempt_number: 3,
+        });
+
+        receipt
+            .publish(&output, &["transcript.json", "transcript.txt"])
+            .unwrap();
+
+        let published = RunReceipt::read_for_verification(&output).unwrap();
+        assert_eq!(
+            published.batch_attempt,
+            Some(BatchAttemptRef {
+                batch_id: "batch-test".into(),
+                item_position: 7,
+                attempt_number: 3,
+            })
+        );
+        let json = std::fs::read_to_string(output.join(RECEIPT_FILE)).unwrap();
+        assert!(!json.contains(spoken_text), "{json}");
+        assert!(!json.contains("api_key"), "{json}");
     }
 
     #[test]

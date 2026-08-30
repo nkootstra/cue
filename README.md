@@ -77,6 +77,9 @@ Ollama optional, for S1 transcript cleanup. After installing, run
 | `cue correct <file>.cue` | Rebuild an existing output from canonical JSON and apply corrections |
 | `cue review <file>.cue [--json]` | Report focused correction candidates without changing files |
 | `cue verify <file>.cue [--json]` | Verify a completed output against its source, corrections, and artifact hashes |
+| `cue resume [ID-OR-PATH]` | Resume an incomplete recoverable batch; defaults to the newest one for the current directory |
+| `cue batches list` | List recent recoverable batches for the current directory |
+| `cue batches show <ID-OR-PATH>` | Inspect one batch, its original inputs, attempts, and unresolved work |
 | `cue lexicon promote <file>.cue --rule <phrase> --to <dir>` | Promote a verified applied rule into a reusable scope |
 | `cue subtitles check <file>.cue [--json]` | Check generated subtitle cues and report source-linked policy findings |
 | `cue doctor` | Check required and optional tools; `--fix` provisions the Python worker |
@@ -140,6 +143,66 @@ Processing a source again regenerates its derived text and subtitle artifacts.
 When a corrections manifest remains discoverable, cue reapplies it during
 that render, including fully cached reruns.
 
+### Recovering a batch
+
+cue 0.13.0 and newer automatically records hidden recovery state whenever an
+invocation processes multiple explicitly named files or any directory input.
+The journal is created only after discovery and every deterministic preflight
+check succeeds, immediately before media work begins. Single-file processing
+does not create a batch journal.
+
+Recovery state is separate from the output workspace and content cache. cue
+uses the first configured state root in this order:
+
+1. `CUE_STATE_DIR`
+2. `$XDG_STATE_HOME/cue`
+3. `~/.local/state/cue`
+
+Inspect and resume an incomplete batch from the same working directory:
+
+```bash
+cue batches list
+cue batches show <ID-OR-PATH>
+cue resume
+cue batches show <ID-OR-PATH>
+```
+
+`cue resume` without a target selects the newest incomplete batch associated
+with the canonical current working directory. Pass an ID reported by
+`cue batches list`, or the path of a recovery-state file, to select a batch
+explicitly. `cue batches list` is scoped to the current directory; an explicit
+ID or path can select a record from another scope. Batch inspection contains
+absolute source, output, and working-directory paths. This is local diagnostic
+information: it excludes credentials and transcript text, but should still be
+reviewed before it is shared.
+
+A batch freezes the resolved original file list and order. Resume never scans
+the original directory again, so media added later does not join the batch.
+It verifies the successful run receipt and outputs for every completed item;
+valid completed work is skipped. If an original file changed, cue reprocesses
+that path in its original position. If an original file is missing, cue records
+it as missing, continues unaffected work, and leaves the batch incomplete.
+
+Recovery preserves the recorded processing mode, language choice, resolved
+subtitle formats, output locations, corrections selection, summary choice, and
+stream intent. It intentionally loads the current provider and model
+configuration for each retry. The current `--jobs` value is also used and is
+the only processing option that may be overridden while resuming:
+
+```bash
+cue --jobs 2 resume
+cue --jobs 2 resume <ID-OR-PATH>
+```
+
+A completed batch exits 0. Remaining failed or missing items keep the batch
+incomplete and make `cue resume` exit 1 after every eligible unaffected item
+has been attempted. An explicitly selected already-complete batch and an
+implicit resume when no incomplete batch exists are informative exit-0 no-ops.
+Invalid, unreadable, unsupported, or busy explicit targets exit nonzero without
+starting media work. Use `cue batches show` after each recovery attempt rather
+than treating a nonzero exit as proof that no useful work completed. Do not
+edit recovery journals by hand.
+
 ## Outputs
 
 `cue ./video.mp4` publishes `video.srt` and writes supporting state into the
@@ -201,7 +264,10 @@ cue verify video.mp4 --json
 
 Exit status 0 means all recorded files still match. Exit status 1 means a file
 is missing, unreadable, or has changed, or the receipt itself cannot be read.
-The JSON form provides stable diagnostic IDs for automation. The receipt never
+Newly produced `cue.run.json` receipts use schema version 3 so recoverable runs
+can record their batch attempt. `cue verify --json` remains schema version 2;
+the report schema is independent from the receipt schema. The JSON form
+provides stable diagnostic IDs for automation. The receipt never
 contains API keys; URL credentials, query strings, and fragments are removed
 from recorded provider endpoints. Remote-data metadata describes only transfers
 performed by the current run; cached artifacts do not claim the provider

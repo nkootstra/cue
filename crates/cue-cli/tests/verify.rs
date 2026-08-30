@@ -263,7 +263,7 @@ fn verify_json_reports_unsupported_receipt_schemas() {
     let receipt_path = fixture.output.join("cue.run.json");
     let mut receipt: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
-    receipt["schema_version"] = serde_json::json!(3);
+    receipt["schema_version"] = serde_json::json!(4);
     std::fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
 
     let result = cue()
@@ -278,6 +278,74 @@ fn verify_json_reports_unsupported_receipt_schemas() {
         report["diagnostics"][0]["id"],
         "CUE-VERIFY-SCHEMA-UNSUPPORTED"
     );
+}
+
+#[test]
+fn verify_accepts_a_v3_attempt_bound_receipt_without_changing_its_report_schema() {
+    let fixture = fixture();
+    let receipt_path = fixture.output.join("cue.run.json");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+    receipt["schema_version"] = serde_json::json!(3);
+    receipt["batch_attempt"] = serde_json::json!({
+        "batch_id": "batch-2026-08-30",
+        "item_position": 4,
+        "attempt_number": 2,
+    });
+    std::fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+
+    let result = cue()
+        .args(["verify", fixture.output.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+
+    assert!(result.status.success(), "{result:?}");
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["schema_version"], 2);
+    assert_eq!(report["valid"], true);
+}
+
+#[test]
+fn verify_rejects_partial_or_invalid_v3_attempt_provenance() {
+    let fixture = fixture();
+    let receipt_path = fixture.output.join("cue.run.json");
+    let original: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+
+    let mut partial = original.clone();
+    partial["schema_version"] = serde_json::json!(3);
+    partial["batch_attempt"] = serde_json::json!({
+        "batch_id": "batch-test",
+        "item_position": 0,
+    });
+    std::fs::write(&receipt_path, serde_json::to_vec_pretty(&partial).unwrap()).unwrap();
+    let result = cue()
+        .args(["verify", fixture.output.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    assert_eq!(report["schema_version"], 2);
+    assert_eq!(
+        report["diagnostics"][0]["id"],
+        "CUE-VERIFY-RECEIPT-MALFORMED"
+    );
+
+    let mut invalid = original;
+    invalid["schema_version"] = serde_json::json!(3);
+    invalid["batch_attempt"] = serde_json::json!({
+        "batch_id": "",
+        "item_position": 0,
+        "attempt_number": 0,
+    });
+    std::fs::write(&receipt_path, serde_json::to_vec_pretty(&invalid).unwrap()).unwrap();
+    let result = cue()
+        .args(["verify", fixture.output.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    assert_eq!(report["diagnostics"][0]["id"], "CUE-VERIFY-RECEIPT-INVALID");
 }
 
 #[test]

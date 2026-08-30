@@ -41,6 +41,16 @@ check_fail() {
   fi
 }
 
+mtime_ns() {
+  python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$1"
+}
+
+mtime_is_unchanged() {
+  local path="$1"
+  local expected="$2"
+  test -f "$path" && test "$(mtime_ns "$path")" = "$expected"
+}
+
 echo "== build gates =="
 check "fmt"        bash -c "cd $ROOT && cargo fmt --check"
 check "build"      bash -c "cd $ROOT && cargo build --workspace --all-targets -q"
@@ -110,8 +120,9 @@ check "vtt has header"           bash -c "head -1 '$OUT/speech.vtt' | grep -q WE
 check "analysis schema version"  bash -c "grep -q '\"schema_version\": 1' '$WORKSPACE/analysis.json'"
 check "summary mentions title"   bash -c "grep -q 'Cue Pipeline Test' '$WORKSPACE/summary.md'"
 check "description has chapters" bash -c "grep -q 'Chapters' '$WORKSPACE/description.md'"
-check "run receipt contract" bash -c "python3 -c \"import json; d=json.load(open('$WORKSPACE/cue.run.json')); assert d['schema_version']==2; assert d['mode']=='full'; assert d['source']['digest']['algorithm']=='blake3'; assert len(d['source']['digest']['value'])==64; assert d['remote_data_usage']['normalized_text_sent_to_remote_in_current_run'] is None; assert {a['path'] for a in d['artifacts']} == {'cue.workspace.json','transcript.json','transcript.txt','transcript.clean.txt','normalized.json','subtitles.srt','subtitles.vtt','analysis.json','summary.md','description.md'}; assert {a['path'] for a in d['published_outputs']} == {'../../speech.srt','../../speech.vtt'}; assert {s['stage'] for s in d['stages']} >= {'inspect','extract','transcribe','normalize','analyze','render'}\""
+check "run receipt contract" bash -c "python3 -c \"import json; d=json.load(open('$WORKSPACE/cue.run.json')); assert d['schema_version']==3; assert d['mode']=='full'; assert d['source']['digest']['algorithm']=='blake3'; assert len(d['source']['digest']['value'])==64; assert 'batch_attempt' not in d; assert d['remote_data_usage']['normalized_text_sent_to_remote_in_current_run'] is None; assert {a['path'] for a in d['artifacts']} == {'cue.workspace.json','transcript.json','transcript.txt','transcript.clean.txt','normalized.json','subtitles.srt','subtitles.vtt','analysis.json','summary.md','description.md'}; assert {a['path'] for a in d['published_outputs']} == {'../../speech.srt','../../speech.vtt'}; assert {s['stage'] for s in d['stages']} >= {'inspect','extract','transcribe','normalize','analyze','render'}\""
 check "verify accepts intact output" "$CUE" verify "$WORKSPACE"
+check "verify JSON remains schema v2" bash -c "'$CUE' verify '$WORKSPACE' --json | python3 -c \"import json,sys; d=json.load(sys.stdin); assert d['schema_version']==2; assert d['valid'] is True\""
 printf 'tampered\n' >> "$WORKSPACE/transcript.txt"
 check_fail "verify detects artifact drift" "$CUE" verify "$WORKSPACE"
 check "rerun restores attested output" env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" \
@@ -155,17 +166,97 @@ rm -rf "$TRANS_DIR"
 check "transcribe runs" env "CUE_CONFIG_DIR=$CFG_DIR" "$CUE" transcribe "$SPEECH_MP3" --output "$TRANS_DIR"
 check "transcript exists"     test -s "$TRANS_WORKSPACE/transcript.txt"
 check "transcribe receipt exists" test -s "$TRANS_WORKSPACE/cue.run.json"
-check "transcribe receipt mode" bash -c "python3 -c \"import json; d=json.load(open('$TRANS_WORKSPACE/cue.run.json')); assert d['schema_version']==2; assert d['mode']=='transcript-only'; assert {a['path'] for a in d['artifacts']} == {'cue.workspace.json','transcript.json','transcript.txt'}; assert d['published_outputs'] == []\""
+check "transcribe receipt mode" bash -c "python3 -c \"import json; d=json.load(open('$TRANS_WORKSPACE/cue.run.json')); assert d['schema_version']==3; assert d['mode']=='transcript-only'; assert 'batch_attempt' not in d; assert {a['path'] for a in d['artifacts']} == {'cue.workspace.json','transcript.json','transcript.txt'}; assert d['published_outputs'] == []\""
 check "verify accepts transcript-only output" "$CUE" verify "$TRANS_WORKSPACE"
 check_fail "no subtitles"     test -s "$TRANS_WORKSPACE/subtitles.srt"
 check_fail "no analysis"      test -s "$TRANS_WORKSPACE/analysis.json"
 
 echo
+echo "== recoverable batch operations =="
+RECOVERY_ROOT="$VERIFY_TMP/recovery"
+RECOVERY_CWD="$RECOVERY_ROOT/work"
+RECOVERY_MEDIA="$RECOVERY_CWD/media"
+RECOVERY_OUT="$RECOVERY_CWD/out"
+RECOVERY_STATE="$RECOVERY_ROOT/state"
+RECOVERY_DATA="$RECOVERY_ROOT/data"
+RECOVERY_CACHE="$RECOVERY_ROOT/cache"
+mkdir -p "$RECOVERY_MEDIA" "$RECOVERY_STATE" "$RECOVERY_DATA" "$RECOVERY_CACHE"
+cp "$SPEECH_MP3" "$RECOVERY_MEDIA/01-complete.mp3"
+cp "$SPEECH_MP3" "$RECOVERY_ROOT/02-retry.mp3"
+cp "$SPEECH_MP3" "$RECOVERY_MEDIA/02-retry.mp3"
+
+recovery_cue() {
+  (
+    cd "$RECOVERY_CWD" || exit 1
+    env "CUE_CONFIG_DIR=$CFG_DIR" \
+      "CUE_STATE_DIR=$RECOVERY_STATE" \
+      "CUE_DATA_DIR=$RECOVERY_DATA" \
+      "CUE_CACHE_DIR=$RECOVERY_CACHE" \
+      "$CUE" "$@"
+  )
+}
+
+check "isolated recovery worker provisioned" recovery_cue doctor --fix
+
+run_mixed_recovery_failure() {
+  (
+    cd "$RECOVERY_CWD" || exit 1
+    (
+      attempts=0
+      while ! find "$RECOVERY_STATE" -type f -name '*.json' -print -quit 2>/dev/null | grep -q .; do
+        attempts=$((attempts+1))
+        [ "$attempts" -lt 400 ] || exit 2
+        sleep 0.05
+      done
+      rm "$RECOVERY_MEDIA/02-retry.mp3"
+    ) &
+    remover=$!
+    env "CUE_CONFIG_DIR=$CFG_DIR" \
+      "CUE_STATE_DIR=$RECOVERY_STATE" \
+      "CUE_DATA_DIR=$RECOVERY_DATA" \
+      "CUE_CACHE_DIR=$RECOVERY_CACHE" \
+      "$CUE" media --output "$RECOVERY_OUT"
+    cue_status=$?
+    wait "$remover"
+    remover_status=$?
+    [ "$remover_status" -eq 0 ] || return "$remover_status"
+    return "$cue_status"
+  )
+}
+
+check_fail "mixed batch records a repaired retry" run_mixed_recovery_failure
+check "recovery journal created after preflight" bash -c "find '$RECOVERY_STATE' -type f -name '*.json' -print -quit | grep -q ."
+RECOVERY_JOURNAL="$(find "$RECOVERY_STATE" -type f -name '*.json' -print -quit)"
+RECOVERY_BATCH_ID="$(python3 -c "import json; print(json.load(open('$RECOVERY_JOURNAL'))['id'])")"
+RECOVERY_FIRST_WORKSPACE="$(python3 -c "import json; print(json.load(open('$RECOVERY_JOURNAL'))['items'][0]['workspace'])")"
+RECOVERY_SECOND_WORKSPACE="$(python3 -c "import json; print(json.load(open('$RECOVERY_JOURNAL'))['items'][1]['workspace'])")"
+RECOVERY_FIRST_RECEIPT="$RECOVERY_FIRST_WORKSPACE/cue.run.json"
+
+check "batches list exposes incomplete ID" bash -c "recovery_output=\"\$(cd '$RECOVERY_CWD' && env CUE_STATE_DIR='$RECOVERY_STATE' '$CUE' batches list)\"; printf '%s\n' \"\$recovery_output\" | grep -q '$RECOVERY_BATCH_ID.*incomplete.*1/2 complete'"
+check "batches show exposes missing retry" bash -c "cd '$RECOVERY_CWD' && env CUE_STATE_DIR='$RECOVERY_STATE' '$CUE' batches show '$RECOVERY_BATCH_ID' | grep -q '02-retry.mp3.*missing'"
+check "first batch receipt is attempt-bound schema v3" bash -c "python3 -c \"import json; d=json.load(open('$RECOVERY_FIRST_RECEIPT')); assert d['schema_version']==3; assert d['batch_attempt']['batch_id']=='$RECOVERY_BATCH_ID'; assert d['batch_attempt']['item_position']==0; assert d['batch_attempt']['attempt_number']==1\""
+touch -t 200001010000 "$RECOVERY_FIRST_RECEIPT"
+RECOVERY_FIRST_MTIME="$(mtime_ns "$RECOVERY_FIRST_RECEIPT")"
+
+cp "$RECOVERY_ROOT/02-retry.mp3" "$RECOVERY_MEDIA/02-retry.mp3"
+cp "$SPEECH_MP3" "$RECOVERY_MEDIA/03-added-later.mp3"
+check "default resume repairs only original membership" recovery_cue resume
+check "verified prior success is not regenerated" mtime_is_unchanged "$RECOVERY_FIRST_RECEIPT" "$RECOVERY_FIRST_MTIME"
+check "failed original receives a second attempt" bash -c "python3 -c \"import json; d=json.load(open('$RECOVERY_SECOND_WORKSPACE/cue.run.json')); assert d['schema_version']==3; assert d['batch_attempt']['batch_id']=='$RECOVERY_BATCH_ID'; assert d['batch_attempt']['item_position']==1; assert d['batch_attempt']['attempt_number']==2\""
+check_fail "new directory media is excluded from frozen batch" test -e "$RECOVERY_OUT/03-added-later.srt"
+check_fail "new directory media gets no hidden workspace" test -e "$RECOVERY_OUT/.cue/03-added-later"
+check "batches show reports complete" bash -c "cd '$RECOVERY_CWD' && env CUE_STATE_DIR='$RECOVERY_STATE' '$CUE' batches show '$RECOVERY_BATCH_ID' | grep -q '^Status: complete$'"
+check "batches list reports 2/2 complete" bash -c "cd '$RECOVERY_CWD' && env CUE_STATE_DIR='$RECOVERY_STATE' '$CUE' batches list | grep -q '$RECOVERY_BATCH_ID.*complete.*2/2 complete'"
+check "transcript-only recovery dispatch seam" bash -c "cd '$ROOT' && cargo test -q -p cue-cli --test batches resume_dispatches_both_recorded_processing_modes"
+
+echo
 echo "== skill =="
-check "skill help"         $CUE skill --help
+check "skill help"         "$CUE" skill --help
 check "skill smoke script"  bash -n scripts/test_skill_install.sh
 check "SKILL.md frontmatter" bash -c "grep -q '^name: transcribe' skills/transcribe/SKILL.md && grep -q '^description:' skills/transcribe/SKILL.md"
 check "evals.json valid"   bash -c "python3 -c \"import json; d=json.load(open('skills/transcribe/evals/evals.json')); assert len(d['evals'])>=2; assert all(c['assertions'] for c in d['evals'])\""
+check "README recovery contract" bash -c "grep -q 'cue resume \[ID-OR-PATH\]' README.md && grep -q 'CUE_STATE_DIR' README.md && grep -q 'verify --json.*schema version 2' README.md"
+check "skill recovery contract" bash -c "grep -q 'cue 0.13.0 or newer' skills/transcribe/SKILL.md && grep -q 'cue batches show <ID-OR-PATH>' skills/transcribe/SKILL.md && grep -q 'Never hand-edit a recovery journal' skills/transcribe/SKILL.md"
 check_fail "no real identifiers" bash -c "grep -riE 'eastham|dometrain' skills/transcribe/ || exit 1; exit 0"
 
 echo
