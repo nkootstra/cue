@@ -25,8 +25,8 @@ use crate::corrections::{CorrectionPlan, CorrectionScope};
 use crate::events::{FileEvents, FilePipelineEvent, RendererEvent};
 use crate::render::{human_duration, println_line};
 use crate::run_contract::{
-    ProcessModeName, ProviderIdentity, RemoteDataUsage, RunReceipt, StageRecord, StageStatus,
-    TrackedFile,
+    BatchAttemptRef, ProcessModeName, ProviderIdentity, RemoteDataUsage, RunReceipt, StageRecord,
+    StageStatus, TrackedFile,
 };
 
 #[derive(serde::Serialize)]
@@ -187,6 +187,7 @@ async fn run_inner(
         corrections,
         s1_readiness: tokio::sync::OnceCell::new(),
         cache_work: KeyedLocks::default(),
+        batch_attempts: HashMap::new(),
     };
     let result = process_inputs(
         &plan.inputs,
@@ -293,6 +294,7 @@ struct PipelineProcessor<'a> {
     corrections: HashMap<PathBuf, CorrectionPlan>,
     s1_readiness: tokio::sync::OnceCell<bool>,
     cache_work: KeyedLocks,
+    batch_attempts: HashMap<PathBuf, BatchAttemptRef>,
 }
 
 impl MediaProcessor for PipelineProcessor<'_> {
@@ -312,6 +314,7 @@ impl MediaProcessor for PipelineProcessor<'_> {
             mode: self.mode,
             correction,
             cache_work: &self.cache_work,
+            batch_attempt: self.batch_attempts.get(&input.workspace).cloned(),
         };
         process_file(input, &context, &self.s1_readiness).await
     }
@@ -324,6 +327,7 @@ struct FileContext<'a> {
     mode: ProcessMode,
     correction: &'a CorrectionPlan,
     cache_work: &'a KeyedLocks,
+    batch_attempt: Option<BatchAttemptRef>,
 }
 
 fn initial_run_receipt(
@@ -399,6 +403,7 @@ fn initial_run_receipt(
         corrections: correction.attested_manifests(output_dir)?,
         artifacts: Vec::new(),
         published_outputs: Vec::new(),
+        batch_attempt: context.batch_attempt.clone(),
     })
 }
 

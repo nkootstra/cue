@@ -185,6 +185,16 @@ impl BatchItem {
         Ok(())
     }
 
+    fn mark_running_needs_reprocessing(
+        &mut self,
+        finished_at_ms: u64,
+        failure: PersistentFailure,
+    ) -> Result<()> {
+        let attempt = self.finish_attempt(finished_at_ms)?;
+        self.state = ItemState::NeedsReprocessing { attempt, failure };
+        Ok(())
+    }
+
     fn finish_attempt(&self, finished_at_ms: u64) -> Result<Attempt> {
         let ItemState::Running { attempt } = &self.state else {
             return Err(CueError::general(
@@ -206,6 +216,13 @@ impl BatchItem {
 pub(crate) struct BatchCounts {
     pub complete: usize,
     pub incomplete: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reconciliation {
+    Unchanged,
+    ReconciledComplete,
+    NeedsReprocessing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -257,6 +274,67 @@ impl BatchRecord {
         self.items.iter().any(|item| item.state.is_running())
     }
 
+    pub(crate) fn reconcile_item(
+        &mut self,
+        position: u32,
+        finished_at_ms: u64,
+    ) -> Result<Reconciliation> {
+        let batch_id = self.id.clone();
+        let item = self
+            .items
+            .iter_mut()
+            .find(|item| item.position == position)
+            .ok_or_else(|| CueError::general(format!("batch item {position} does not exist")))?;
+        let attempt_number = match &item.state {
+            ItemState::Running { attempt } | ItemState::Complete { attempt } => attempt.number,
+            _ => return Ok(Reconciliation::Unchanged),
+        };
+
+        let expected_attempt = crate::run_contract::BatchAttemptRef {
+            batch_id,
+            item_position: position,
+            attempt_number,
+        };
+        let (reusable, diagnostic_id) = match crate::verification::verify_output(&item.workspace) {
+            Ok(verified)
+                if verified.is_valid()
+                    && verified.receipt.batch_attempt.as_ref() == Some(&expected_attempt) =>
+            {
+                (true, None)
+            }
+            Ok(verified) => (
+                false,
+                Some(
+                    verified
+                        .diagnostics
+                        .first()
+                        .map(|diagnostic| diagnostic.id)
+                        .unwrap_or("CUE-VERIFY-ATTEMPT-MISMATCH"),
+                ),
+            ),
+            Err(error) => (false, Some(error.diagnostic_id())),
+        };
+
+        match &item.state {
+            ItemState::Running { .. } if reusable => {
+                item.complete(finished_at_ms)?;
+                Ok(Reconciliation::ReconciledComplete)
+            }
+            ItemState::Complete { .. } if reusable => Ok(Reconciliation::Unchanged),
+            ItemState::Running { .. } => {
+                let failure = verification_failure(diagnostic_id.unwrap());
+                item.mark_running_needs_reprocessing(finished_at_ms, failure)?;
+                Ok(Reconciliation::NeedsReprocessing)
+            }
+            ItemState::Complete { .. } => {
+                let failure = verification_failure(diagnostic_id.unwrap());
+                item.mark_needs_reprocessing(failure)?;
+                Ok(Reconciliation::NeedsReprocessing)
+            }
+            _ => Ok(Reconciliation::Unchanged),
+        }
+    }
+
     pub(crate) fn validate(&self) -> Result<()> {
         if self.schema_version != BATCH_SCHEMA_VERSION {
             return Err(CueError::general(format!(
@@ -306,6 +384,15 @@ impl BatchRecord {
         }
         Ok(())
     }
+}
+
+fn verification_failure(diagnostic_id: &str) -> PersistentFailure {
+    CueError::new(
+        cue_core::PipelineStage::Render,
+        format!("recorded output is not reusable ({diagnostic_id})"),
+    )
+    .remedy("run cue resume to process this item again")
+    .persistent_failure()
 }
 
 fn require_absolute(path: &std::path::Path, label: &str) -> Result<()> {
@@ -696,6 +783,72 @@ mod tests {
     use cue_core::PipelineStage;
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
+    fn publish_attempt_receipt(item: &BatchItem, batch_id: &str, attempt_number: u32) {
+        use crate::run_contract::{
+            BatchAttemptRef, ProcessModeName, ProviderIdentity, RemoteDataUsage, RunReceipt,
+            StageRecord, StageStatus, TrackedFile,
+        };
+
+        std::fs::create_dir_all(&item.workspace).unwrap();
+        std::fs::write(&item.source, b"media").unwrap();
+        std::fs::write(item.workspace.join("transcript.json"), b"{}\n").unwrap();
+        std::fs::write(item.workspace.join("transcript.txt"), b"transcript\n").unwrap();
+        let receipt = RunReceipt {
+            schema_version: crate::run_contract::SCHEMA_VERSION,
+            cue_version: "test".into(),
+            mode: ProcessModeName::TranscriptOnly,
+            source: TrackedFile::from_path("../0.mp4", &item.source).unwrap(),
+            configuration: crate::run_contract::configuration_snapshot(
+                &cue_core::Config::default(),
+                None,
+            ),
+            providers: vec![
+                ProviderIdentity {
+                    stage: PipelineStage::Inspect,
+                    provider: "ffprobe".into(),
+                    model: None,
+                    endpoint: None,
+                },
+                ProviderIdentity {
+                    stage: PipelineStage::Extract,
+                    provider: "ffmpeg".into(),
+                    model: None,
+                    endpoint: None,
+                },
+                ProviderIdentity {
+                    stage: PipelineStage::Transcribe,
+                    provider: "faster-whisper".into(),
+                    model: Some("test".into()),
+                    endpoint: None,
+                },
+            ],
+            stages: [
+                PipelineStage::Inspect,
+                PipelineStage::Extract,
+                PipelineStage::Transcribe,
+                PipelineStage::Render,
+            ]
+            .into_iter()
+            .map(|stage| StageRecord::new(stage, StageStatus::Executed, None))
+            .collect(),
+            warnings: Vec::new(),
+            remote_data_usage: RemoteDataUsage {
+                normalized_text_sent_to_remote_in_current_run: None,
+            },
+            corrections: Vec::new(),
+            artifacts: Vec::new(),
+            published_outputs: Vec::new(),
+            batch_attempt: Some(BatchAttemptRef {
+                batch_id: batch_id.into(),
+                item_position: item.position,
+                attempt_number,
+            }),
+        };
+        receipt
+            .publish(&item.workspace, &["transcript.json", "transcript.txt"])
+            .unwrap();
+    }
+
     fn running_attempt(number: u32) -> Attempt {
         Attempt {
             number,
@@ -1065,5 +1218,158 @@ mod tests {
         assert!(item.start(50).is_err());
         item.mark_needs_reprocessing(test_failure()).unwrap();
         assert_eq!(item.start(60).unwrap(), 3);
+    }
+
+    #[test]
+    fn exact_attempt_receipt_closes_the_running_to_complete_crash_gap() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut record = test_record(vec![ItemState::Running {
+            attempt: running_attempt(2),
+        }]);
+        absolutize_items(&mut record, temp.path());
+        publish_attempt_receipt(&record.items[0], &record.id, 2);
+
+        let outcome = record.reconcile_item(0, 30).unwrap();
+
+        assert_eq!(outcome, Reconciliation::ReconciledComplete);
+        assert!(matches!(
+            &record.items[0].state,
+            ItemState::Complete { attempt } if attempt.number == 2 && attempt.finished_at_ms == Some(30)
+        ));
+    }
+
+    #[test]
+    fn complete_item_is_reused_only_with_its_exact_attempt_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut record = test_record(vec![ItemState::Complete {
+            attempt: finished_attempt(2),
+        }]);
+        absolutize_items(&mut record, temp.path());
+        publish_attempt_receipt(&record.items[0], &record.id, 2);
+
+        assert_eq!(
+            record.reconcile_item(0, 30).unwrap(),
+            Reconciliation::Unchanged
+        );
+        assert!(matches!(record.items[0].state, ItemState::Complete { .. }));
+
+        publish_attempt_receipt(&record.items[0], &record.id, 1);
+        assert_eq!(
+            record.reconcile_item(0, 30).unwrap(),
+            Reconciliation::NeedsReprocessing
+        );
+    }
+
+    #[test]
+    fn unmatched_receipt_provenance_cannot_close_a_running_attempt() {
+        for (batch_id, attempt_number) in [("another-batch", 2), ("batch-test", 1)] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut record = test_record(vec![ItemState::Running {
+                attempt: running_attempt(2),
+            }]);
+            absolutize_items(&mut record, temp.path());
+            publish_attempt_receipt(&record.items[0], batch_id, attempt_number);
+
+            assert_eq!(
+                record.reconcile_item(0, 30).unwrap(),
+                Reconciliation::NeedsReprocessing
+            );
+            assert!(matches!(
+                record.items[0].state,
+                ItemState::NeedsReprocessing { .. }
+            ));
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut record = test_record(vec![ItemState::Running {
+            attempt: running_attempt(2),
+        }]);
+        absolutize_items(&mut record, temp.path());
+        publish_attempt_receipt(&record.items[0], &record.id, 2);
+        let receipt_path = record.items[0]
+            .workspace
+            .join(crate::run_contract::RECEIPT_FILE);
+        let mut receipt: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+        receipt.as_object_mut().unwrap().remove("batch_attempt");
+        std::fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+
+        assert_eq!(
+            record.reconcile_item(0, 30).unwrap(),
+            Reconciliation::NeedsReprocessing
+        );
+    }
+
+    #[test]
+    fn changed_complete_output_and_changed_source_require_reprocessing() {
+        for changed_path in ["transcript.txt", "../0.mp4"] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut record = test_record(vec![ItemState::Complete {
+                attempt: finished_attempt(1),
+            }]);
+            absolutize_items(&mut record, temp.path());
+            publish_attempt_receipt(&record.items[0], &record.id, 1);
+            std::fs::write(record.items[0].workspace.join(changed_path), b"changed").unwrap();
+
+            assert_eq!(
+                record.reconcile_item(0, 30).unwrap(),
+                Reconciliation::NeedsReprocessing
+            );
+            assert!(matches!(
+                record.items[0].state,
+                ItemState::NeedsReprocessing { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn missing_output_or_malformed_receipt_requires_reprocessing() {
+        for malformed_receipt in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut record = test_record(vec![ItemState::Complete {
+                attempt: finished_attempt(1),
+            }]);
+            absolutize_items(&mut record, temp.path());
+            publish_attempt_receipt(&record.items[0], &record.id, 1);
+            if malformed_receipt {
+                std::fs::write(
+                    record.items[0]
+                        .workspace
+                        .join(crate::run_contract::RECEIPT_FILE),
+                    b"not json\n",
+                )
+                .unwrap();
+            } else {
+                std::fs::remove_file(record.items[0].workspace.join("transcript.txt")).unwrap();
+            }
+
+            assert_eq!(
+                record.reconcile_item(0, 30).unwrap(),
+                Reconciliation::NeedsReprocessing
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsafe_tracked_output_requires_reprocessing() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut record = test_record(vec![ItemState::Complete {
+            attempt: finished_attempt(1),
+        }]);
+        absolutize_items(&mut record, temp.path());
+        publish_attempt_receipt(&record.items[0], &record.id, 1);
+        let artifact = record.items[0].workspace.join("transcript.txt");
+        let external = temp.path().join("external.txt");
+        std::fs::write(&external, b"transcript\n").unwrap();
+        std::fs::remove_file(&artifact).unwrap();
+        symlink(external, artifact).unwrap();
+
+        assert_eq!(
+            record.reconcile_item(0, 30).unwrap(),
+            Reconciliation::NeedsReprocessing
+        );
     }
 }
