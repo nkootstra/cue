@@ -1,6 +1,6 @@
 ---
 name: transcribe
-description: Transcribe video and audio files into accurate transcripts, subtitles, and descriptions using cue. Use when the user wants to transcribe media, generate subtitles or captions, extract spoken content from recordings, batch-process a course or folder of videos, or clean up transcriptions where names, terms, or technical vocabulary were misheard. Installs cue when it is missing and corrects transcription errors using context about the speaker, repository, or domain.
+description: Transcribe video and audio files into accurate transcripts, subtitles, and descriptions using cue. Use when the user wants to transcribe local media, download a video URL for transcription, generate subtitles or captions, extract spoken content, batch-process a course or folder, or clean up names, terms, or technical vocabulary. Installs cue when missing and corrects errors using speaker, repository, or domain context.
 ---
 
 # Transcribe media with cue
@@ -39,39 +39,31 @@ cue --version
 cue doctor
 ```
 
-Directory input requires cue 0.5.0 or newer. Before using directory syntax,
-check `cue --version`; upgrade cue with the same installation method if it is
-older. Do not substitute a hand-written directory loop for an outdated cue
-without telling the user why the upgrade could not be completed.
+Directory input requires cue 0.5.0 or newer. Check `cue --version` first and
+upgrade if needed; do not substitute a hand-written directory loop.
 
 Bounded parallel batches require cue 0.10.0 or newer. Upgrade before using
-`--jobs`; do not emulate it with shell background jobs because that bypasses
-cue's cache coordination, file-attributed progress, and deterministic failure
-accounting.
+`--jobs`; never emulate it with shell background jobs, which bypass cache
+coordination and deterministic failure accounting.
 
-The scoped lexicon workflow requires `cue review` and `cue lexicon` to appear
-in `cue --help`. Upgrade cue before using review or promotion when either
-command is absent; do not emulate promotion by silently copying rules.
+The scoped lexicon workflow requires `cue review` and `cue lexicon` in
+`cue --help`; upgrade if either is absent and do not silently copy rules.
 
-Subtitle validation requires `cue subtitles` to appear in `cue --help`.
-Upgrade cue before claiming subtitle-policy evidence when the command is
-absent; visually inspecting SRT/VTT is useful but is not an equivalent check.
+Subtitle validation requires `cue subtitles` in `cue --help`; upgrade if absent.
+Visual SRT/VTT inspection is useful but is not an equivalent check.
 
-Attested output verification requires `cue verify` to appear in `cue --help`.
-Upgrade cue before claiming that generated files still match their completed
-run receipt when that command is absent.
+Attested output verification requires `cue verify` in `cue --help`; upgrade if
+absent before claiming files match their completed run receipt.
 
-Recoverable batches require cue 0.13.0 or newer. Before using recovery,
-feature-detect both commands in `cue --help`:
+Recoverable batches require cue 0.13.0 or newer. Before using recovery, check:
 
 ```bash
 cue --version
 cue --help | grep -E '^[[:space:]]+(resume|batches)[[:space:]]'
 ```
 
-Upgrade cue when either command is absent or the installed release is older
-than 0.13.0. Do not imitate recovery by reconstructing a directory command:
-that would rescan the directory and could silently change the batch membership.
+Upgrade cue when either command is absent or the release is older than 0.13.0.
+Do not reconstruct recovery by rescanning the directory.
 
 If the required tools are fine but the Python worker is missing, provision it:
 
@@ -79,10 +71,31 @@ If the required tools are fine but the Python worker is missing, provision it:
 cue doctor --fix
 ```
 
-`cue doctor` reports optional integrations (Ollama, S1, an LLM gateway)
-separately — those are not required for transcription.
+`cue doctor` reports optional Ollama/S1/LLM integrations separately; they are
+not required for transcription.
 
-## 2. Transcribe files and directories
+## 2. Download online media (optional)
+
+For a user-provided URL, keep downloading explicit and separate from cue.
+Install the optional downloader with Homebrew:
+
+```bash
+brew install yt-dlp
+```
+
+Download into the current directory, inspect the exact path printed or created,
+then pass only that file to cue:
+
+```bash
+yt-dlp --no-playlist -o '%(title)s.%(ext)s' '<VIDEO_URL>'
+cue '<exact-downloaded-file-path>'
+```
+
+Prefer `yt-dlp`. If it is unavailable but `youtube-dl` is installed, use the
+same workflow with `youtube-dl`. Never add URL handling to cue, download
+without the user's request, or process a whole directory for one file.
+
+## 3. Transcribe files and directories
 
 ```bash
 cue <file.mp4> [--language en] [--output <dir>]
@@ -216,7 +229,7 @@ wants each complete source-labelled summary as soon as that file finishes.
 Never describe `--stream` as token streaming. A requested summary failure is a
 real per-file failure even when the local SRT and hidden workspace were written.
 
-## 3. Correct mishearings with context
+## 4. Correct mishearings with context
 
 Speech-to-text reliably mishears proper nouns (a surname heard as a
 similarly-pronounced word), technical terms, and domain jargon. The audio
@@ -398,7 +411,7 @@ already processed, the expensive stages come from cache. Use `cue correct
 to rebuild the existing output. Do not add any other corrections unless they
 also conflict with known context.
 
-## 4. Batch / course mode
+## 5. Batch / course mode
 
 For a folder of related media (a course, a lecture series), follow this
 order:
@@ -477,7 +490,7 @@ order:
 5. Optionally, if the runs produced `analysis.json` per episode, summarize
    them into a course index (titles, topics, chapters) for the user.
 
-## 5. Privacy
+## 6. Privacy
 
 Media, extracted audio, the raw transcript, and subtitles stay local. S1
 normalization runs through the user's local Ollama instance. If analysis is
@@ -486,11 +499,12 @@ gateway. A local Ollama analysis gateway keeps that text on the machine; a
 remote gateway such as OpenRouter receives it. Never upload media files
 anywhere.
 
-## 6. Troubleshooting
+## 7. Troubleshooting
 
 | Symptom | Fix |
 |---|---|
 | `cue doctor` reports FFmpeg/FFprobe missing | Install FFmpeg: `brew install ffmpeg` (macOS) / `apt install ffmpeg` (Linux) |
+| A URL is provided but no downloader is available | Install one optional downloader: `brew install yt-dlp` |
 | `cue doctor` reports Python missing | Install Python 3.10+, then `cue doctor --fix` |
 | Transcription fails on a short/quiet clip | Expected: whisper may return an empty transcript for music/silence/no-speech |
 | No `transcript.clean.txt` / `summary.md` / `description.md` | Optional integrations (Ollama S1, LLM gateway) are not configured — local transcription still works |
