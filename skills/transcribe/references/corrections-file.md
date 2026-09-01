@@ -81,7 +81,9 @@ cue review <file>.cue --json
 
 Review candidates include low-confidence words, possible fallback timing,
 unmatched rules, scoped mapping conflicts, and ambiguous speaker turns. They
-are leads to verify against context, not permission to guess.
+also include clearly cued spoken URLs, such as `visit example dot com slash
+guide`, which cue proposes as `example.com/guide` without network checks.
+These are leads to verify against context, not permission to guess.
 
 Promote a successfully applied rule only when the user has approved the
 destination scope:

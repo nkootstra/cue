@@ -344,7 +344,9 @@ have segment-level fallback timing, effective rules that do not match the
 canonical transcript, conflicting scoped rules, and ambiguous speaker turns
 when speaker assignments exist. Reviews also discover likely technical-term
 mistakes from bounded local source, documentation, configuration, and sibling
-transcript evidence. Discovery is generic and does not ship a framework or
+transcript evidence. They also flag clearly cued spoken URLs, such as
+`visit example dot com slash guide`, and propose `example.com/guide` without
+network or TLD validation. Discovery is generic and does not ship a framework or
 language vocabulary; use `--context-root` to add a project tree or
 `--no-terms` to disable it. Diagnostic IDs are stable; `--json` emits a
 versioned report suitable for agents and scripts. Candidates are evidence to

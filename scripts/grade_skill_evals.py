@@ -117,6 +117,7 @@ REVIEW_DIAGNOSTICS = {
     "CUE-REVIEW-SCOPE-CONFLICT",
     "CUE-REVIEW-AMBIGUOUS-SPEAKER-TURN",
     "CUE-REVIEW-TERM-MISMATCH",
+    "CUE-REVIEW-SPOKEN-URL",
 }
 
 
@@ -226,6 +227,27 @@ def is_review_report(path: Path) -> bool:
                     and type(item.get("authoritative")) is bool
                     for item in evidence
                 )
+            )
+        if diagnostic_id == "CUE-REVIEW-SPOKEN-URL":
+            confidence = diagnostic.get("confidence")
+            score = diagnostic.get("score")
+            return (
+                all(
+                    isinstance(diagnostic.get(field), str)
+                    for field in ("candidate_id", "observed", "proposed")
+                )
+                and is_int(diagnostic.get("word_index"))
+                and (
+                    confidence is None
+                    or (
+                        isinstance(confidence, (int, float))
+                        and not isinstance(confidence, bool)
+                        and 0 <= confidence <= 1
+                    )
+                )
+                and isinstance(score, (int, float))
+                and not isinstance(score, bool)
+                and 0 <= score <= 1
             )
         return (
             is_int(diagnostic.get("segment_index"))

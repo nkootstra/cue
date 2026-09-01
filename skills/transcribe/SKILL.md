@@ -271,8 +271,10 @@ reapply the same decisions without changing the raw transcript.
 
    The report is read-only. Low confidence, possible fallback timing,
    unmatched rules, scoped conflicts, speaker ambiguity, and likely technical
-   term mismatches are candidates to investigate—not facts and not permission
-   to guess. Terminology discovery uses bounded local source, configuration,
+   term mismatches and clearly cued spoken URLs (for example, `visit example
+   dot com slash guide`) are candidates to investigate—not facts and not
+   permission to guess. URL proposals do not use DNS or TLD validation.
+   Terminology discovery uses bounded local source, configuration,
    documentation, and non-authoritative sibling transcripts; it does not ship
    a fixed language or framework vocabulary. Use `--no-terms` to disable it.
    Approve a candidate explicitly with `cue review <file>.cue --accept
