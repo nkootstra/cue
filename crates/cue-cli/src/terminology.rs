@@ -17,12 +17,19 @@ pub(crate) struct Evidence {
 #[derive(Debug, Clone)]
 pub(crate) struct Candidate {
     pub id: String,
+    pub kind: CandidateKind,
     pub observed: String,
     pub proposed: String,
     pub word_index: usize,
     pub confidence: Option<f32>,
     pub score: f32,
     pub evidence: Vec<Evidence>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CandidateKind {
+    Term,
+    SpokenUrl,
 }
 
 pub(crate) fn find_candidates(
@@ -105,6 +112,7 @@ pub(crate) fn find_candidates(
             phrase_context(transcript, index, &term.display, &word.text);
         candidates.push(Candidate {
             id: format!("term-{candidate_index}"),
+            kind: CandidateKind::Term,
             observed: observed_text,
             proposed: term.display.clone(),
             word_index: index,
@@ -116,6 +124,155 @@ pub(crate) fn find_candidates(
     candidates.sort_by_key(|candidate| candidate.word_index);
     candidates.dedup_by(|left, right| left.word_index == right.word_index);
     Ok(candidates)
+}
+
+pub(crate) fn find_spoken_url_candidates(transcript: &Transcript) -> Vec<Candidate> {
+    let mut candidates = Vec::new();
+    let mut index = 0;
+    while index < transcript.words.len() {
+        let Some((end, observed, proposed, confidence)) = spoken_url_at(transcript, index) else {
+            index += 1;
+            continue;
+        };
+        candidates.push(Candidate {
+            id: format!("url-{index}"),
+            kind: CandidateKind::SpokenUrl,
+            observed,
+            proposed,
+            word_index: index,
+            confidence,
+            score: 1.0,
+            evidence: Vec::new(),
+        });
+        index = end + 1;
+    }
+    candidates
+}
+
+fn spoken_url_at(
+    transcript: &Transcript,
+    start: usize,
+) -> Option<(usize, String, String, Option<f32>)> {
+    let words = &transcript.words;
+    let first = spoken_token(&words[start].text)?;
+    if !is_url_component(first) {
+        return None;
+    }
+    if !has_url_cue(words, start, first) {
+        return None;
+    }
+    let mut components = vec![first.to_ascii_lowercase()];
+    let mut index = start + 1;
+    let mut dot_count = 0;
+    while index < words.len() {
+        let token = spoken_token(&words[index].text)?;
+        if let Some(component) = token.strip_prefix('.')
+            && is_url_component(component.trim_end_matches('.'))
+        {
+            components.push(component.trim_end_matches('.').to_ascii_lowercase());
+            dot_count += 1;
+            index += 1;
+            continue;
+        }
+        if token.eq_ignore_ascii_case("dot")
+            && index + 1 < words.len()
+            && let Some(component) = spoken_token(&words[index + 1].text)
+            && is_url_component(component.trim_end_matches('.'))
+        {
+            components.push(component.trim_end_matches('.').to_ascii_lowercase());
+            dot_count += 1;
+            index += 2;
+            continue;
+        }
+        break;
+    }
+    if dot_count == 0 || components.last().is_none_or(|part| part.len() < 2) {
+        return None;
+    }
+
+    let mut proposed = components.join(".");
+    if index < words.len() {
+        let token = spoken_token(&words[index].text)?;
+        if token.eq_ignore_ascii_case("slash") || token == "/" {
+            let slash_index = index;
+            index += 1;
+            let mut path = Vec::new();
+            loop {
+                if index >= words.len() {
+                    break;
+                }
+                let Some(token) = spoken_token(&words[index].text) else {
+                    break;
+                };
+                let component = token.trim_end_matches('.');
+                if !is_url_component(component) {
+                    break;
+                }
+                path.push(component.to_owned());
+                index += 1;
+                if index >= words.len() {
+                    break;
+                }
+                let Some(separator) = spoken_token(&words[index].text) else {
+                    break;
+                };
+                if separator.eq_ignore_ascii_case("slash") || separator == "/" {
+                    index += 1;
+                } else {
+                    break;
+                }
+            }
+            if !path.is_empty() {
+                proposed.push('/');
+                proposed.push_str(&path.join("/"));
+            } else {
+                index = slash_index;
+            }
+        }
+    }
+    let end = index.saturating_sub(1);
+    let observed = words[start..=end]
+        .iter()
+        .map(|word| word.text.trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let confidence = words[start..=end]
+        .iter()
+        .filter_map(|word| word.confidence)
+        .min_by(|left, right| left.total_cmp(right));
+    Some((end, observed, proposed, confidence))
+}
+
+fn has_url_cue(words: &[cue_core::Word], start: usize, first: &str) -> bool {
+    if first.eq_ignore_ascii_case("www") {
+        return true;
+    }
+    let previous = start
+        .checked_sub(1)
+        .and_then(|index| spoken_token(&words[index].text))
+        .map(str::to_ascii_lowercase);
+    if matches!(
+        previous.as_deref(),
+        Some("visit" | "open" | "at" | "on" | "website" | "url" | "link")
+    ) {
+        return true;
+    }
+    start >= 2
+        && spoken_token(&words[start - 2].text)
+            .is_some_and(|token| token.eq_ignore_ascii_case("go"))
+        && previous.is_some_and(|token| token.eq_ignore_ascii_case("to"))
+}
+
+fn spoken_token(value: &str) -> Option<&str> {
+    let value = value.trim_matches(|character: char| "\"'`()[]{}<>,;:!?".contains(character));
+    (!value.is_empty()).then_some(value)
+}
+
+fn is_url_component(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
 }
 
 #[derive(Debug, Clone)]

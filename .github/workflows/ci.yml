@@ -71,6 +71,7 @@ jobs:
         run: |
           python3 scripts/test_render_formula.py
           python3 scripts/test_release_contract.py
+          python3 scripts/test_grade_skill_evals.py
 
       - name: Installer mapping tests
         run: bash scripts/test_install_mapping.sh

@@ -74,6 +74,15 @@ enum ReviewDiagnostic {
         score: f32,
         evidence: Vec<crate::terminology::Evidence>,
     },
+    #[serde(rename = "CUE-REVIEW-SPOKEN-URL")]
+    SpokenUrl {
+        candidate_id: String,
+        observed: String,
+        proposed: String,
+        word_index: usize,
+        confidence: Option<f32>,
+        score: f32,
+    },
 }
 
 impl ReviewDiagnostic {
@@ -85,6 +94,7 @@ impl ReviewDiagnostic {
             Self::ScopeConflict { .. } => "CUE-REVIEW-SCOPE-CONFLICT",
             Self::AmbiguousSpeakerTurn { .. } => "CUE-REVIEW-AMBIGUOUS-SPEAKER-TURN",
             Self::TermMismatch { .. } => "CUE-REVIEW-TERM-MISMATCH",
+            Self::SpokenUrl { .. } => "CUE-REVIEW-SPOKEN-URL",
         }
     }
 
@@ -117,6 +127,14 @@ impl ReviewDiagnostic {
                 format!(
                     "possible terminology mismatch [{candidate_id}]: {observed:?} -> {proposed:?}"
                 )
+            }
+            Self::SpokenUrl {
+                candidate_id,
+                observed,
+                proposed,
+                ..
+            } => {
+                format!("possible spoken URL [{candidate_id}]: {observed:?} -> {proposed:?}")
             }
         }
     }
@@ -219,6 +237,17 @@ fn review_output(
         }
     }
 
+    for candidate in crate::terminology::find_spoken_url_candidates(&transcript) {
+        diagnostics.push(ReviewDiagnostic::SpokenUrl {
+            candidate_id: candidate.id,
+            observed: candidate.observed,
+            proposed: candidate.proposed,
+            word_index: candidate.word_index,
+            confidence: candidate.confidence,
+            score: candidate.score,
+        });
+    }
+
     if terms_enabled {
         for candidate in crate::terminology::find_candidates(
             output_dir,
@@ -226,15 +255,26 @@ fn review_output(
             confidence_below,
             context_root,
         )? {
-            diagnostics.push(ReviewDiagnostic::TermMismatch {
-                candidate_id: candidate.id,
-                observed: candidate.observed,
-                proposed: candidate.proposed,
-                word_index: candidate.word_index,
-                confidence: candidate.confidence,
-                score: candidate.score,
-                evidence: candidate.evidence,
-            });
+            let diagnostic = match candidate.kind {
+                crate::terminology::CandidateKind::Term => ReviewDiagnostic::TermMismatch {
+                    candidate_id: candidate.id,
+                    observed: candidate.observed,
+                    proposed: candidate.proposed,
+                    word_index: candidate.word_index,
+                    confidence: candidate.confidence,
+                    score: candidate.score,
+                    evidence: candidate.evidence,
+                },
+                crate::terminology::CandidateKind::SpokenUrl => ReviewDiagnostic::SpokenUrl {
+                    candidate_id: candidate.id,
+                    observed: candidate.observed,
+                    proposed: candidate.proposed,
+                    word_index: candidate.word_index,
+                    confidence: candidate.confidence,
+                    score: candidate.score,
+                },
+            };
+            diagnostics.push(diagnostic);
         }
     }
 
@@ -320,12 +360,29 @@ fn accept_candidate(
     report: &ReviewReport,
     id: &str,
 ) -> Result<AcceptedCandidate> {
-    let ReviewDiagnostic::TermMismatch { observed, proposed, candidate_id, .. } = report
+    let (observed, proposed, candidate_id, is_spoken_url) = match report
         .diagnostics
         .iter()
-        .find(|diagnostic| matches!(diagnostic, ReviewDiagnostic::TermMismatch { candidate_id, .. } if candidate_id == id))
-        .ok_or_else(|| CueError::general(format!("unknown or stale terminology candidate {id:?}")))? else {
-        unreachable!()
+        .find(|diagnostic| match diagnostic {
+            ReviewDiagnostic::TermMismatch { candidate_id, .. }
+            | ReviewDiagnostic::SpokenUrl { candidate_id, .. } => candidate_id == id,
+            _ => false,
+        })
+        .ok_or_else(|| CueError::general(format!("unknown or stale review candidate {id:?}")))?
+    {
+        ReviewDiagnostic::TermMismatch {
+            observed,
+            proposed,
+            candidate_id,
+            ..
+        } => (observed, proposed, candidate_id, false),
+        ReviewDiagnostic::SpokenUrl {
+            observed,
+            proposed,
+            candidate_id,
+            ..
+        } => (observed, proposed, candidate_id, true),
+        _ => unreachable!(),
     };
     let manifest = output_dir.join("corrections.md");
     let mut content = match std::fs::read_to_string(&manifest) {
@@ -339,23 +396,35 @@ fn accept_candidate(
         }
     };
     let find = observed.trim_end_matches(|c: char| c.is_ascii_punctuation());
-    let rule = format!("{} -> {}", find, proposed);
-    let existing = cue_core::correct::parse_manifest(&content)?;
-    if let Some(current) = existing
-        .iter()
-        .find(|current| current.old.eq_ignore_ascii_case(find))
-    {
-        if !current.new.eq_ignore_ascii_case(proposed) {
-            return Err(CueError::general(format!(
-                "corrections.md already maps {find:?} to {:?}",
-                current.new
-            )));
+    let mut finds = vec![find.to_owned()];
+    if is_spoken_url {
+        let compact = find.replace(" .", ".").replace(" /", "/");
+        if compact != find {
+            finds.push(compact);
         }
-    } else {
+    }
+    let existing = cue_core::correct::parse_manifest(&content)?;
+    let mut additions = Vec::new();
+    for find in &finds {
+        if let Some(current) = existing
+            .iter()
+            .find(|current| current.old.eq_ignore_ascii_case(find))
+        {
+            if !current.new.eq_ignore_ascii_case(proposed) {
+                return Err(CueError::general(format!(
+                    "corrections.md already maps {find:?} to {:?}",
+                    current.new
+                )));
+            }
+        } else {
+            additions.push(format!("{find} -> {proposed}"));
+        }
+    }
+    if !additions.is_empty() {
         if !content.is_empty() && !content.ends_with('\n') {
             content.push('\n');
         }
-        content.push_str(&rule);
+        content.push_str(&additions.join("\n"));
         content.push('\n');
         crate::run_contract::write_atomic(&manifest, content.as_bytes())?;
     }
@@ -412,6 +481,14 @@ mod tests {
                 confidence: Some(0.7),
                 score: 0.75,
                 evidence: Vec::new(),
+            },
+            ReviewDiagnostic::SpokenUrl {
+                candidate_id: "url-1".to_owned(),
+                observed: "Visit example dot com".to_owned(),
+                proposed: "example.com".to_owned(),
+                word_index: 1,
+                confidence: Some(0.9),
+                score: 1.0,
             },
         ];
 

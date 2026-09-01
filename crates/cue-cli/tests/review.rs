@@ -159,6 +159,221 @@ fn review_finds_code_term_typo_and_accepts_it_into_output_scope() {
 }
 
 #[test]
+fn review_finds_spoken_url_on_reserved_domain_and_accepts_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let output = root.join("lesson.cue");
+    fs::create_dir_all(&output).unwrap();
+    fs::write(
+        output.join("transcript.json"),
+        r#"{
+  "schema_version": 1, "language": "en", "duration_ms": 600,
+  "words": [
+    {"text":"Visit","start_ms":0,"end_ms":80,"confidence":0.99,"speaker":null},
+    {"text":"example","start_ms":90,"end_ms":180,"confidence":0.99,"speaker":null},
+    {"text":".com","start_ms":190,"end_ms":350,"confidence":0.99,"speaker":null},
+    {"text":"slash","start_ms":360,"end_ms":430,"confidence":0.99,"speaker":null},
+    {"text":"guide.","start_ms":440,"end_ms":600,"confidence":0.99,"speaker":null}
+  ],
+  "segments": [{"start_ms":0,"end_ms":600,"text":"Visit example .com slash guide.","word_start":0,"word_end":5}]
+}"#,
+    )
+    .unwrap();
+
+    let review = cue_command(root)
+        .args(["review", output.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        review.status.success(),
+        "{}",
+        String::from_utf8_lossy(&review.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&review.stdout).unwrap();
+    let candidate = report["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == "CUE-REVIEW-SPOKEN-URL")
+        .expect("spoken URL candidate");
+    assert_eq!(candidate["candidate_id"], "url-1");
+    assert_eq!(candidate["observed"], "example .com slash guide.");
+    assert_eq!(candidate["proposed"], "example.com/guide");
+
+    let accepted = cue_command(root)
+        .args(["review", output.to_str().unwrap(), "--accept", "url-1"])
+        .output()
+        .unwrap();
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(output.join("corrections.md")).unwrap(),
+        "example .com slash guide -> example.com/guide\nexample.com slash guide -> example.com/guide\n"
+    );
+
+    let corrected = cue_command(root)
+        .args(["correct", output.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(corrected.status.success());
+    assert_eq!(
+        fs::read_to_string(output.join("transcript.txt")).unwrap(),
+        "Visit example.com/guide.\n"
+    );
+}
+
+#[test]
+fn review_spoken_url_does_not_consume_following_sentence_words() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("lesson.cue");
+    fs::create_dir_all(&output).unwrap();
+    fs::write(
+        output.join("transcript.json"),
+        r#"{
+  "schema_version": 1, "language": "en", "duration_ms": 500,
+  "words": [
+    {"text":"Visit","start_ms":0,"end_ms":60,"confidence":0.99,"speaker":null},
+    {"text":"example","start_ms":70,"end_ms":140,"confidence":0.99,"speaker":null},
+    {"text":"dot","start_ms":150,"end_ms":220,"confidence":0.99,"speaker":null},
+    {"text":"com","start_ms":230,"end_ms":300,"confidence":0.99,"speaker":null},
+    {"text":"slash","start_ms":310,"end_ms":370,"confidence":0.99,"speaker":null},
+    {"text":"guide","start_ms":380,"end_ms":440,"confidence":0.99,"speaker":null},
+    {"text":"today","start_ms":450,"end_ms":500,"confidence":0.99,"speaker":null}
+  ],
+  "segments": [{"start_ms":0,"end_ms":500,"text":"Visit example dot com slash guide today","word_start":0,"word_end":7}]
+}"#,
+    )
+    .unwrap();
+
+    let review = cue_command(temp.path())
+        .args(["review", output.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(review.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&review.stdout).unwrap();
+    let candidate = report["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == "CUE-REVIEW-SPOKEN-URL")
+        .unwrap();
+    assert_eq!(candidate["observed"], "example dot com slash guide");
+    assert_eq!(candidate["proposed"], "example.com/guide");
+}
+
+#[test]
+fn review_preserves_case_in_spoken_url_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("lesson.cue");
+    fs::create_dir_all(&output).unwrap();
+    fs::write(
+        output.join("transcript.json"),
+        r#"{
+  "schema_version": 1, "language": "en", "duration_ms": 400,
+  "words": [
+    {"text":"Visit","start_ms":0,"end_ms":60,"confidence":0.99,"speaker":null},
+    {"text":"example","start_ms":70,"end_ms":140,"confidence":0.99,"speaker":null},
+    {"text":"dot","start_ms":150,"end_ms":220,"confidence":0.99,"speaker":null},
+    {"text":"com","start_ms":230,"end_ms":300,"confidence":0.99,"speaker":null},
+    {"text":"slash","start_ms":310,"end_ms":350,"confidence":0.99,"speaker":null},
+    {"text":"API","start_ms":360,"end_ms":380,"confidence":0.99,"speaker":null},
+    {"text":"slash","start_ms":381,"end_ms":390,"confidence":0.99,"speaker":null},
+    {"text":"v1","start_ms":391,"end_ms":400,"confidence":0.99,"speaker":null}
+  ],
+  "segments": [{"start_ms":0,"end_ms":400,"text":"Visit example dot com slash API slash v1","word_start":0,"word_end":8}]
+}"#,
+    )
+    .unwrap();
+
+    let review = cue_command(temp.path())
+        .args(["review", output.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(review.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&review.stdout).unwrap();
+    let candidate = report["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == "CUE-REVIEW-SPOKEN-URL")
+        .unwrap();
+    assert_eq!(candidate["proposed"], "example.com/API/v1");
+}
+
+#[test]
+fn review_does_not_treat_ordinary_spoken_dot_as_a_url() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("lesson.cue");
+    fs::create_dir_all(&output).unwrap();
+    fs::write(
+        output.join("transcript.json"),
+        r#"{
+  "schema_version": 1, "language": "en", "duration_ms": 300,
+  "words": [
+    {"text":"draw","start_ms":0,"end_ms":80,"confidence":0.99,"speaker":null},
+    {"text":"a","start_ms":90,"end_ms":120,"confidence":0.99,"speaker":null},
+    {"text":"dot","start_ms":130,"end_ms":180,"confidence":0.99,"speaker":null},
+    {"text":"example","start_ms":190,"end_ms":260,"confidence":0.99,"speaker":null}
+  ],
+  "segments": [{"start_ms":0,"end_ms":300,"text":"draw a dot example","word_start":0,"word_end":4}]
+}"#,
+    )
+    .unwrap();
+
+    let review = cue_command(temp.path())
+        .args(["review", output.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(review.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&review.stdout).unwrap();
+    assert!(
+        !report["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == "CUE-REVIEW-SPOKEN-URL")
+    );
+}
+
+#[test]
+fn review_no_terms_still_finds_spoken_urls() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("lesson.cue");
+    fs::create_dir_all(&output).unwrap();
+    fs::write(
+        output.join("transcript.json"),
+        r#"{
+  "schema_version": 1, "language": "en", "duration_ms": 300,
+  "words": [
+    {"text":"Visit","start_ms":0,"end_ms":60,"confidence":0.99,"speaker":null},
+    {"text":"example","start_ms":70,"end_ms":140,"confidence":0.99,"speaker":null},
+    {"text":"dot","start_ms":150,"end_ms":220,"confidence":0.99,"speaker":null},
+    {"text":"com","start_ms":230,"end_ms":300,"confidence":0.99,"speaker":null}
+  ],
+  "segments": [{"start_ms":0,"end_ms":300,"text":"Visit example dot com","word_start":0,"word_end":4}]
+}"#,
+    )
+    .unwrap();
+
+    let review = cue_command(temp.path())
+        .args(["review", output.to_str().unwrap(), "--no-terms", "--json"])
+        .output()
+        .unwrap();
+    assert!(review.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&review.stdout).unwrap();
+    assert!(
+        report["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == "CUE-REVIEW-SPOKEN-URL")
+    );
+}
+
+#[test]
 fn review_surfaces_possible_fallback_timing_and_ambiguous_speakers() {
     let temp = tempfile::tempdir().unwrap();
     let output = temp.path().join("lesson.cue");
