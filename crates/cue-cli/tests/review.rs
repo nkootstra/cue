@@ -374,6 +374,49 @@ fn review_no_terms_still_finds_spoken_urls() {
 }
 
 #[test]
+fn review_spoken_url_includes_dotted_path_suffixes() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("lesson.cue");
+    fs::create_dir_all(&output).unwrap();
+    fs::write(
+        output.join("transcript.json"),
+        r#"{
+  "schema_version": 1, "language": "en", "duration_ms": 500,
+  "words": [
+    {"text":"Visit","start_ms":0,"end_ms":60,"confidence":0.99,"speaker":null},
+    {"text":"example","start_ms":70,"end_ms":140,"confidence":0.99,"speaker":null},
+    {"text":"dot","start_ms":150,"end_ms":220,"confidence":0.99,"speaker":null},
+    {"text":"com","start_ms":230,"end_ms":300,"confidence":0.99,"speaker":null},
+    {"text":"slash","start_ms":310,"end_ms":350,"confidence":0.99,"speaker":null},
+    {"text":"Guide","start_ms":360,"end_ms":400,"confidence":0.99,"speaker":null},
+    {"text":"dot","start_ms":410,"end_ms":440,"confidence":0.99,"speaker":null},
+    {"text":"html","start_ms":450,"end_ms":500,"confidence":0.99,"speaker":null}
+  ],
+  "segments": [{"start_ms":0,"end_ms":500,"text":"Visit example dot com slash Guide dot html","word_start":0,"word_end":8}]
+}"#,
+    )
+    .unwrap();
+
+    let review = cue_command(temp.path())
+        .args(["review", output.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(review.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&review.stdout).unwrap();
+    let candidate = report["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == "CUE-REVIEW-SPOKEN-URL")
+        .unwrap();
+    assert_eq!(
+        candidate["observed"],
+        "example dot com slash Guide dot html"
+    );
+    assert_eq!(candidate["proposed"], "example.com/Guide.html");
+}
+
+#[test]
 fn review_surfaces_possible_fallback_timing_and_ambiguous_speakers() {
     let temp = tempfile::tempdir().unwrap();
     let output = temp.path().join("lesson.cue");

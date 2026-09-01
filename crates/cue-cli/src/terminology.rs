@@ -208,8 +208,40 @@ fn spoken_url_at(
                 if !is_url_component(component) {
                     break;
                 }
-                path.push(component.to_owned());
+                let mut segment = component.to_owned();
                 index += 1;
+                loop {
+                    if index >= words.len() {
+                        break;
+                    }
+                    let Some(separator) = spoken_token(&words[index].text) else {
+                        break;
+                    };
+                    if separator.eq_ignore_ascii_case("dot") {
+                        let Some(component) = words.get(index + 1).and_then(|word| {
+                            spoken_token(&word.text).map(|value| value.trim_end_matches('.'))
+                        }) else {
+                            break;
+                        };
+                        if !is_url_component(component) {
+                            break;
+                        }
+                        segment.push('.');
+                        segment.push_str(component);
+                        index += 2;
+                    } else if let Some(component) = separator.strip_prefix('.') {
+                        let component = component.trim_end_matches('.');
+                        if !is_url_component(component) {
+                            break;
+                        }
+                        segment.push('.');
+                        segment.push_str(component);
+                        index += 1;
+                    } else {
+                        break;
+                    }
+                }
+                path.push(segment);
                 if index >= words.len() {
                     break;
                 }
