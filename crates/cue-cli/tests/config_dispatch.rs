@@ -14,6 +14,22 @@ fn cue(config_dir: &Path) -> Command {
     command
 }
 
+#[test]
+fn bare_invocation_starts_with_the_version() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let output = cue(config_dir.path()).output().expect("run bare cue");
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).starts_with(concat!(
+            "cue ",
+            env!("CARGO_PKG_VERSION"),
+            "\n"
+        )),
+        "{output:?}"
+    );
+}
+
 fn empty_media(directory: &Path, name: &str) -> std::path::PathBuf {
     let path = directory.join(name);
     std::fs::write(&path, []).expect("create empty test media");

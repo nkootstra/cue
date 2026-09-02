@@ -1298,6 +1298,7 @@ fn write_render_file(path: &Path, content: impl AsRef<[u8]>) -> Result<()> {
 }
 
 fn print_usage_hint() {
+    println_line(concat!("cue ", env!("CARGO_PKG_VERSION")));
     println_line("cue processes local video and audio files or directories.");
     println_line("\nUsage:");
     println_line("    cue <path>...");
